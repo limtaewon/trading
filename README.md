@@ -104,3 +104,60 @@ bash scripts/ops/deploy_to_runtime.sh
 - 민감값은 코드 하드코딩 금지, `.env` 기반으로만 주입한다.
 - 샘플 환경 파일: `.env.example`
 - 키 교체/점검 절차: `docs/SECURITY_ROTATION_CHECKLIST.md`
+
+## 10) ClickHouse 실사용 테이블 총정리
+아래 목록은 현재 주식 런타임 코드(`scripts/trading/*`)에서 실제 참조되는 `trading` DB 테이블만 정리한 것이다.
+
+### 10-1. 주문/의사결정/리스크 감사
+| 테이블 | 역할 | 주 생성/갱신 스크립트 | 주 사용 스크립트 |
+|---|---|---|---|
+| `decision_log` | LLM 판단 원문/검증 입력 로그 저장 | `execute_gpt_orders.py`(INSERT) | `stock_rag_report_api.py` |
+| `order_log` | 주문 시도/성공/스킵 사유 감사 로그 | `execute_gpt_orders.py`(INSERT) | `stock_rag_report_api.py` |
+| `execution_pred` | 체결확률/슬리피지 추정치 기록 | `execute_gpt_orders.py`(INSERT) | 운영 감사/분석 |
+| `kill_switch_event` | kill-switch/가드레일 발동 이력 | `execute_gpt_orders.py`(INSERT) | 운영 감사/리스크 추적 |
+| `session_calendar` | 장 세션(정규/경매/NXT) 판정 기준 | 운영 기준 테이블 | `execute_gpt_orders.py` |
+
+### 10-2. 뉴스/이벤트 파이프라인
+| 테이블 | 역할 | 주 생성/갱신 스크립트 | 주 사용 스크립트 |
+|---|---|---|---|
+| `news_raw` | 원천 뉴스 원본/중간 저장소 | `collect_news.py` | `collect_news.py`, `prepare_gpt_prompt.py`, `execute_gpt_orders.py`, `trading_preflight.sh` |
+| `news` | 정제/분석 완료 뉴스 본 테이블 | `collect_news.py`, `monitor_news.py`(INSERT) | 프롬프트/브리핑/리스크 판정 전반 |
+| `news_event_frames` | 이벤트를 구조화한 프레임(근거/경로) | `collect_news.py` | `prepare_gpt_prompt.py`, `llm_relation_reasoner.py`, `refresh_interest_watchlist.py`, `send_dooray_briefing.py` |
+| `event_memory` | 이벤트 장기 메모리/회고 데이터 | `collect_news.py` | `stock_rag_report_api.py` |
+| `news_clusters` | 임베딩 기반 뉴스 클러스터 집계 | `cluster_news.py` | `prepare_gpt_prompt.py` |
+| `news_cluster_state` | 클러스터 상태(emerging/reinforcing 등) | `cluster_news.py` | `prepare_gpt_prompt.py`, `llm_relation_reasoner.py`, `stock_rag_report_api.py` |
+| `news_cluster_map` | 뉴스-클러스터 매핑 상세 | `cluster_news.py` | `stock_rag_report_api.py` |
+| `news_research` | 중요 뉴스 심층 연구 결과 저장 | `analyze_news_research.py` | 운영 분석/확장 로직 |
+
+### 10-3. 연관성/관심종목 레이어
+| 테이블 | 역할 | 주 생성/갱신 스크립트 | 주 사용 스크립트 |
+|---|---|---|---|
+| `hidden_relation_signals` | 종목 간 숨은 연관성 점수/바이어스 | 연관성 파이프라인 산출물 | `prepare_gpt_prompt.py`, `refresh_interest_watchlist.py`, `send_dooray_briefing.py`, `execute_gpt_orders.py` |
+| `hidden_relation_reasoning` | 연관성 인과체인 텍스트 추론 결과 | `llm_relation_reasoner.py`(CREATE/INSERT) | `prepare_gpt_prompt.py`, `execute_gpt_orders.py`(뷰 경유 포함) |
+| `interest_watchlist` | 점수 기반 관심종목 스냅샷 | `refresh_interest_watchlist.py` | 운영 모니터링/브리핑 |
+
+### 10-4. 시장/기술/거시 데이터
+| 테이블 | 역할 | 주 생성/갱신 스크립트 | 주 사용 스크립트 |
+|---|---|---|---|
+| `technical_signals` | 종목 기술지표(RSI/MACD/BB/score) | `technical_indicators.py` | 프롬프트/주문검증/브리핑/리포트 전반 |
+| `feature_snapshot` | 종목별 수급/보조 피처 스냅샷 | `collect_market_data.py` | `prepare_gpt_prompt.py`, `execute_gpt_orders.py`, `refresh_interest_watchlist.py` |
+| `market_regime` | 시장 레짐(추세/변동성/리스크성향) | `market_regime.py` | `prepare_gpt_prompt.py`, `execute_gpt_orders.py`, 브리핑/리포트 |
+| `market_index` | 지수 시계열(KOSPI/KOSDAQ/VIX 등) | `collect_market_data.py` | `market_regime.py`, 브리핑/리포트 |
+| `exchange_rate` | 환율 시계열(USDKRW 등) | `collect_market_data.py` | `market_regime.py`, 브리핑/리포트 |
+| `interest_rate` | 금리 시계열 | `collect_market_data.py` | `market_briefing.py` |
+| `commodity` | 원자재 시계열 | `collect_market_data.py` | `market_briefing.py`, 뉴스 분석 보조 |
+| `investor_flow` | 투자주체 수급 데이터 | 외부 수집 파이프라인/적재 | `market_briefing.py` |
+| `dart_disclosure` | DART 공시 원천/정규화 저장 | `collect_dart.py` | `prepare_gpt_prompt.py`, `technical_indicators.py` |
+
+### 10-5. 참고: 조회용 뷰(테이블 아님)
+- `v_regime`: 최신 시장 레짐 뷰
+- `v_trading_dashboard`: 종목 종합 대시보드 뷰
+- `v_stock_signals`: 종목 신호 뷰
+- `v_recent_disclosures`: 최근 공시 요약 뷰
+- `v_hidden_relation_signals`: 연관성 시그널 뷰
+- `v_hidden_relation_reasoning`: 연관성 추론 뷰
+- `v_event_memory_quality`: 이벤트 메모리 품질 뷰
+
+### 10-6. 조건부 테이블 메모
+- `execute_gpt_orders.py`는 EPS 필터를 위해 `stock_fundamentals`/`fundamentals`/`financial_metrics` 중 존재 테이블을 동적으로 조회한다.
+- 해당 테이블이 없으면 EPS 체크는 \"가용 데이터 없음\"으로 처리된다(주문은 다른 가드레일 기준으로 진행).
