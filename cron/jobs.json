@@ -1,0 +1,667 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "b7dddc89-b852-4dfb-8df1-f972a4d42950",
+      "name": "pre-market",
+      "enabled": false,
+      "createdAtMs": 1770530619473,
+      "updatedAtMs": 1771750614122,
+      "schedule": {
+        "kind": "cron",
+        "expr": "50 8 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 시작 10분 전이다. mcp-clickhouse로 오늘 수집된 뉴스를 조회해라(run_select_query: SELECT title, summary, sentiment, importance, tickers FROM trading.news WHERE published_at >= today() ORDER BY importance DESC LIMIT 20). kis-trading으로 잔고를 확인하고, 뉴스와 시장 상황을 종합해서 오늘의 매매 전략과 관심종목 리스트를 텔레그램으로 보고해라."
+      },
+      "state": {
+        "lastRunAtMs": 1771199400023,
+        "lastStatus": "ok",
+        "lastDurationMs": 69406,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "9f2e1374-19cb-42f5-b96a-86dbe2991529",
+      "name": "trading-0930",
+      "enabled": false,
+      "createdAtMs": 1770530621260,
+      "updatedAtMs": 1771750614139,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 9 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 시작 30분 경과. HEARTBEAT.md 프로토콜 전체를 수행해라. mcp-clickhouse로 최근 1시간 뉴스 확인, kis-trading으로 잔고/시세/호가 조회, 분석 후 매매 판단하고 실행까지 해라."
+      },
+      "state": {
+        "lastRunAtMs": 1770946645747,
+        "lastStatus": "ok",
+        "lastDurationMs": 12,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "1029bc7d-08eb-4c18-b80f-683203c428a0",
+      "name": "trading-1000",
+      "enabled": false,
+      "createdAtMs": 1770530623047,
+      "updatedAtMs": 1771750614149,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 10 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행. 보유종목 수익률 점검, 뉴스 확인, 필요시 매매 실행."
+      },
+      "state": {
+        "lastRunAtMs": 1770946645760,
+        "lastStatus": "ok",
+        "lastDurationMs": 0,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "99e38ac5-c4c1-4139-bb32-c3872ed33cee",
+      "name": "trading-1030",
+      "enabled": false,
+      "createdAtMs": 1770530624799,
+      "updatedAtMs": 1771750614157,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 10 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행. 보유종목 수익률 점검하고 필요시 매매 실행."
+      },
+      "state": {
+        "lastRunAtMs": 1770946645761,
+        "lastStatus": "ok",
+        "lastDurationMs": 0,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "4e229923-1122-49a4-af8e-142f5bc0dd0d",
+      "name": "trading-1100",
+      "enabled": false,
+      "createdAtMs": 1770530626545,
+      "updatedAtMs": 1771750614167,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 11 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행. mcp-clickhouse로 뉴스 변동사항 확인하고 필요시 매매 실행."
+      },
+      "state": {
+        "lastRunAtMs": 1770948001001,
+        "lastStatus": "ok",
+        "lastDurationMs": 0,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "7cfeb35d-7151-4b89-8fec-d4237fa5dd14",
+      "name": "trading-1130",
+      "enabled": false,
+      "createdAtMs": 1770530628332,
+      "updatedAtMs": 1771750614176,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 11 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행."
+      },
+      "state": {
+        "lastRunAtMs": 1770949800025,
+        "lastStatus": "ok",
+        "lastDurationMs": 17,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "d00b5e61-99aa-42f9-b131-614a34a85bb4",
+      "name": "trading-1300",
+      "enabled": false,
+      "createdAtMs": 1770530630102,
+      "updatedAtMs": 1771750614184,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 13 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "오후장 시작. HEARTBEAT.md 프로토콜대로 실행. 오전 매매 결과 점검, mcp-clickhouse로 오후 뉴스 확인, 오후 전략 재수립 후 필요시 매매 실행."
+      },
+      "state": {
+        "lastRunAtMs": 1770955200033,
+        "lastStatus": "ok",
+        "lastDurationMs": 25,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "a5337f20-cdcd-45d0-a39c-14c7a6a2bd01",
+      "name": "trading-1330",
+      "enabled": false,
+      "createdAtMs": 1770530631856,
+      "updatedAtMs": 1771750614190,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 13 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행."
+      },
+      "state": {
+        "lastRunAtMs": 1770957000030,
+        "lastStatus": "ok",
+        "lastDurationMs": 17,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "7de5c8de-a013-45b8-86ea-0a3351e13555",
+      "name": "trading-1400",
+      "enabled": false,
+      "createdAtMs": 1770530633571,
+      "updatedAtMs": 1771750614197,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 14 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행."
+      },
+      "state": {
+        "lastRunAtMs": 1770958800035,
+        "lastStatus": "ok",
+        "lastDurationMs": 12,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "30c68542-3811-4a67-bac8-688b4e2211b4",
+      "name": "trading-1430",
+      "enabled": false,
+      "createdAtMs": 1770530635365,
+      "updatedAtMs": 1771750614203,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 14 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 마감 1시간 전. HEARTBEAT.md 프로토콜대로 실행. 포지션 정리 검토."
+      },
+      "state": {
+        "lastRunAtMs": 1771034368351,
+        "lastStatus": "ok",
+        "lastDurationMs": 1,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "344b8821-7737-43fc-86c6-88946074e49c",
+      "name": "trading-1500",
+      "enabled": false,
+      "createdAtMs": 1770530637232,
+      "updatedAtMs": 1771750614210,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 마감 30분 전. HEARTBEAT.md 프로토콜대로 최종 점검. 신규 매수 금지. 보유종목 중 정리할 것 있으면 매도 실행."
+      },
+      "state": {
+        "lastRunAtMs": 1771034368357,
+        "lastStatus": "ok",
+        "lastDurationMs": 0,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "9b592aee-96f8-448c-9a04-6063b66e5264",
+      "name": "daily-report",
+      "enabled": false,
+      "createdAtMs": 1770530639368,
+      "updatedAtMs": 1771750614216,
+      "schedule": {
+        "kind": "cron",
+        "expr": "40 15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 마감. kis-trading으로 잔고 조회하고 오늘 매매 내역, 보유종목 수익률, 총자산 변동, 실현손익을 정리해서 텔레그램으로 리포트 보내라. 내일 관심종목과 전략도 간단히 정리."
+      },
+      "state": {
+        "lastRunAtMs": 1771034368358,
+        "lastStatus": "ok",
+        "lastDurationMs": 0,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "badbb630-3092-4926-bf4d-6b63d3e9711e",
+      "name": "weekly-review",
+      "enabled": false,
+      "createdAtMs": 1770530641261,
+      "updatedAtMs": 1771750614221,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 10 * * 6",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "주간 리뷰. kis-trading으로 잔고 조회, mcp-clickhouse로 이번 주 뉴스 분석. 주간 매매 내역, 수익률, 최고/최저 종목, 잘한 점과 개선점을 분석해서 텔레그램으로 보내라. 다음 주 전략도 제시."
+      },
+      "state": {
+        "lastRunAtMs": 1771034368359,
+        "lastStatus": "ok",
+        "lastDurationMs": 0,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "aa7be4b9-fdda-4379-8f7e-c6135f62537c",
+      "agentId": "main",
+      "name": "[평일] 08:50 장 전 브리핑",
+      "enabled": false,
+      "createdAtMs": 1770768728526,
+      "updatedAtMs": 1771750614226,
+      "schedule": {
+        "kind": "cron",
+        "expr": "50 8 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "지금은 평일 08:50 장 전 브리핑 시간이다. 사용자(태원 임)에게 텔레그램으로 보낼 짧은 브리핑 메시지를 작성하라.\n\n요구사항:\n- 제목: \"⏰ 08:50 장 전 브리핑(평일 고정)\"\n- 오늘(장 시작 전) 할 체크 5줄 이내 체크리스트(예: 보유종목/현금비중, 오늘 일정, 주요 리스크, 관찰 종목, 뉴스 확인)\n- '매매는 09:10 이후에만 검토' 문장을 포함\n- 데이터 조회가 없으면 일반 체크리스트 형태로만 보내고, 과장된 예측은 금지\n- 메시지는 10줄 이내로 간결하게"
+      },
+      "delivery": {
+        "mode": "announce"
+      },
+      "state": {
+        "lastRunAtMs": 1771199469429,
+        "lastStatus": "ok",
+        "lastDurationMs": 8841,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "c46b2486-8038-46b0-9690-785674202d06",
+      "agentId": "main",
+      "name": "[평일] 09:10 장중 1차 점검",
+      "enabled": false,
+      "createdAtMs": 1770768733147,
+      "updatedAtMs": 1771750614232,
+      "schedule": {
+        "kind": "cron",
+        "expr": "10 9 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "지금은 평일 09:10 이후(장 시작 10분 경과)이다. 사용자(태원 임)에게 텔레그램으로 보낼 \"장중 1차 점검\" 메시지를 작성하라.\n\n요구사항:\n- 제목: \"📍 09:10 장중 1차 점검(평일 고정)\"\n- 오늘 시장 급락/급등 시 원칙: -2% 급락이면 신규매수 보류 문장을 포함\n- 보유/관심종목을 사용자가 따로 준 정보가 없으면 '보유종목/관심종목 확인' 같은 체크리스트 형태로만\n- 과장/확정적 예측 금지\n- 10줄 이내"
+      },
+      "delivery": {
+        "mode": "announce"
+      },
+      "state": {
+        "lastRunAtMs": 1771200600030,
+        "lastStatus": "ok",
+        "lastDurationMs": 11967,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "3d602266-1670-4354-86a9-244cfbe6d7ae",
+      "name": "backtest-ci-weekly",
+      "enabled": false,
+      "createdAtMs": 1771038721000,
+      "updatedAtMs": 1771038749918,
+      "schedule": {
+        "kind": "cron",
+        "expr": "20 10 * * 6",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/run_backtest_ci.sh >> $HOME/.openclaw/logs/backtest-ci.log 2>&1"
+      },
+      "state": {
+        "lastRunAtMs": 1771038749916,
+        "lastStatus": "skipped",
+        "lastDurationMs": 2,
+        "consecutiveErrors": 0,
+        "lastError": "main job requires payload.kind=\"systemEvent\""
+      }
+    },
+    {
+      "id": "ff349293-69bd-4ba5-8bc4-ba160e321ebf",
+      "name": "adaptive-policy-refresh-hourly",
+      "enabled": false,
+      "createdAtMs": 1771039933000,
+      "updatedAtMs": 1771221900030,
+      "schedule": {
+        "kind": "cron",
+        "expr": "5 8-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/run_adaptive_learning.sh >> $HOME/.openclaw/logs/adaptive-learning.log 2>&1"
+      },
+      "state": {
+        "lastRunAtMs": 1771221900025,
+        "lastStatus": "skipped",
+        "lastDurationMs": 5,
+        "consecutiveErrors": 0,
+        "lastError": "main job requires payload.kind=\"systemEvent\""
+      }
+    },
+    {
+      "id": "2960c084-c4cb-4dd8-b67a-fb00ea7fc938",
+      "name": "news-urgent-trigger",
+      "enabled": false,
+      "createdAtMs": 1771063656000,
+      "updatedAtMs": 1771750614237,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 0 * * *",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "긴급 뉴스 트리거가 발생했다. ~/.openclaw/state/news_urgent_context.json 내용을 최우선으로 반영해 HEARTBEAT.md 프로토콜을 수행하라. 보유종목 리스크(특히 즉시 매도 필요 여부)를 우선 판단하고, 필요 시 SELL을 orders에 포함해라. 신규 매수는 과도하게 하지 말고 룰을 준수하며 확신(confidence) 높은 경우에만 제한적으로."
+      },
+      "state": {
+        "lastRunAtMs": 0,
+        "lastStatus": "pending",
+        "lastDurationMs": 0,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "8d35e5b6-948d-4e5a-86fa-c6f1c5cacf52",
+      "name": "data-news-cluster-hourly",
+      "enabled": false,
+      "createdAtMs": 1771142652089,
+      "updatedAtMs": 1771222020023,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/20 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/cluster_news.py --window-hours 240 --threshold 0.42 --limit 10000 --min-size 2 >> $HOME/.openclaw/logs/news-cluster.log 2>&1"
+      },
+      "state": {
+        "lastStatus": "skipped",
+        "consecutiveErrors": 0,
+        "lastRunAtMs": 1771222020022,
+        "lastDurationMs": 1,
+        "lastError": "main job requires payload.kind=\"systemEvent\""
+      }
+    },
+    {
+      "id": "d2f89f6e-7c4a-4b6d-a6eb-5e9f7cdd9a5f",
+      "name": "data-news-relation-reasoning-20m",
+      "enabled": false,
+      "createdAtMs": 1772000000000,
+      "updatedAtMs": 1772000000000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/20 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/llm_relation_reasoner.py --lookback-hours 72 --min-score 0.10 --top-tickers 30 --events-per-ticker 5 --states-per-ticker 3 --cache-ttl-sec 300 --timeout-sec 180 >> $HOME/.openclaw/logs/relation-reasoning.log 2>&1"
+      },
+      "state": {
+        "lastStatus": "new",
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "18d60b4d-41f3-40c6-b547-a06243df280e",
+      "name": "data-news-backfill-2025",
+      "enabled": false,
+      "createdAtMs": 1771142652089,
+      "updatedAtMs": 1771142652089,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 2 * * 0",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "command",
+        "command": "bash $HOME/.openclaw/scripts/trading/run_news_backfill_2025.sh"
+      },
+      "state": {
+        "lastStatus": "new",
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "90189093-0804-4e39-8c0e-b0faecad5ffb",
+      "agentId": "main",
+      "name": "data-news-backfill-2025-isolated",
+      "enabled": false,
+      "createdAtMs": 1771210345724,
+      "updatedAtMs": 1771223495745,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 2 * * 0",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "리마인더: 2025년 뉴스 백필 작업을 실행하라. 다음 명령을 실행하고 결과를 요약 보고하라.\n\nbash $HOME/.openclaw/scripts/trading/run_news_backfill_2025.sh\n\n실행 성공/실패, 처리 건수(가능하면), 오류 로그 경로를 간단히 보고."
+      },
+      "delivery": {
+        "mode": "announce"
+      },
+      "state": {
+        "lastRunAtMs": 1771210418451,
+        "lastStatus": "ok",
+        "lastDurationMs": 246255,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "ca407c78-954a-4191-8a3b-d0d296b6f85a",
+      "agentId": "main",
+      "name": "crypto-news-collector-30m",
+      "enabled": false,
+      "createdAtMs": 1771213550058,
+      "updatedAtMs": 1771223495675,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/30 * * * *",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "코인 뉴스 수집 작업 실행:\n1) bash ~/.openclaw/scripts/create_crypto_news_table.sh\n2) python3 ~/.openclaw/scripts/collect_coin_news.py\n3) ClickHouse crypto_research.crypto_news에서 최근 30분 추가 건수와 총 건수를 확인해 3줄 요약 보고.\n주의: 이 작업은 수집/적재만 하고 매매판단은 하지 않는다."
+      },
+      "delivery": {
+        "mode": "announce"
+      },
+      "state": {
+        "lastRunAtMs": 1771223400033,
+        "lastStatus": "ok",
+        "lastDurationMs": 40853,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "3ec7ae18-3b4c-49f5-91fc-0d12a022077f",
+      "agentId": "main",
+      "name": "dooray-briefing-hourly",
+      "enabled": false,
+      "createdAtMs": 1771550556934,
+      "updatedAtMs": 1772167428959,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9,12,15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "리마인더: 두레이 브리핑 전송(장중 1시간 주기). 명령: `set -a; source ~/.openclaw/.env.trading; set +a; python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py` . 브리핑에는 최신 저장 지수/환율, 유망주(종목코드/섹터/유망 이유), 관련 뉴스 요약, 최근 속보를 포함하고 매매 체결/잔고 데이터는 제외하라. 실패 시 에러 요약만 텔레그램으로 보고."
+      },
+      "state": {
+        "lastRunAtMs": 1772161200029,
+        "lastStatus": "ok",
+        "lastDurationMs": 29258,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "d8f20773-d9a5-4019-a77a-be4916714953",
+      "agentId": "main",
+      "name": "dooray-breaking-briefing-5m",
+      "enabled": false,
+      "createdAtMs": 1771551242052,
+      "updatedAtMs": 1771754535167,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/5 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "리마인더: 속보 트리거용 두레이 브리핑 전송을 실행하라. 명령: `set -a; source ~/.openclaw/.env.trading; set +a; python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py` . 새 중요 속보/브리핑 내용 변화가 있을 때만 두레이로 전송(중복은 스킵). 실패 시 에러 요약만 텔레그램으로 보고."
+      },
+      "state": {
+        "lastRunAtMs": 1771570500037,
+        "lastStatus": "ok",
+        "lastDurationMs": 27434,
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "e46f25e3-e25e-4e3d-9526-c5bf79fe5bc5",
+      "agentId": "main",
+      "name": "dooray-major-news-after-collect",
+      "enabled": false,
+      "createdAtMs": 1771551290514,
+      "updatedAtMs": 1771754537016,
+      "schedule": {
+        "kind": "cron",
+        "expr": "1 7,9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "리마인더: 뉴스 수집 직후 주요뉴스 브리핑 전송. 명령: `set -a; source ~/.openclaw/.env.trading; set +a; python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py` . 주요뉴스(importance 3+)와 최근 속보를 포함해 두레이로 전송하되, 중복이면 스킵."
+      },
+      "state": {}
+    },
+    {
+      "id": "61a10d92-b093-4bf8-bf0a-d68c6e85d90a",
+      "agentId": "main",
+      "name": "trading-decision-10m",
+      "enabled": false,
+      "createdAtMs": 1771812645115,
+      "updatedAtMs": 1772167428950,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/10 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "systemEvent",
+        "text": "리마인더: 장중 10분 주기 매매판단 실행. HEARTBEAT.md 프로토콜(0.5~6단계)을 엄격히 수행하라. 뉴스 감정(종목별 pos/neg) + 기술지표 + KIS 실시간(잔고/미체결/호가)을 함께 검증해 판단하고, 규칙 위반 주문은 금지한다. 실행 순서: 1) 미체결 점검(30분 초과 재평가) 2) 보유종목 리스크 점검 3) 신규 후보 선별(뉴스+기술 동시 충족만) 4) 필요시 주문 실행(SELL 우선) 5) 자기평가+뉴스 인사이트 보고. 데이터/판단/주문 결과는 사실값만 보고하고 추정 문장 금지."
+      },
+      "state": {
+        "lastRunAtMs": 1772167200034,
+        "lastStatus": "ok",
+        "lastDurationMs": 120207,
+        "consecutiveErrors": 0
+      }
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenClaw Trading Decision (Strict)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "timestamp",
+    "market_assessment",
+    "regime_action",
+    "orders",
+    "risk_targets",
+    "watch_list",
+    "portfolio_advice",
+    "self_evaluation",
+    "next_focus"
+  ],
+  "properties": {
+    "timestamp": { "type": "string" },
+    "market_assessment": { "type": "string" },
+    "regime_action": {
+      "type": "string",
+      "enum": ["aggressive", "normal", "cautious", "defensive"]
+    },
+    "orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "risk_targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "watch_list": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ticker", "ticker_name", "reason"],
+        "properties": {
+          "ticker": { "type": "string" },
+          "ticker_name": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "portfolio_advice": { "type": "string" },
+    "self_evaluation": { "type": "string" },
+    "next_focus": { "type": "string" }
+  }
+}

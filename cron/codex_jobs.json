@@ -1,0 +1,500 @@
+{
+  "version": 1,
+  "generated_by": "build_codex_jobs_manifest.py",
+  "jobs": [
+    {
+      "name": "pre-market",
+      "enabled": true,
+      "schedule": {
+        "expr": "50 8 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 시작 10분 전이다. mcp-clickhouse로 오늘 수집된 뉴스를 조회해라(run_select_query: SELECT title, summary, sentiment, importance, tickers FROM trading.news WHERE published_at >= today() ORDER BY importance DESC LIMIT 20). kis-trading으로 잔고를 확인하고, 뉴스와 시장 상황을 종합해서 오늘의 매매 전략과 관심종목 리스트를 텔레그램으로 보고해라."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-0930",
+      "enabled": true,
+      "schedule": {
+        "expr": "30 9 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 시작 30분 경과. HEARTBEAT.md 프로토콜 전체를 수행해라. mcp-clickhouse로 최근 1시간 뉴스 확인, kis-trading으로 잔고/시세/호가 조회, 분석 후 매매 판단하고 실행까지 해라."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-1000",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 10 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행. 보유종목 수익률 점검, 뉴스 확인, 필요시 매매 실행."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-1030",
+      "enabled": true,
+      "schedule": {
+        "expr": "30 10 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행. 보유종목 수익률 점검하고 필요시 매매 실행."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-1100",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 11 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행. mcp-clickhouse로 뉴스 변동사항 확인하고 필요시 매매 실행."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-1130",
+      "enabled": true,
+      "schedule": {
+        "expr": "30 11 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-1300",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 13 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "오후장 시작. HEARTBEAT.md 프로토콜대로 실행. 오전 매매 결과 점검, mcp-clickhouse로 오후 뉴스 확인, 오후 전략 재수립 후 필요시 매매 실행."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-1330",
+      "enabled": true,
+      "schedule": {
+        "expr": "30 13 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-1400",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 14 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-1430",
+      "enabled": true,
+      "schedule": {
+        "expr": "30 14 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 마감 1시간 전. HEARTBEAT.md 프로토콜대로 실행. 포지션 정리 검토."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-1500",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 마감 30분 전. HEARTBEAT.md 프로토콜대로 최종 점검. 신규 매수 금지. 보유종목 중 정리할 것 있으면 매도 실행."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "daily-report",
+      "enabled": true,
+      "schedule": {
+        "expr": "40 15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "장 마감. kis-trading으로 잔고 조회하고 오늘 매매 내역, 보유종목 수익률, 총자산 변동, 실현손익을 정리해서 텔레그램으로 리포트 보내라. 내일 관심종목과 전략도 간단히 정리."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "weekly-review",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 10 * * 6",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "주간 리뷰. kis-trading으로 잔고 조회, mcp-clickhouse로 이번 주 뉴스 분석. 주간 매매 내역, 수익률, 최고/최저 종목, 잘한 점과 개선점을 분석해서 텔레그램으로 보내라. 다음 주 전략도 제시."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "[평일] 08:50 장 전 브리핑",
+      "enabled": true,
+      "schedule": {
+        "expr": "50 8 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "agentTurn",
+        "message": "지금은 평일 08:50 장 전 브리핑 시간이다. 사용자(태원 임)에게 텔레그램으로 보낼 짧은 브리핑 메시지를 작성하라.\n\n요구사항:\n- 제목: \"⏰ 08:50 장 전 브리핑(평일 고정)\"\n- 오늘(장 시작 전) 할 체크 5줄 이내 체크리스트(예: 보유종목/현금비중, 오늘 일정, 주요 리스크, 관찰 종목, 뉴스 확인)\n- '매매는 09:10 이후에만 검토' 문장을 포함\n- 데이터 조회가 없으면 일반 체크리스트 형태로만 보내고, 과장된 예측은 금지\n- 메시지는 10줄 이내로 간결하게"
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "[평일] 09:10 장중 1차 점검",
+      "enabled": true,
+      "schedule": {
+        "expr": "10 9 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "agentTurn",
+        "message": "지금은 평일 09:10 이후(장 시작 10분 경과)이다. 사용자(태원 임)에게 텔레그램으로 보낼 \"장중 1차 점검\" 메시지를 작성하라.\n\n요구사항:\n- 제목: \"📍 09:10 장중 1차 점검(평일 고정)\"\n- 오늘 시장 급락/급등 시 원칙: -2% 급락이면 신규매수 보류 문장을 포함\n- 보유/관심종목을 사용자가 따로 준 정보가 없으면 '보유종목/관심종목 확인' 같은 체크리스트 형태로만\n- 과장/확정적 예측 금지\n- 10줄 이내"
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "backtest-ci-weekly",
+      "enabled": true,
+      "schedule": {
+        "expr": "20 10 * * 6",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/run_backtest_ci.sh >> $HOME/.openclaw/logs/backtest-ci.log 2>&1"
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "adaptive-policy-refresh-hourly",
+      "enabled": true,
+      "schedule": {
+        "expr": "5 8-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/run_adaptive_learning.sh >> $HOME/.openclaw/logs/adaptive-learning.log 2>&1"
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "news-urgent-trigger",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 0 * * *",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "긴급 뉴스 트리거가 발생했다. ~/.openclaw/state/news_urgent_context.json 내용을 최우선으로 반영해 HEARTBEAT.md 프로토콜을 수행하라. 보유종목 리스크(특히 즉시 매도 필요 여부)를 우선 판단하고, 필요 시 SELL을 orders에 포함해라. 신규 매수는 과도하게 하지 말고 룰을 준수하며 확신(confidence) 높은 경우에만 제한적으로."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "data-news-cluster-hourly",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/20 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/cluster_news.py --window-hours 240 --threshold 0.42 --limit 10000 --min-size 2 >> $HOME/.openclaw/logs/news-cluster.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-news-relation-reasoning-20m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/20 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/llm_relation_reasoner.py --lookback-hours 72 --min-score 0.10 --top-tickers 30 --events-per-ticker 5 --states-per-ticker 3 --cache-ttl-sec 300 --timeout-sec 180 >> $HOME/.openclaw/logs/relation-reasoning.log 2>&1"
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "data-news-backfill-2025",
+      "enabled": true,
+      "schedule": {
+        "expr": "30 2 * * 0",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "bash $HOME/.openclaw/scripts/trading/run_news_backfill_2025.sh"
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "data-news-backfill-2025-isolated",
+      "enabled": true,
+      "schedule": {
+        "expr": "30 2 * * 0",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "agentTurn",
+        "message": "리마인더: 2025년 뉴스 백필 작업을 실행하라. 다음 명령을 실행하고 결과를 요약 보고하라.\n\nbash $HOME/.openclaw/scripts/trading/run_news_backfill_2025.sh\n\n실행 성공/실패, 처리 건수(가능하면), 오류 로그 경로를 간단히 보고."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "crypto-news-collector-30m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/30 * * * *",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "agentTurn",
+        "message": "코인 뉴스 수집 작업 실행:\n1) bash ~/.openclaw/scripts/create_crypto_news_table.sh\n2) python3 ~/.openclaw/scripts/collect_coin_news.py\n3) ClickHouse crypto_research.crypto_news에서 최근 30분 추가 건수와 총 건수를 확인해 3줄 요약 보고.\n주의: 이 작업은 수집/적재만 하고 매매판단은 하지 않는다."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "dooray-briefing-hourly",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 9,12,15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "리마인더: 두레이 브리핑 전송(장중 1시간 주기). 명령: `set -a; source ~/.openclaw/.env.trading; set +a; python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py` . 브리핑에는 최신 저장 지수/환율, 유망주(종목코드/섹터/유망 이유), 관련 뉴스 요약, 최근 속보를 포함하고 매매 체결/잔고 데이터는 제외하라. 실패 시 에러 요약만 텔레그램으로 보고."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "dooray-breaking-briefing-5m",
+      "enabled": false,
+      "schedule": {
+        "expr": "*/5 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "리마인더: 속보 트리거용 두레이 브리핑 전송을 실행하라. 명령: `set -a; source ~/.openclaw/.env.trading; set +a; python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py` . 새 중요 속보/브리핑 내용 변화가 있을 때만 두레이로 전송(중복은 스킵). 실패 시 에러 요약만 텔레그램으로 보고."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "dooray-major-news-after-collect",
+      "enabled": false,
+      "schedule": {
+        "expr": "1 7,9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "리마인더: 뉴스 수집 직후 주요뉴스 브리핑 전송. 명령: `set -a; source ~/.openclaw/.env.trading; set +a; python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py` . 주요뉴스(importance 3+)와 최근 속보를 포함해 두레이로 전송하되, 중복이면 스킵."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "trading-decision-10m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/10 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "systemEvent",
+        "text": "리마인더: 장중 10분 주기 매매판단 실행. HEARTBEAT.md 프로토콜(0.5~6단계)을 엄격히 수행하라. 뉴스 감정(종목별 pos/neg) + 기술지표 + KIS 실시간(잔고/미체결/호가)을 함께 검증해 판단하고, 규칙 위반 주문은 금지한다. 실행 순서: 1) 미체결 점검(30분 초과 재평가) 2) 보유종목 리스크 점검 3) 신규 후보 선별(뉴스+기술 동시 충족만) 4) 필요시 주문 실행(SELL 우선) 5) 자기평가+뉴스 인사이트 보고. 데이터/판단/주문 결과는 사실값만 보고하고 추정 문장 금지."
+      },
+      "source": "openclaw-jobs"
+    },
+    {
+      "name": "data-news-morning",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 7 * * *",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-news-trading-hourly",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/15 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py trading >> $HOME/.openclaw/logs/news-collector.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-news-monitor-5m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/5 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_news.py >> $HOME/.openclaw/logs/news-monitor.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-enrich-pre-market",
+      "enabled": true,
+      "schedule": {
+        "expr": "30 7 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/trading/enrich_data.sh >> $HOME/.openclaw/logs/enrich.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-enrich-midday-quick",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 12 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/trading/enrich_data.sh --quick >> $HOME/.openclaw/logs/enrich.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-refresh-stocks-weekly",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 6 * * 1",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_stocks.py >> $HOME/.openclaw/logs/refresh_stocks.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-market-10m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/10 9-16 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_market_data.py >> $HOME/.openclaw/logs/market_data.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-morning-briefing-0800",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 8 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/morning_briefing.py >> $HOME/.openclaw/logs/briefing.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "bybit-futures-ws-private-1m",
+      "enabled": true,
+      "schedule": {
+        "expr": "* * * * *",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/bybit_futures_cron.sh ws >> $HOME/.openclaw/logs/bybit-futures-ws.log 2>&1"
+      },
+      "source": "bybit-futures-template"
+    },
+    {
+      "name": "bybit-futures-reconcile-5m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/5 * * * *",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/bybit_futures_cron.sh reconcile >> $HOME/.openclaw/logs/bybit-futures-reconcile.log 2>&1"
+      },
+      "source": "bybit-futures-template"
+    },
+    {
+      "name": "bybit-futures-decision-1m",
+      "enabled": true,
+      "schedule": {
+        "expr": "* * * * *",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/bybit_futures_cron.sh decision >> $HOME/.openclaw/logs/bybit-futures-decision.log 2>&1"
+      },
+      "source": "bybit-futures-template"
+    }
+  ]
+}
