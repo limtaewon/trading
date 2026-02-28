@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Backtest LLM Daily Decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["market_view", "decisions"],
+  "properties": {
+    "market_view": { "type": "string" },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ticker", "action", "confidence", "reason"],
+        "properties": {
+          "ticker": {
+            "type": "string",
+            "pattern": "^[0-9]{6}$"
+          },
+          "action": {
+            "type": "string",
+            "enum": ["BUY", "HOLD", "REDUCE"]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 240
+          }
+        }
+      }
+    }
+  }
+}

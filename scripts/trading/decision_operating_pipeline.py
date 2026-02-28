@@ -1238,6 +1238,7 @@ def main() -> int:
         "balanced": {"buy_threshold": 65.0, "stage2_min": 45.0, "s2_unknown_s3": 65.0, "s2_unknown_s4": 60.0},
         "neutral": {"buy_threshold": 60.0, "stage2_min": 40.0, "s2_unknown_s3": 60.0, "s2_unknown_s4": 58.0},
     }[mode]
+    prefilter_liquidity_krw = max(0.0, _to_float(os.getenv("PREFILTER_LIQUIDITY_KRW", "1000000000"), 1_000_000_000.0))
 
     stage0 = compute_stage0()
     stage1 = compute_stage1()
@@ -1294,12 +1295,18 @@ def main() -> int:
     stage5_fail_counter: Counter[str] = Counter()
     stage5_exec_zero_counter: Counter[str] = Counter()
     flow_unknown_count = 0
+    prefilter_low_liquidity_count = 0
 
     for item in tickers:
         ticker = item["ticker"]
         ticker_name = item.get("ticker_name", "")
         abs_blocks = list(run_abs_blocks)
         explain_codes: list[str] = []
+        pre_risk = maps["risk"].get(ticker, {})
+        pre_liquidity = _to_float(pre_risk.get("liquidity_krw"), 0.0)
+        if prefilter_liquidity_krw > 0 and pre_liquidity > 0 and pre_liquidity < prefilter_liquidity_krw:
+            prefilter_low_liquidity_count += 1
+            continue
 
         flow = maps["flow"].get(ticker, {})
         flow_fb = maps["flow_fallback"].get(ticker, {})
@@ -1559,10 +1566,7 @@ def main() -> int:
             stage5_score = max(0.0, stage5_score - 15.0)
             stage5_fail_codes.append("SPREAD_WIDE")
             stage5_exec_multiplier = min(stage5_exec_multiplier, 0.6)
-        if 300_000_000 <= liquidity < 500_000_000 and not (stage3_score >= 70 and stage4_score >= 65 and not stage1.hard_riskoff):
-            stage5_fail_codes.append("LOW_LIQUIDITY_CONDITIONAL")
-            stage5_exec_multiplier = 0.0
-            abs_blocks.append("LOW_LIQUIDITY_CONDITIONAL")
+        # Step5는 기본적으로 사이징 엔진: 하드 차단은 극단 저유동/초광스프레드만 적용.
         stage5_pass = stage5_exec_multiplier > 0.0
         if not stage5_pass:
             if "LOW_LIQUIDITY" not in stage5_fail_codes and "LOW_LIQUIDITY_CONDITIONAL" not in stage5_fail_codes:
@@ -1723,6 +1727,8 @@ def main() -> int:
         "stage5": {
             "fail_summary": dict(stage5_fail_counter),
             "exec_zero_summary": dict(stage5_exec_zero_counter),
+            "prefilter_liquidity_krw": prefilter_liquidity_krw,
+            "prefilter_low_liquidity_count": prefilter_low_liquidity_count,
         },
         "watchdog": {
             "no_buy_streak": no_buy_streak,
