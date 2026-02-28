@@ -661,6 +661,8 @@ class Stage2MarketResult:
     flags: list[str]
     source: str
     universe_n: int
+    shock_level: str
+    shock_abs_ratio_pct: float
     foreign_net_krw: float
     foreign_traded_krw: float
     foreign_pct: float
@@ -705,6 +707,8 @@ def compute_stage2_market_score() -> Stage2MarketResult:
             flags=["FLOW_TABLE_MISSING", "FLOW_DENOM_INVALID"],
             source="MISSING",
             universe_n=0,
+            shock_level="UNKNOWN",
+            shock_abs_ratio_pct=0.0,
             foreign_net_krw=0.0,
             foreign_traded_krw=0.0,
             foreign_pct=0.0,
@@ -758,6 +762,8 @@ GROUP BY investor_type
             flags=["FLOW_EMPTY", "FLOW_DENOM_INVALID"],
             source="UNKNOWN",
             universe_n=0,
+            shock_level="UNKNOWN",
+            shock_abs_ratio_pct=0.0,
             foreign_net_krw=0.0,
             foreign_traded_krw=0.0,
             foreign_pct=0.0,
@@ -798,10 +804,22 @@ GROUP BY investor_type
             inst_pct = pct
 
     score = 0.0
+    shock_abs = max(abs(foreign_pct), abs(inst_pct))
+    shock_level = "PASS"
+    if shock_abs > 8.0:
+        shock_level = "ALERT"
+    elif shock_abs > 3.0:
+        shock_level = "WARN"
     if valid:
         score = _score_market_flow_ratio(foreign_pct, "foreign") + _score_market_flow_ratio(inst_pct, "inst")
+        if shock_level == "WARN":
+            flags.append("FLOW_SHOCK_WARN")
+        elif shock_level == "ALERT":
+            flags.append("FLOW_SHOCK_ALERT")
+            score *= 0.6
     else:
         flags.append("FLOW_DENOM_INVALID")
+        shock_level = "UNKNOWN"
 
     return Stage2MarketResult(
         score=float(round(score, 2)),
@@ -809,6 +827,8 @@ GROUP BY investor_type
         flags=sorted(set(flags)),
         source=source,
         universe_n=universe_n,
+        shock_level=shock_level,
+        shock_abs_ratio_pct=round(shock_abs, 4),
         foreign_net_krw=foreign_net,
         foreign_traded_krw=foreign_traded,
         foreign_pct=foreign_pct,
@@ -1090,6 +1110,24 @@ def main() -> int:
     market_stage2 = compute_stage2_market_score()
     market_stage2_score = market_stage2.score
     maps = load_stage_maps()
+    # Stage2 종목 수급을 티커별로 분리하기 위해 3일 수급비율 정규화(0~1)를 선계산
+    flow_norm: dict[str, float] = {}
+    flow_values: list[tuple[str, float]] = []
+    for tk, row in maps.get("flow", {}).items():
+        f_net = _to_float(row.get("foreign_net_value_3d"), 0.0)
+        i_net = _to_float(row.get("inst_net_value_3d"), 0.0)
+        traded = _to_float(row.get("traded_value_3d"), 0.0)
+        if traded > 0:
+            flow_values.append((tk, (f_net + i_net) / traded))
+    if flow_values:
+        vals = [v for _, v in flow_values]
+        mn = min(vals)
+        mx = max(vals)
+        for tk, v in flow_values:
+            if mx > mn:
+                flow_norm[tk] = _clamp((v - mn) / (mx - mn), 0.0, 1.0)
+            else:
+                flow_norm[tk] = 0.5
     tickers = load_universe(args.universe, args.limit)
 
     if not tickers:
@@ -1110,6 +1148,8 @@ def main() -> int:
         run_abs_blocks.append("HARD_RISK_OFF")
     if not market_stage2.valid:
         run_abs_blocks.append("FLOW_DENOM_INVALID")
+    if market_stage2.shock_level == "ALERT":
+        run_abs_blocks.append("FLOW_SHOCK_ALERT")
 
     candidates: list[dict[str, Any]] = []
     s2_scores: list[float] = []
@@ -1118,6 +1158,7 @@ def main() -> int:
     s5_scores: list[float] = []
     total_scores: list[float] = []
     stage5_fail_counter: Counter[str] = Counter()
+    stage5_exec_zero_counter: Counter[str] = Counter()
 
     for item in tickers:
         ticker = item["ticker"]
@@ -1134,21 +1175,30 @@ def main() -> int:
         foreign_pos_days = _to_int(flow.get("foreign_pos_days"), 0)
         inst_pos_days = _to_int(flow.get("inst_pos_days"), 0)
         flow_persistence = max(foreign_pos_days, inst_pos_days)
-        if flow_persistence >= 3:
-            persist_score = 15.0
-        elif flow_persistence == 2:
-            persist_score = 8.0
-        elif flow_persistence == 1:
-            persist_score = 3.0
+        s2_stock = 0.0
+        if traded <= 0:
+            explain_codes.append("STOCK_FLOW_MISSING")
         else:
-            persist_score = 0.0
+            net_ratio_3d = (foreign_net + inst_net) / traded
+            norm_ratio = _to_float(flow_norm.get(ticker), 0.0)
+            persistence = _clamp((foreign_pos_days + inst_pos_days) / 3.0, 0.0, 1.0)
+            # 0~40: net_ratio + persistence + cross-sectional normalization
+            s2_stock = _clamp(50.0 * net_ratio_3d + 10.0 * persistence + 20.0 * norm_ratio, 0.0, 40.0)
 
-        s2_stock = _score_stock_flow_ratio(foreign_pct, "foreign") + _score_stock_flow_ratio(inst_pct, "inst") + persist_score
         stage2_score = _clamp(market_stage2_score + s2_stock, 0, 100)
         distribution_block = foreign_pct <= -6.0 and inst_pct <= -3.0
-        stage2_pass = market_stage2.valid and stage2_score >= 55 and not distribution_block
+        stage2_pass = (
+            market_stage2.valid
+            and market_stage2.shock_level != "ALERT"
+            and stage2_score >= 55
+            and not distribution_block
+        )
         if not market_stage2.valid:
             explain_codes.append("FLOW_DENOM_INVALID")
+        if market_stage2.shock_level == "WARN":
+            explain_codes.append("FLOW_SHOCK_WARN")
+        if market_stage2.shock_level == "ALERT":
+            explain_codes.append("FLOW_SHOCK_ALERT")
         if distribution_block:
             abs_blocks.append("FLOW_DISTRIBUTION_BLOCK")
         if foreign_pct >= 2.0:
@@ -1269,12 +1319,16 @@ def main() -> int:
             explain_codes.append("LIQUIDITY_OK")
         if stage5_fail_codes:
             stage5_fail_counter.update(stage5_fail_codes)
+            if stage5_exec_multiplier <= 0.0:
+                stage5_exec_zero_counter.update(stage5_fail_codes)
 
         penalty = 0.0
         if redflag:
             penalty += 30.0
         if distribution_block:
             penalty += 15.0
+        if market_stage2.shock_level == "ALERT":
+            penalty += 10.0
         if rsi > 70:
             penalty += 10.0
 
@@ -1342,10 +1396,14 @@ def main() -> int:
 
     stage_debug = {
         "stage2": {
+            "market_score": round(market_stage2.score, 2),
             "valid": market_stage2.valid,
             "flags": market_stage2.flags,
             "source": market_stage2.source,
             "universe_n": market_stage2.universe_n,
+            "shock_level": market_stage2.shock_level,
+            "shock_abs_ratio_pct": market_stage2.shock_abs_ratio_pct,
+            "shock_threshold_pct": {"pass_max": 3.0, "warn_max": 8.0},
             "foreign_net_krw_5d": round(market_stage2.foreign_net_krw, 2),
             "foreign_traded_krw_5d": round(market_stage2.foreign_traded_krw, 2),
             "foreign_net_pct_turnover_5d": round(market_stage2.foreign_pct, 4),
@@ -1355,6 +1413,7 @@ def main() -> int:
         },
         "stage5": {
             "fail_summary": dict(stage5_fail_counter),
+            "exec_zero_summary": dict(stage5_exec_zero_counter),
         },
     }
 
