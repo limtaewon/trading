@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "News Analysis Batch Response",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "idx",
+      "relevant",
+      "importance",
+      "sentiment",
+      "impact_type",
+      "companies",
+      "tickers",
+      "summary",
+      "event_type",
+      "event_subtype",
+      "time_horizon",
+      "lag_hours",
+      "channels",
+      "entities",
+      "evidence",
+      "thesis_path",
+      "invalidation",
+      "analysis_confidence"
+    ],
+    "properties": {
+      "idx": { "type": "integer", "minimum": 1 },
+      "relevant": { "type": "boolean" },
+      "importance": { "type": "integer", "minimum": 1, "maximum": 5 },
+      "sentiment": { "type": "string", "enum": ["positive", "negative", "neutral"] },
+      "impact_type": { "type": "string", "enum": ["market", "sector", "stock", "macro"] },
+      "companies": {
+        "type": "array",
+        "items": { "type": "string", "maxLength": 80 }
+      },
+      "tickers": {
+        "type": "array",
+        "items": { "type": "string", "pattern": "^[0-9]{6}$" }
+      },
+      "summary": { "type": "string", "minLength": 1, "maxLength": 80 },
+      "event_type": {
+        "type": "string",
+        "enum": [
+          "earnings",
+          "guidance",
+          "policy",
+          "regulation",
+          "mna",
+          "supply_chain",
+          "rate_fx",
+          "commodity",
+          "geopolitical",
+          "litigation",
+          "product",
+          "incident",
+          "buyback_dividend",
+          "capital_raise",
+          "insider",
+          "macro_data",
+          "index_flow",
+          "other"
+        ]
+      },
+      "event_subtype": { "type": "string", "maxLength": 80 },
+      "event_signature": { "type": "string", "maxLength": 80 },
+      "time_horizon": { "type": "string", "enum": ["intraday", "1d", "1-3d", "1w", "1-2w", "2w+"] },
+      "lag_hours": { "type": "integer", "minimum": 0, "maximum": 336 },
+      "channels": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "revenue",
+            "cost",
+            "margin",
+            "demand",
+            "supply",
+            "liquidity",
+            "valuation",
+            "policy",
+            "fx",
+            "commodity",
+            "rate",
+            "risk",
+            "sentiment",
+            "other"
+          ]
+        }
+      },
+      "entities": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "role", "ticker", "confidence"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "role": {
+              "type": "string",
+              "enum": ["issuer", "supplier", "customer", "competitor", "regulator", "macro", "asset", "related"]
+            },
+            "ticker": { "type": "string", "pattern": "^([0-9]{6})?$" },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      },
+      "evidence": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["quote", "url", "source"],
+          "properties": {
+            "quote": { "type": "string", "maxLength": 300 },
+            "url": { "type": "string", "maxLength": 500 },
+            "source": { "type": "string", "enum": ["news"] }
+          }
+        }
+      },
+      "thesis_path": { "type": "string", "maxLength": 260 },
+      "invalidation": { "type": "string", "maxLength": 260 },
+      "analysis_confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+    }
+  }
+}

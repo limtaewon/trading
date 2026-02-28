@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Breaking News Classification Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "is_breaking",
+    "importance",
+    "sentiment",
+    "impact_type",
+    "tickers",
+    "summary",
+    "urgency"
+  ],
+  "properties": {
+    "is_breaking": { "type": "boolean" },
+    "importance": { "type": "integer", "minimum": 1, "maximum": 5 },
+    "sentiment": { "type": "string", "enum": ["positive", "negative", "neutral"] },
+    "impact_type": { "type": "string", "enum": ["market", "sector", "stock", "macro"] },
+    "tickers": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[0-9]{6}$" }
+    },
+    "summary": { "type": "string", "maxLength": 60 },
+    "urgency": { "type": "string", "maxLength": 180 }
+  }
+}

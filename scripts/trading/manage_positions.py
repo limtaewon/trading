@@ -62,6 +62,7 @@ CH_MAX_THREADS = max(1, int(os.getenv("CH_MAX_THREADS", "2")))
 
 POSITION_MANAGER_ENABLED = os.getenv("POSITION_MANAGER_ENABLED", "1") == "1"
 POSITION_MANAGER_ALLOW_ADD = os.getenv("POSITION_MANAGER_ALLOW_ADD", "0") == "1"
+POSITION_MANAGER_BLOCK_REENTRY_SAME_DAY = os.getenv("POSITION_MANAGER_BLOCK_REENTRY_SAME_DAY", "1") == "1"
 POSITION_MANAGER_MAX_ACTIONS = max(1, int(os.getenv("POSITION_MANAGER_MAX_ACTIONS", "3")))
 POSITION_MANAGER_COOLDOWN_MIN = max(5, int(os.getenv("POSITION_MANAGER_COOLDOWN_MIN", "45")))
 POSITION_MANAGER_DAILY_ACTION_LIMIT = max(1, int(os.getenv("POSITION_MANAGER_DAILY_ACTION_LIMIT", "2")))
@@ -706,6 +707,7 @@ def build_llm_prompt(
     regime: dict[str, Any],
     dynamic_exits: dict[str, dict[str, Any]],
     max_actions: int,
+    allow_add: bool,
     event_block: str,
     engine_context: str,
     persistent_memory: str,
@@ -781,6 +783,11 @@ def build_llm_prompt(
     policy = {
         "max_non_hold_actions": int(max_actions),
         "allowed_actions": sorted(VALID_ACTIONS),
+        "allow_add": bool(allow_add),
+        "min_confidence": round(POSITION_MANAGER_MIN_CONF, 4),
+        "cooldown_min": int(POSITION_MANAGER_COOLDOWN_MIN),
+        "daily_action_limit_per_ticker": int(POSITION_MANAGER_DAILY_ACTION_LIMIT),
+        "block_reentry_same_day_after_exit": bool(POSITION_MANAGER_BLOCK_REENTRY_SAME_DAY),
         "do_not_overtrade": True,
         "flip_flop_forbidden": True,
         "prefer_risk_reduction_when_uncertain": True,
@@ -798,7 +805,11 @@ def build_llm_prompt(
         "2) 근거 없이 잦은 방향 전환 금지\n"
         "3) 액션 이유는 반드시 데이터 근거(뉴스/기술/수급/레짐)로 설명\n"
         "4) size_change_pct는 포지션 대비 변화 비율\n"
-        "5) JSON 스키마를 정확히 준수\n\n"
+        "5) evidence_refs는 반드시 입력 데이터에서 관측 가능한 근거만 사용(가짜 근거 생성 금지)\n"
+        "6) allow_add=false면 ADD 제안 금지, EXIT 후 당일 재진입(ADD) 금지\n"
+        "7) cooldown/daily_action_limit을 우선 고려하고 필요 시 NO_ACTION_REVIEW_LATER 사용\n"
+        "8) take_profit_pct는 양수, stop_loss_pct는 음수로 유지\n"
+        "9) JSON 스키마를 정확히 준수\n\n"
         f"[ENGINE_CONTEXT]\n{engine_context}\n\n"
         f"[SYSTEM_EVENT]\n{event_block}\n\n"
         f"[PERSISTENT_MEMORY]\n{persistent_memory}\n\n"
@@ -1005,6 +1016,26 @@ def normalize_action_plans(
             block_codes.append("DAILY_ACTION_LIMIT")
             action = "HOLD"
 
+        last_action = str(ps.get("last_action", "") or "").strip().upper()
+        last_action_at = str(ps.get("last_action_at", "") or "").strip()
+        if (
+            POSITION_MANAGER_BLOCK_REENTRY_SAME_DAY
+            and action == "ADD"
+            and last_action == "EXIT"
+            and last_action_at
+        ):
+            last_action_date = ""
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    last_dt = datetime.strptime(last_action_at[:19], fmt)
+                    last_action_date = last_dt.strftime("%Y-%m-%d")
+                    break
+                except Exception:
+                    continue
+            if last_action_date == today:
+                block_codes.append("NO_REENTRY_SAME_DAY")
+                action = "HOLD"
+
         if action == "EXIT":
             size = -1.0
         elif action in {"REDUCE", "TAKE_PROFIT_PARTIAL"}:
@@ -1086,6 +1117,7 @@ def build_orders_and_targets(
     plans: list[ActionPlan],
     contexts: list[PositionContext],
     cash_krw: float,
+    allow_add: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     ctx_map = {c.holding.ticker: c for c in contexts}
     orders: list[dict[str, Any]] = []
@@ -1110,7 +1142,7 @@ def build_orders_and_targets(
             ratio = abs(p.size_change_pct) if abs(p.size_change_pct) > 0 else (0.35 if p.action == "REDUCE" else 0.40)
             qty = max(POSITION_MANAGER_MIN_ORDER_QTY, int(round(hold.qty * ratio)))
             qty = min(qty, hold.qty)
-        elif p.action == "ADD" and POSITION_MANAGER_ALLOW_ADD:
+        elif p.action == "ADD" and allow_add:
             order_action = "BUY"
             ratio = max(0.05, p.size_change_pct if p.size_change_pct > 0 else 0.2)
             if price_ref > 0:
@@ -1510,6 +1542,7 @@ def main() -> int:
             regime=regime,
             dynamic_exits=dynamic_exits,
             max_actions=max_actions,
+            allow_add=allow_add,
             event_block=event_block,
             engine_context=engine_context,
             persistent_memory=persistent_memory,
@@ -1547,6 +1580,7 @@ def main() -> int:
         plans=plans,
         contexts=contexts,
         cash_krw=cash_krw,
+        allow_add=allow_add,
     )
 
     market_line = format_regime_line(regime)

@@ -48,3 +48,5 @@
 - schema_decision_operating.sql
 - trading_response_schema.json
 - position_manager_response_schema.json
+- news_analysis_response_schema.json
+- breaking_news_response_schema.json

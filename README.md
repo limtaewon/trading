@@ -38,6 +38,7 @@
 - 주문 JSON을 파싱 후 규칙 검증(신뢰도/리스크/데이터 신선도/계좌 상태)을 수행한다.
 - 하드 스탑로스, 하드 테이크프로핏, 포지션/현금/일일 주문 제한 등 강제 가드레일을 적용한다.
 - 검증 통과 주문만 KIS MCP로 실행하고 실행 이력을 상태 파일에 남긴다.
+- 주문 입력 스키마(`trading_response_schema.json`)는 strict 모드로 관리한다.
 
 ### 2-5. `manage_positions.py`
 - 보유종목만 대상으로 LLM 기반 동적 관리 판단(HOLD/REDUCE/EXIT/ADD/TIGHTEN_STOP/TAKE_PROFIT_PARTIAL)을 수행한다.
@@ -51,6 +52,7 @@
 - Naver 뉴스 수집 -> 중복 제거(L1 URL, L2 임베딩, L3 relevant 필터) -> LLM 분석 -> ClickHouse 적재.
 - `morning`, `trading`, `backfill` 흐름을 지원한다.
 - LLM 장애 시에도 파이프라인이 멈추지 않도록 보수적 fallback 레코드를 적재한다.
+- LLM 출력은 `news_analysis_response_schema.json`으로 스키마 강제한다.
 - 분석/임베딩 결과를 `trading.news`, `trading.news_event_frames`, `trading.event_memory`에 기록한다.
 
 ### 3-2. `monitor_news.py`
@@ -58,6 +60,7 @@
 - 보유종목 연관 중요뉴스가 감지되면 `news-urgent-trigger` 잡을 즉시 실행한다.
 - 긴급 컨텍스트 파일(`~/.openclaw/state/news_urgent_context.json`)을 저장한다.
 - 필요 시 두레이 브리핑 전송 스크립트를 백그라운드로 호출한다.
+- 속보 판별 LLM 출력은 `breaking_news_response_schema.json`으로 스키마 강제한다.
 
 ### 3-3. 후속 해석/연관 분석
 - `cluster_news.py`: 뉴스 클러스터링
