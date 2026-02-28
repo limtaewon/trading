@@ -11,16 +11,18 @@
 #   bash ~/.openclaw/scripts/trading/codex_brain.sh
 #
 # 출력:
-#   /tmp/gpt_prompt.txt    — 생성된 프롬프트
-#   /tmp/gpt_response.json — GPT 응답 (JSON)
+#   /tmp/gpt_prompt*.txt    — 생성된 프롬프트
+#   /tmp/gpt_response*.json — GPT 응답 (JSON)
 #   exit code 0 = 성공, 1 = 실패 (fallback 필요)
 
 set -euo pipefail
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────────
 SCRIPTS_DIR="$HOME/.openclaw/scripts/trading"
-PROMPT_FILE="/tmp/gpt_prompt.txt"
-RESPONSE_FILE="/tmp/gpt_response.json"
+DEFAULT_PROMPT_FILE="/tmp/gpt_prompt.txt"
+DEFAULT_RESPONSE_FILE="/tmp/gpt_response.json"
+PROMPT_FILE="${OPENCLAW_PROMPT_FILE:-$DEFAULT_PROMPT_FILE}"
+RESPONSE_FILE="${OPENCLAW_RESPONSE_FILE:-$DEFAULT_RESPONSE_FILE}"
 SCHEMA_FILE="$SCRIPTS_DIR/trading_response_schema.json"
 LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-openclaw}}"
 CODEX_BIN="${CODEX_BIN:-openclaw}"
@@ -54,6 +56,7 @@ export PATH="/opt/homebrew/bin:$HOME/.npm-global/bin:$HOME/.openclaw/bin:/usr/lo
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.openclaw/workspace/.cache}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$XDG_CACHE_HOME/uv}"
 mkdir -p "$UV_CACHE_DIR"
+mkdir -p "$(dirname "$PROMPT_FILE")" "$(dirname "$RESPONSE_FILE")"
 
 # ── 로깅 ────────────────────────────────────────────────────────────────────
 log() { echo "[$(date '+%H:%M:%S')] $*" >&2; }

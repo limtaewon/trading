@@ -145,18 +145,27 @@ EVENT_TEXT="$(
 
 START_EPOCH="$(date +%s)"
 START_TS="$(ts_now)"
+SAFE_JOB_NAME="$(printf '%s' "$JOB_NAME" | tr -c 'A-Za-z0-9_.-' '_')"
+RUN_ID="${SAFE_JOB_NAME}_${START_EPOCH}_$$"
+RUN_PROMPT_FILE="/tmp/gpt_prompt_${RUN_ID}.txt"
+RUN_RESPONSE_FILE="/tmp/gpt_response_${RUN_ID}.json"
+export OPENCLAW_PROMPT_FILE="$RUN_PROMPT_FILE"
+export OPENCLAW_RESPONSE_FILE="$RUN_RESPONSE_FILE"
 
 jq -nc \
     --arg ts "$START_TS" \
     --arg event "start" \
     --arg job_name "$JOB_NAME" \
+    --arg run_id "$RUN_ID" \
     --arg payload_kind "$PAYLOAD_KIND" \
     --arg schedule "$SCHEDULE_EXPR" \
+    --arg prompt_file "$RUN_PROMPT_FILE" \
+    --arg response_file "$RUN_RESPONSE_FILE" \
     --arg event_text "$EVENT_TEXT" \
-    '{timestamp:$ts,event:$event,job_name:$job_name,payload_kind:$payload_kind,schedule:$schedule,event_text:$event_text}' \
+    '{timestamp:$ts,event:$event,job_name:$job_name,run_id:$run_id,payload_kind:$payload_kind,schedule:$schedule,prompt_file:$prompt_file,response_file:$response_file,event_text:$event_text}' \
     >> "$JOURNAL_FILE"
 
-log "START kind=$PAYLOAD_KIND schedule='$SCHEDULE_EXPR'"
+log "START kind=$PAYLOAD_KIND schedule='$SCHEDULE_EXPR' run_id=$RUN_ID response_file=$RUN_RESPONSE_FILE"
 
 STATUS="ok"
 ERROR_MSG=""
@@ -277,7 +286,7 @@ fi
 
 # systemEvent는 Codex 응답 주문을 직접 실행한다.
 if [[ "$STATUS" == "ok" && "$PAYLOAD_KIND" == "systemEvent" && "$JOB_NAME" != coin-* ]]; then
-    if ! python3 "$ORDER_EXEC" --response /tmp/gpt_response.json >> "$LOG_FILE" 2>&1; then
+    if ! python3 "$ORDER_EXEC" --response "$RUN_RESPONSE_FILE" >> "$LOG_FILE" 2>&1; then
         STATUS="error"
         ERROR_MSG="order execution stage failed"
     fi
@@ -296,11 +305,13 @@ jq -nc \
     --arg ts "$END_TS" \
     --arg event "finish" \
     --arg job_name "$JOB_NAME" \
+    --arg run_id "$RUN_ID" \
     --arg payload_kind "$PAYLOAD_KIND" \
     --arg status "$STATUS" \
+    --arg response_file "$RUN_RESPONSE_FILE" \
     --arg error "$ERROR_MSG" \
     --argjson duration_sec "$DURATION" \
-    '{timestamp:$ts,event:$event,job_name:$job_name,payload_kind:$payload_kind,status:$status,error:$error,duration_sec:$duration_sec}' \
+    '{timestamp:$ts,event:$event,job_name:$job_name,run_id:$run_id,payload_kind:$payload_kind,status:$status,response_file:$response_file,error:$error,duration_sec:$duration_sec}' \
     >> "$JOURNAL_FILE"
 
 if [[ "$STATUS" != "ok" ]]; then
