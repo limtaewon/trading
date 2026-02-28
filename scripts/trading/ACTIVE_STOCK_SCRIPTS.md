@@ -35,6 +35,7 @@
 - market_realtime.py
 - send_dooray_briefing.py
 - stock_rag_report_api.py
+- prompt_sanity_check.py
 
 ## Backfill / schemas
 - run_news_backfill_2025.sh

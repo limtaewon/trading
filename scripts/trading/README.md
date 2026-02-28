@@ -15,6 +15,8 @@
 - 브리핑 파이프라인:
   send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
   (decision_run / decision_candidate 기반)
+- 프롬프트 무결성 점검:
+  prompt_sanity_check.py (메인/포지션 프롬프트 섹션/금지문구 자동 검사)
 
 정리 정책:
 - 불필요 백업 파일(*.bak) 삭제

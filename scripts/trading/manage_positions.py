@@ -41,6 +41,9 @@ POSITION_STATE_FILE = STATE_ROOT / "position_manager_state.json"
 POSITION_REVIEW_DIR = STATE_ROOT / "position_manager" / "reviews"
 POSITION_LATEST_FILE = STATE_ROOT / "position_manager" / "latest_review.json"
 DYNAMIC_EXIT_STATE_FILE = STATE_ROOT / "stock_dynamic_exits.json"
+PERSISTENT_MEMORY_PATH = HOME / ".openclaw" / "workspace" / "CODEX_PERSISTENT_MEMORY.md"
+HEARTBEAT_PATH = HOME / ".openclaw" / "workspace" / "HEARTBEAT.md"
+SOUL_PATH = HOME / ".openclaw" / "workspace" / "SOUL.md"
 DEFAULT_RESPONSE_PATH = "/tmp/position_manager_response.json"
 POSITION_SCHEMA_FILE = SCRIPT_DIR / "position_manager_response_schema.json"
 ORDER_EXEC_SCRIPT = SCRIPT_DIR / "execute_gpt_orders.py"
@@ -177,6 +180,18 @@ def normalize_text(s: Any, max_len: int = 280) -> str:
     if len(txt) > max_len:
         txt = txt[:max_len]
     return txt
+
+
+def read_text_file(path: Path, max_chars: int = 12000) -> str:
+    try:
+        if not path.exists():
+            return ""
+        txt = path.read_text(encoding="utf-8")
+        if len(txt) > max_chars:
+            txt = txt[:max_chars]
+        return txt.strip()
+    except Exception:
+        return ""
 
 
 def normalize_text_list(v: Any, max_items: int = 6, max_len: int = 160) -> list[str]:
@@ -691,6 +706,11 @@ def build_llm_prompt(
     regime: dict[str, Any],
     dynamic_exits: dict[str, dict[str, Any]],
     max_actions: int,
+    event_block: str,
+    engine_context: str,
+    persistent_memory: str,
+    heartbeat_text: str,
+    soul_text: str,
 ) -> str:
     slim_positions: list[dict[str, Any]] = []
     for c in contexts:
@@ -779,6 +799,11 @@ def build_llm_prompt(
         "3) 액션 이유는 반드시 데이터 근거(뉴스/기술/수급/레짐)로 설명\n"
         "4) size_change_pct는 포지션 대비 변화 비율\n"
         "5) JSON 스키마를 정확히 준수\n\n"
+        f"[ENGINE_CONTEXT]\n{engine_context}\n\n"
+        f"[SYSTEM_EVENT]\n{event_block}\n\n"
+        f"[PERSISTENT_MEMORY]\n{persistent_memory}\n\n"
+        f"[HEARTBEAT]\n{heartbeat_text}\n\n"
+        f"[SOUL]\n{soul_text}\n\n"
         f"[REVIEW_ID]\n{review_id}\n\n"
         f"[MARKET_REGIME]\n{json.dumps(regime, ensure_ascii=False)}\n\n"
         f"[POLICY]\n{json.dumps(policy, ensure_ascii=False)}\n\n"
@@ -1397,6 +1422,7 @@ def main() -> int:
     ap.add_argument("--execute", action="store_true", help="execute orders via execute_gpt_orders.py")
     ap.add_argument("--dry-run", action="store_true", help="forward --dry-run to executor")
     ap.add_argument("--skip-llm", action="store_true", help="use fallback policy only")
+    ap.add_argument("--dump-prompt", default="", help="write built position-manager prompt to this path")
     ap.add_argument("--max-actions", type=int, default=POSITION_MANAGER_MAX_ACTIONS)
     ap.add_argument("--news-hours", type=int, default=POSITION_MANAGER_NEWS_WINDOW_HOURS)
     ap.add_argument("--allow-add", action="store_true", help="allow ADD action for this run")
@@ -1412,11 +1438,44 @@ def main() -> int:
         do_execute = True
 
     review_id = str(uuid.uuid4())
+    trigger_source = "none"
+    system_event = os.getenv("OPENCLAW_SYSTEM_EVENT", "").strip()
+    if system_event:
+        trigger_source = "openclaw_system_event"
+    if not system_event:
+        system_event = os.getenv("SYSTEM_EVENT_TEXT", "").strip()
+        if system_event:
+            trigger_source = "system_event_text"
+    if not system_event:
+        system_event = os.getenv("MACOS_SYSTEM_EVENT", "").strip()
+        if system_event:
+            trigger_source = "macos_system_event"
+    event_name = (
+        os.getenv("OPENCLAW_EVENT_NAME", "").strip()
+        or os.getenv("CRON_JOB_NAME", "").strip()
+        or os.getenv("JOB_NAME", "").strip()
+    )
+    event_block = f"[{event_name or 'external-trigger'}]\\n{system_event}" if system_event else "(없음: 정기 실행)"
+    engine_context = (
+        f"engine=macOS cron router + Python pipeline | trigger_source={trigger_source} "
+        f"| event_name={event_name or '-'} | system_event_present={'yes' if system_event else 'no'}"
+    )
+
+    persistent_memory = read_text_file(PERSISTENT_MEMORY_PATH, max_chars=10000)
+    heartbeat_text = read_text_file(HEARTBEAT_PATH, max_chars=10000)
+    soul_text = read_text_file(SOUL_PATH, max_chars=10000)
+    if not persistent_memory:
+        persistent_memory = "영구 메모리 없음. 하드룰과 데이터 기반 판단을 유지할 것."
+    if not heartbeat_text:
+        heartbeat_text = "HEARTBEAT.md 로드 실패"
+    if not soul_text:
+        soul_text = "SOUL.md 로드 실패"
 
     bal_raw, bal_summary, holdings_rows = load_balance()
     _ = bal_raw
     holdings = parse_holdings(holdings_rows)
-    if not holdings:
+    dump_prompt_path = str(args.dump_prompt or "").strip()
+    if not holdings and not dump_prompt_path:
         print(json.dumps({"status": "ok", "review_id": review_id, "reason": "no_holdings"}, ensure_ascii=False))
         return 0
 
@@ -1443,15 +1502,30 @@ def main() -> int:
 
     llm_obj: dict[str, Any] | None = None
     llm_status = "fallback"
-    if not args.skip_llm:
+    prompt_for_llm = ""
+    if (not args.skip_llm) or dump_prompt_path:
         prompt = build_llm_prompt(
             review_id=review_id,
             contexts=contexts,
             regime=regime,
             dynamic_exits=dynamic_exits,
             max_actions=max_actions,
+            event_block=event_block,
+            engine_context=engine_context,
+            persistent_memory=persistent_memory,
+            heartbeat_text=heartbeat_text,
+            soul_text=soul_text,
         )
-        llm_obj, llm_status = run_llm_review(prompt)
+        prompt_for_llm = prompt
+        if dump_prompt_path:
+            dump_path = Path(dump_prompt_path)
+            dump_path.parent.mkdir(parents=True, exist_ok=True)
+            dump_path.write_text(prompt, encoding="utf-8")
+    if not args.skip_llm:
+        if not prompt_for_llm:
+            llm_status = "prompt_missing_fallback"
+        else:
+            llm_obj, llm_status = run_llm_review(prompt_for_llm)
 
     raw_items = parse_action_items(llm_obj or {}, contexts) if llm_obj else []
     if not raw_items:

@@ -1029,8 +1029,24 @@ def build_prompt() -> str:
     """전체 프롬프트를 조립하여 문자열로 반환."""
     now = datetime.now()
     current_time = now.strftime("%Y-%m-%d %H:%M:%S KST")
+    trigger_source = "none"
     system_event = os.getenv("OPENCLAW_SYSTEM_EVENT", "").strip()
-    event_name = os.getenv("OPENCLAW_EVENT_NAME", "").strip()
+    if system_event:
+        trigger_source = "openclaw_system_event"
+    if not system_event:
+        system_event = os.getenv("SYSTEM_EVENT_TEXT", "").strip()
+        if system_event:
+            trigger_source = "system_event_text"
+    if not system_event:
+        system_event = os.getenv("MACOS_SYSTEM_EVENT", "").strip()
+        if system_event:
+            trigger_source = "macos_system_event"
+
+    event_name = (
+        os.getenv("OPENCLAW_EVENT_NAME", "").strip()
+        or os.getenv("CRON_JOB_NAME", "").strip()
+        or os.getenv("JOB_NAME", "").strip()
+    )
     persistent_memory = read_text_file(PERSISTENT_MEMORY_PATH, max_chars=12000)
     heartbeat_text = read_text_file(HEARTBEAT_PATH, max_chars=14000)
     soul_text = read_text_file(SOUL_PATH, max_chars=14000)
@@ -1156,6 +1172,12 @@ def build_prompt() -> str:
 - session: {session_info.get('session')}
 - notes: {session_info.get('notes')}
 
+## 실행 엔진 컨텍스트
+- engine: macOS cron router + Python pipeline
+- trigger_source: {trigger_source}
+- event_name: {event_name or "-"}
+- system_event_present: {"yes" if bool(system_event) else "no"}
+
 ## 이번 실행 트리거
 {event_block}
 
@@ -1205,9 +1227,9 @@ def build_prompt() -> str:
 {format_candidates(bottom_warnings, "매도 경고")}
 
 ## 투자자 수급 보조 지표 (최근 수집 기준)
-- 외국인 보유비중(%): feature_snapshot.foreign_flow
-- 외국인 순매수(또는 동등 지표): feature_snapshot.news_event_score
-- 기관 순매수(또는 동등 지표): feature_snapshot.inst_flow
+- 종목 스냅샷 외국인 수급 보조치: feature_snapshot.foreign_flow
+- 종목 스냅샷 기관 수급 보조치: feature_snapshot.inst_flow
+- 시장/종목 정규화 수급 기준 테이블: market_flow_daily, stock_flow_daily (단위: KRW)
 
 ## 주요 뉴스 (최근 3시간, 중요도 3+)
 {format_news(recent_news)}

@@ -137,6 +137,10 @@ bash scripts/ops/deploy_to_runtime.sh
 
 ### 11-4. 운영 실행 예시
 ```bash
+# 0) 프롬프트 무결성 점검(엔진 전환 시 권장)
+set -a; source ~/.openclaw/.env.trading; set +a
+python3 ~/.openclaw/scripts/trading/prompt_sanity_check.py
+
 # 1) 전체 데이터/의사결정 파이프라인
 set -a; source ~/.openclaw/.env.trading; set +a
 bash ~/.openclaw/scripts/trading/enrich_data.sh all
