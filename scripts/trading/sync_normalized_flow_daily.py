@@ -85,6 +85,22 @@ def table_exists(name: str) -> bool:
         return False
 
 
+def column_exists(table: str, column: str) -> bool:
+    safe_t = table.replace("'", "\\'")
+    safe_c = column.replace("'", "\\'")
+    q = (
+        "SELECT count() "
+        "FROM system.columns "
+        "WHERE database = 'trading' "
+        f"AND table = '{safe_t}' "
+        f"AND name = '{safe_c}'"
+    )
+    try:
+        return int(ch_scalar(q) or "0") > 0
+    except Exception:
+        return False
+
+
 def ensure_tables() -> None:
     ch_execute(
         """
@@ -116,12 +132,22 @@ CREATE TABLE IF NOT EXISTS trading.market_flow_daily
     net_buy_value_krw        Float64,
     market_traded_value_krw  Float64,
     net_buy_pct_turnover     Float64,
+    market_traded_value_krw_source LowCardinality(String) DEFAULT 'UNKNOWN',
+    market_traded_value_krw_universe_n UInt32 DEFAULT 0,
     n_tickers                UInt32,
     ingested_at              DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(ingested_at)
 ORDER BY (trade_date, market, investor_type)
 """
+    )
+    ch_execute(
+        "ALTER TABLE trading.market_flow_daily "
+        "ADD COLUMN IF NOT EXISTS market_traded_value_krw_source LowCardinality(String) DEFAULT 'UNKNOWN'"
+    )
+    ch_execute(
+        "ALTER TABLE trading.market_flow_daily "
+        "ADD COLUMN IF NOT EXISTS market_traded_value_krw_universe_n UInt32 DEFAULT 0"
     )
 
 
@@ -233,6 +259,52 @@ WHERE date >= today() - {int(days)}
         return 0
 
     ch_execute(f"DELETE FROM trading.market_flow_daily WHERE trade_date >= today() - {int(days)}")
+    has_market_total = table_exists("market_index") and column_exists("market_index", "traded_value_krw")
+    market_total_cte = ""
+    market_total_join = ""
+    market_total_expr = "ifNull(t.traded_value_krw, 0.0)"
+    market_total_source = "'SAMPLE_STOCK_FLOW_SUM'"
+    market_total_universe = "ifNull(t.n_tickers, toUInt32(0))"
+    all_mt_sum = "0.0"
+    all_market_total_expr = "sum(ifNull(t.traded_value_krw, 0.0))"
+    all_market_total_source = "'SAMPLE_STOCK_FLOW_SUM'"
+    all_market_total_universe = "toUInt32(sum(ifNull(t.n_tickers, 0)))"
+    if has_market_total:
+        market_total_cte = f"""
+, market_total AS (
+    SELECT
+        date AS trade_date,
+        index_code AS market,
+        max(toFloat64(traded_value_krw)) AS market_total_traded_value_krw
+    FROM trading.market_index
+    WHERE date >= today() - {int(days)}
+      AND index_code IN ('KOSPI', 'KOSDAQ')
+      AND toFloat64(traded_value_krw) > 0
+    GROUP BY trade_date, market
+)
+"""
+        market_total_join = "LEFT JOIN market_total mt ON mt.trade_date = b.trade_date AND mt.market = b.market"
+        market_total_expr = (
+            "if(ifNull(mt.market_total_traded_value_krw, 0.0) > 0, "
+            "mt.market_total_traded_value_krw, ifNull(t.traded_value_krw, 0.0))"
+        )
+        market_total_source = "if(ifNull(mt.market_total_traded_value_krw, 0.0) > 0, 'MARKET_TOTAL', 'SAMPLE_STOCK_FLOW_SUM')"
+        market_total_universe = (
+            "if(ifNull(mt.market_total_traded_value_krw, 0.0) > 0, toUInt32(0), ifNull(t.n_tickers, toUInt32(0)))"
+        )
+        all_mt_sum = "sum(ifNull(mt.market_total_traded_value_krw, 0.0))"
+        all_market_total_expr = (
+            "if(sum(ifNull(mt.market_total_traded_value_krw, 0.0)) > 0, "
+            "sum(ifNull(mt.market_total_traded_value_krw, 0.0)), sum(ifNull(t.traded_value_krw, 0.0)))"
+        )
+        all_market_total_source = (
+            "if(sum(ifNull(mt.market_total_traded_value_krw, 0.0)) > 0, 'MARKET_TOTAL', 'SAMPLE_STOCK_FLOW_SUM')"
+        )
+        all_market_total_universe = (
+            "if(sum(ifNull(mt.market_total_traded_value_krw, 0.0)) > 0, "
+            "toUInt32(0), toUInt32(sum(ifNull(t.n_tickers, 0))))"
+        )
+
     sql = f"""
 INSERT INTO trading.market_flow_daily
 (
@@ -242,6 +314,8 @@ INSERT INTO trading.market_flow_daily
     net_buy_value_krw,
     market_traded_value_krw,
     net_buy_pct_turnover,
+    market_traded_value_krw_source,
+    market_traded_value_krw_universe_n,
     n_tickers,
     ingested_at
 )
@@ -271,29 +345,36 @@ traded AS (
       AND source_session = 'REGULAR'
     GROUP BY trade_date, market
 )
+{market_total_cte}
 SELECT
     b.trade_date AS trade_date,
     b.market AS market,
     b.investor_type AS investor_type,
     b.net_buy_value_krw AS net_buy_value_krw,
-    ifNull(t.traded_value_krw, 0.0) AS market_traded_value_krw,
-    if(ifNull(t.traded_value_krw, 0.0) > 0, (b.net_buy_value_krw / t.traded_value_krw) * 100, 0.0) AS net_buy_pct_turnover,
+    {market_total_expr} AS market_traded_value_krw,
+    if({market_total_expr} > 0, (b.net_buy_value_krw / {market_total_expr}) * 100, 0.0) AS net_buy_pct_turnover,
+    {market_total_source} AS market_traded_value_krw_source,
+    {market_total_universe} AS market_traded_value_krw_universe_n,
     ifNull(t.n_tickers, toUInt32(0)) AS n_tickers,
     now() AS ingested_at
 FROM base b
 LEFT JOIN traded t ON t.trade_date = b.trade_date AND t.market = b.market
+{market_total_join}
 UNION ALL
 SELECT
     b.trade_date AS trade_date,
     'ALL' AS market,
     b.investor_type AS investor_type,
     sum(b.net_buy_value_krw) AS net_buy_value_krw,
-    sum(ifNull(t.traded_value_krw, 0.0)) AS market_traded_value_krw,
-    if(sum(ifNull(t.traded_value_krw, 0.0)) > 0, (sum(b.net_buy_value_krw) / sum(ifNull(t.traded_value_krw, 0.0))) * 100, 0.0) AS net_buy_pct_turnover,
+    {all_market_total_expr} AS market_traded_value_krw,
+    if({all_market_total_expr} > 0, (sum(b.net_buy_value_krw) / {all_market_total_expr}) * 100, 0.0) AS net_buy_pct_turnover,
+    {all_market_total_source} AS market_traded_value_krw_source,
+    {all_market_total_universe} AS market_traded_value_krw_universe_n,
     toUInt32(sum(ifNull(t.n_tickers, 0))) AS n_tickers,
     now() AS ingested_at
 FROM base b
 LEFT JOIN traded t ON t.trade_date = b.trade_date AND t.market = b.market
+{market_total_join}
 GROUP BY b.trade_date, b.investor_type
 """
     ch_execute(sql, timeout_sec=180)
@@ -318,6 +399,8 @@ INSERT INTO trading.market_flow_daily
     net_buy_value_krw,
     market_traded_value_krw,
     net_buy_pct_turnover,
+    market_traded_value_krw_source,
+    market_traded_value_krw_universe_n,
     n_tickers,
     ingested_at
 )
@@ -328,6 +411,8 @@ SELECT
     sum(s.net_buy_value_krw) AS net_buy_value_krw,
     sum(s.traded_value_krw) AS market_traded_value_krw,
     if(sum(s.traded_value_krw) > 0, (sum(s.net_buy_value_krw) / sum(s.traded_value_krw)) * 100, 0) AS net_buy_pct_turnover,
+    'SAMPLE_STOCK_FLOW_SUM' AS market_traded_value_krw_source,
+    toUInt32(uniqExact(ticker)) AS market_traded_value_krw_universe_n,
     toUInt32(uniqExact(ticker)) AS n_tickers,
     now() AS ingested_at
 FROM trading.stock_flow_daily AS s
@@ -341,6 +426,8 @@ SELECT
     sum(s.net_buy_value_krw) AS net_buy_value_krw,
     sum(s.traded_value_krw) AS market_traded_value_krw,
     if(sum(s.traded_value_krw) > 0, (sum(s.net_buy_value_krw) / sum(s.traded_value_krw)) * 100, 0) AS net_buy_pct_turnover,
+    'SAMPLE_STOCK_FLOW_SUM' AS market_traded_value_krw_source,
+    toUInt32(uniqExact(ticker)) AS market_traded_value_krw_universe_n,
     toUInt32(uniqExact(ticker)) AS n_tickers,
     now() AS ingested_at
 FROM trading.stock_flow_daily AS s

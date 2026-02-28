@@ -74,6 +74,25 @@ def _float(v, default: float = 0.0) -> float:
         return default
 
 
+def _parse_json_obj(v: Any) -> dict[str, Any]:
+    if isinstance(v, dict):
+        return v
+    if not isinstance(v, str):
+        return {}
+    s = v.strip()
+    if not s:
+        return {}
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _to_eok_from_krw(v: float) -> float:
+    return _float(v, 0.0) / 100_000_000.0
+
+
 def _to_star(importance: float) -> str:
     n = max(1, min(5, int(round(_float(importance, 1.0)))))
     return "★" * n + "☆" * (5 - n)
@@ -535,7 +554,9 @@ def _block_reason_text(codes: list[str]) -> str:
     m = {
         "STAGE0_FAIL": "데이터 품질 게이트 미통과",
         "LOW_LIQUIDITY": "유동성 제약(거래대금 부족)",
+        "SPREAD_WIDE": "스프레드 과대",
         "HARD_RISK_OFF": "시장 하드 리스크오프",
+        "FLOW_DENOM_INVALID": "수급 분모 검증 실패",
         "FLOW_DISTRIBUTION_BLOCK": "수급 분배(매도 우위) 신호",
         "TECH_OVERHEAT_RSI": "기술적 과열(RSI) 신호",
         "DART_REDFLAG": "공시 레드플래그",
@@ -596,9 +617,42 @@ def _candidate_timing_reason(tech: dict, stage4_score: float) -> str:
     return " ".join(parts)
 
 
+def _summarize_stage5_failures(cands: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for c in cands:
+        raw_codes = c.get("stage5_fail_codes")
+        codes: list[str] = []
+        if isinstance(raw_codes, list):
+            codes = [str(x) for x in raw_codes if str(x).strip()]
+        if not codes:
+            # 하위 호환: 절대 블록에서 Stage5 관련 코드만 추출
+            for x in c.get("absolute_block_reason") or []:
+                sx = str(x)
+                if sx in {"LOW_LIQUIDITY", "SPREAD_WIDE"}:
+                    codes.append(sx)
+        for code in set(codes):
+            counts[code] = counts.get(code, 0) + 1
+    return counts
+
+
 def build_message(decision_id: str, top_n: int, clusters_n: int) -> str:
-    run_rows = ch_select(
+    run_rows = _safe_ch_select(
         f"""
+SELECT
+    decision_id, decision_time, stage0_pass, stage0_score,
+    stage1_pass, stage1_score, stage2_pass, stage2_score,
+    stage3_pass, stage3_score, stage4_pass, stage4_score,
+    stage5_pass, stage5_score, total_score, absolute_block_reason,
+    stage_debug_json
+FROM trading.decision_run
+WHERE decision_id = '{decision_id}'
+ORDER BY decision_time DESC
+LIMIT 1
+"""
+    )
+    if not run_rows:
+        run_rows = _safe_ch_select(
+            f"""
 SELECT
     decision_id, decision_time, stage0_pass, stage0_score,
     stage1_pass, stage1_score, stage2_pass, stage2_score,
@@ -609,10 +663,12 @@ WHERE decision_id = '{decision_id}'
 ORDER BY decision_time DESC
 LIMIT 1
 """
-    )
+        )
     if not run_rows:
         raise RuntimeError(f"decision_id not found: {decision_id}")
     run = run_rows[0]
+    stage_debug = _parse_json_obj(run.get("stage_debug_json"))
+    stage2_debug = stage_debug.get("stage2") if isinstance(stage_debug.get("stage2"), dict) else {}
 
     idx_rows = ch_select(
         """
@@ -630,7 +686,7 @@ ORDER BY index_code
     )
     idx_map = {str(r.get("index_code")): r for r in idx_rows}
 
-    flow_rows = ch_select(
+    flow_rows = _safe_ch_select(
         """
 SELECT date, market, investor_type, net_amount
 FROM trading.investor_flow
@@ -640,7 +696,7 @@ ORDER BY market, investor_type
 """
     )
 
-    cand_rows_all = ch_select(
+    cand_rows_all = _safe_ch_select(
         f"""
 SELECT
     c.ticker,
@@ -650,6 +706,37 @@ SELECT
     c.stage2_stock_flow_score,
     c.stage3_event_score,
     c.stage4_timing_score,
+    c.stage5_risk_score,
+    c.absolute_block_reason,
+    c.stage5_fail_codes,
+    c.stage5_exec_multiplier,
+    c.stage3_evidence_count,
+    c.stage3_score_capped,
+    c.primary_cluster_id
+FROM trading.decision_candidate c
+LEFT JOIN trading.technical_signals t ON c.ticker = t.ticker
+WHERE c.decision_id = '{decision_id}'
+GROUP BY
+    c.ticker, c.action, c.total_score,
+    c.stage2_stock_flow_score, c.stage3_event_score, c.stage4_timing_score, c.stage5_risk_score,
+    c.absolute_block_reason, c.stage5_fail_codes, c.stage5_exec_multiplier, c.stage3_evidence_count, c.stage3_score_capped,
+    c.primary_cluster_id
+ORDER BY c.total_score DESC
+LIMIT {int(max(top_n * 6, 60))}
+"""
+    )
+    if not cand_rows_all:
+        cand_rows_all = _safe_ch_select(
+        f"""
+SELECT
+    c.ticker,
+    any(t.ticker_name) AS ticker_name,
+    c.action,
+    c.total_score,
+    c.stage2_stock_flow_score,
+    c.stage3_event_score,
+    c.stage4_timing_score,
+    c.stage5_risk_score,
     c.absolute_block_reason,
     c.primary_cluster_id
 FROM trading.decision_candidate c
@@ -657,12 +744,12 @@ LEFT JOIN trading.technical_signals t ON c.ticker = t.ticker
 WHERE c.decision_id = '{decision_id}'
 GROUP BY
     c.ticker, c.action, c.total_score,
-    c.stage2_stock_flow_score, c.stage3_event_score, c.stage4_timing_score,
+    c.stage2_stock_flow_score, c.stage3_event_score, c.stage4_timing_score, c.stage5_risk_score,
     c.absolute_block_reason, c.primary_cluster_id
 ORDER BY c.total_score DESC
 LIMIT {int(max(top_n * 6, 60))}
 """
-    )
+        )
     cand_rows = cand_rows_all[: max(1, int(top_n))]
     candidate_tickers = {
         str(r.get("ticker") or "")
@@ -909,13 +996,41 @@ GROUP BY cluster_id
         f"S5 {_float(run.get('stage5_score')):.1f}"
     )
     lines.append(f"- Absolute Block: {', '.join([str(x) for x in (run.get('absolute_block_reason') or [])]) or '-'}")
+    stage5_fail_summary = (
+        stage_debug.get("stage5", {}).get("fail_summary")
+        if isinstance(stage_debug.get("stage5"), dict)
+        else {}
+    )
+    if not isinstance(stage5_fail_summary, dict) or not stage5_fail_summary:
+        stage5_fail_summary = _summarize_stage5_failures(cand_rows_all)
+    if stage5_fail_summary:
+        ordered = sorted(stage5_fail_summary.items(), key=lambda x: (-int(x[1]), str(x[0])))
+        txt = ", ".join(f"{k}:{int(v)}" for k, v in ordered[:5])
+        lines.append(f"- Stage5 제약 요약: {txt}")
     lines.append("")
     lines.append("<b>시장 방향</b>")
     lines.append(
         f"- KOSPI {_float(k.get('close_price')):,.2f} ({kps}{kp:.2f}%) [{k.get('dt','-')}] / "
         f"KOSDAQ {_float(q.get('close_price')):,.2f} ({qps}{qp:.2f}%) [{q.get('dt','-')}]"
     )
-    lines.extend(_format_flow_lines(flow_rows))
+    if stage2_debug:
+        s2_valid = bool(stage2_debug.get("valid"))
+        s2_flags = stage2_debug.get("flags") if isinstance(stage2_debug.get("flags"), list) else []
+        s2_source = str(stage2_debug.get("source") or "UNKNOWN")
+        s2_uni = int(_float(stage2_debug.get("universe_n"), 0.0))
+        f_net = _to_eok_from_krw(_float(stage2_debug.get("foreign_net_krw_5d"), 0.0))
+        i_net = _to_eok_from_krw(_float(stage2_debug.get("inst_net_krw_5d"), 0.0))
+        f_pct = _float(stage2_debug.get("foreign_net_pct_turnover_5d"), 0.0)
+        i_pct = _float(stage2_debug.get("inst_net_pct_turnover_5d"), 0.0)
+        lines.append(
+            f"- Stage2 기준 수급(5영업일): source={s2_source}, universe_n={s2_uni}, "
+            f"외국인 {f_net:+,.0f}억({f_pct:+.2f}%), 기관 {i_net:+,.0f}억({i_pct:+.2f}%)"
+        )
+        lines.append(f"- Stage2 분모 검증: {'PASS' if s2_valid else 'FAIL'} / flags: {', '.join([str(x) for x in s2_flags]) or '-'}")
+    if flow_rows:
+        lines.append("- 장마감 수급(참고):")
+        lines.extend(_format_flow_lines(flow_rows))
+    lines.extend(_market_direction_interpretation(kp, qp, flow_rows))
     lines.append("")
     lines.append("<b>🚀 유망주 요약</b>")
     if not cand_rows:
@@ -929,7 +1044,13 @@ GROUP BY cluster_id
             s2 = _float(c.get("stage2_stock_flow_score"), 0.0)
             s3 = _float(c.get("stage3_event_score"), 0.0)
             s4 = _float(c.get("stage4_timing_score"), 0.0)
+            s5 = _float(c.get("stage5_risk_score"), 0.0)
             blocks = [str(x) for x in (c.get("absolute_block_reason") or [])]
+            stage5_codes_raw = c.get("stage5_fail_codes")
+            stage5_codes = [str(x) for x in stage5_codes_raw] if isinstance(stage5_codes_raw, list) else []
+            stage5_exec_mult = _float(c.get("stage5_exec_multiplier"), 1.0)
+            stage3_evidence_count = int(_float(c.get("stage3_evidence_count"), 0.0))
+            stage3_score_capped = int(_float(c.get("stage3_score_capped"), 0.0)) == 1
             cluster_id = str(c.get("primary_cluster_id") or "")
 
             tech = tech_map.get(tk, {})
@@ -951,16 +1072,19 @@ GROUP BY cluster_id
             news_cnt = int(m.get("news_cnt", 0.0))
             explain_ready = int(m.get("explain_ready_3d", 0.0))
             rel_score = _float(m.get("rel_score"), 0.0)
+            evidence_ready = max(stage3_evidence_count, explain_ready)
             sector = _get_sector_by_kis(tk)
             action_txt = _describe_action_hint(action, total, blocks)
             tech_txt = _describe_technical_signal(rsi=rsi, vol_ratio=vol_ratio, pct=pct, bb_pct=bb_pct, rel_score=rel_score)
             one_line = _one_line_pick(signal_score=signal_score, rsi=rsi, bb_pct=bb_pct, vol_ratio=vol_ratio)
 
             news_items = candidate_news_map.get(tk, [])
+            is_fallback_only = evidence_ready <= 0
             if not news_items:
                 fallback_title = news_title_by_ticker.get(tk) or "관련 뉴스 추출 데이터 없음"
                 fallback_url = news_url_by_ticker.get(tk) or ""
                 news_items = [{"title": fallback_title, "url": fallback_url, "sentiment": "-", "importance": "-"}]
+                is_fallback_only = True
 
             lines.append(f"{i}) <b>{nm}({tk})</b>")
             lines.append(f"   - 업종: {sector}")
@@ -968,11 +1092,13 @@ GROUP BY cluster_id
             lines.append(f"   - 해석: {tech_txt}")
             lines.append(
                 f"   - 뉴스/근거: 호재 {pos}건, 악재 {neg}건, 총 이슈 {news_cnt}건, "
-                f"근거 충족 {explain_ready}건, 연관점수 {rel_score:+.3f}"
+                f"근거 충족 {evidence_ready}건, 연관점수 {rel_score:+.3f}"
             )
+            if stage3_score_capped:
+                lines.append("   - Stage3 보정: 근거 미충족으로 뉴스 점수 상한(cap) 적용")
             lines.append(f"   - 한 줄 판단: {one_line}")
             lines.append(
-                f"   - 점수 요약: 수급 {s2:.1f} / 뉴스 {s3:.1f} / 타이밍 {s4:.1f} / signal {signal or '-'}"
+                f"   - 점수 요약: 수급 {s2:.1f} / 뉴스 {s3:.1f} / 타이밍 {s4:.1f} / 집행 {s5:.1f} / signal {signal or '-'}"
             )
             lines.append(
                 f"   - 기술 지표: close {close:,.2f} / MA20 {ma20:,.2f} / MA60 {ma60:,.2f} / "
@@ -983,10 +1109,14 @@ GROUP BY cluster_id
                     sent = str(ni.get("sentiment") or "?").strip()
                     imp = str(ni.get("importance") or "?").strip()
                     title = _shorten(str(ni.get("title") or ""), 92)
-                    lines.append(f"   - 관련뉴스: [{sent}/{imp}] {title}")
+                    prefix = "참고뉴스" if is_fallback_only else "관련뉴스"
+                    lines.append(f"   - {prefix}: [{sent}/{imp}] {title}")
                     lines.append(f"     링크: {str(ni.get('url') or '-').strip() or '-'}")
             else:
                 lines.append("   - 관련뉴스: 없음")
+            lines.append(
+                f"   - 집행 제약: {', '.join(stage5_codes) if stage5_codes else '-'} / exec x{stage5_exec_mult:.2f}"
+            )
             lines.append(f"   - 제약 코드: {', '.join(blocks) if blocks else '-'}")
             lines.append(f"   - cluster_id: {cluster_id or '-'}")
             if i < len(cand_rows):
@@ -1053,6 +1183,8 @@ GROUP BY cluster_id
             "s4": round(_float(run.get("stage4_score"), 0.0), 2),
             "s5": round(_float(run.get("stage5_score"), 0.0), 2),
         },
+        "stage2_debug": stage2_debug,
+        "stage5_fail_summary": stage5_fail_summary,
         "absolute_block_reason": [str(x) for x in (run.get("absolute_block_reason") or [])],
         "market": {
             "kospi": {"close": _float(k.get("close_price"), 0.0), "pct": kp, "date": str(k.get("dt") or "")},
@@ -1076,16 +1208,22 @@ GROUP BY cluster_id
                 "news_score": round(_float(c.get("stage3_event_score"), 0.0), 2),
                 "timing_score": round(_float(c.get("stage4_timing_score"), 0.0), 2),
                 "block_codes": [str(x) for x in (c.get("absolute_block_reason") or [])],
+                "stage5_fail_codes": [str(x) for x in (c.get("stage5_fail_codes") or [])]
+                if isinstance(c.get("stage5_fail_codes"), list)
+                else [],
+                "stage5_exec_multiplier": round(_float(c.get("stage5_exec_multiplier"), 1.0), 2),
+                "stage3_evidence_count": int(_float(c.get("stage3_evidence_count"), 0.0)),
+                "stage3_score_capped": int(_float(c.get("stage3_score_capped"), 0.0)),
                 "cluster_id": str(c.get("primary_cluster_id") or ""),
                 "top_news": (
-                    (candidate_news_map.get(str(c.get("ticker") or ""), [{"title": ""}]) or [{"title": ""}])[0].get(
-                        "title", ""
-                    )
+                    (candidate_news_map.get(str(c.get("ticker") or ""), [{"title": ""}]) or [{"title": ""}])[0].get("title", "")
+                    if int(_float(c.get("stage3_evidence_count"), 0.0)) > 0
+                    else ""
                 ),
                 "top_news_url": (
-                    (candidate_news_map.get(str(c.get("ticker") or ""), [{"url": ""}]) or [{"url": ""}])[0].get(
-                        "url", ""
-                    )
+                    (candidate_news_map.get(str(c.get("ticker") or ""), [{"url": ""}]) or [{"url": ""}])[0].get("url", "")
+                    if int(_float(c.get("stage3_evidence_count"), 0.0)) > 0
+                    else ""
                 ),
             }
             for c in cand_rows

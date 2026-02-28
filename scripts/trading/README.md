@@ -8,6 +8,9 @@
 - 뉴스/데이터 파이프라인: collect_news.py, monitor_news.py, cluster_news.py, llm_relation_reasoner.py
 - P0 의사결정 로그 파이프라인:
   enrich_data.sh -> refresh_interest_watchlist.py -> decision_operating_pipeline.py
+- Stage2 수급 분모 정책:
+  market_flow_daily 분모는 `MARKET_TOTAL`(market_index.traded_value_krw) 우선,
+  없으면 `SAMPLE_STOCK_FLOW_SUM`으로 fallback하며 이 경우 Stage2는 fail-closed 처리
 - 브리핑 파이프라인:
   send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
   (decision_run / decision_candidate 기반)

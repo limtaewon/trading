@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS trading.market_flow_daily
     net_buy_value_krw        Float64,
     market_traded_value_krw  Float64,
     net_buy_pct_turnover     Float64,                  -- 100 * net_buy / market_traded
+    market_traded_value_krw_source LowCardinality(String) DEFAULT 'UNKNOWN',
+    market_traded_value_krw_universe_n UInt32 DEFAULT 0,
     n_tickers                UInt32,
     ingested_at              DateTime DEFAULT now()
 )
@@ -61,6 +63,7 @@ CREATE TABLE IF NOT EXISTS trading.decision_run
     penalty_score           Float32 DEFAULT 0,
     absolute_block_reason   Array(String) DEFAULT [],
     data_freshness_json     String DEFAULT '{}',
+    stage_debug_json        String DEFAULT '{}',
     model_version           String DEFAULT 'decision-operating-spec-p0',
     prompt_hash             String DEFAULT '',
     created_at              DateTime DEFAULT now()
@@ -81,6 +84,10 @@ CREATE TABLE IF NOT EXISTS trading.decision_candidate
     stage3_event_score          Float32 DEFAULT 0,
     stage4_timing_score         Float32 DEFAULT 0,
     stage5_risk_score           Float32 DEFAULT 0,
+    stage5_fail_codes           Array(String) DEFAULT [],
+    stage5_exec_multiplier      Float32 DEFAULT 1,
+    stage3_evidence_count       UInt16 DEFAULT 0,
+    stage3_score_capped         UInt8 DEFAULT 0,
     total_score                 Float32 DEFAULT 0,
     absolute_block_reason       Array(String) DEFAULT [],
     primary_cluster_id          String DEFAULT '',

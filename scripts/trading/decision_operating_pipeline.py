@@ -18,6 +18,7 @@ import json
 import os
 import re
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -129,6 +130,22 @@ def table_exists(name: str) -> bool:
         return False
 
 
+def column_exists(table: str, column: str) -> bool:
+    safe_t = table.replace("'", "\\'")
+    safe_c = column.replace("'", "\\'")
+    q = (
+        "SELECT count() "
+        "FROM system.columns "
+        "WHERE database = 'trading' "
+        f"AND table = '{safe_t}' "
+        f"AND name = '{safe_c}'"
+    )
+    try:
+        return int(ch_scalar(q) or "0") > 0
+    except Exception:
+        return False
+
+
 def ensure_decision_tables() -> None:
     ch_execute(
         """
@@ -154,6 +171,7 @@ CREATE TABLE IF NOT EXISTS trading.decision_run
     penalty_score           Float32 DEFAULT 0,
     absolute_block_reason   Array(String) DEFAULT [],
     data_freshness_json     String DEFAULT '{}',
+    stage_debug_json        String DEFAULT '{}',
     model_version           String DEFAULT 'decision-operating-spec-p0',
     prompt_hash             String DEFAULT '',
     created_at              DateTime DEFAULT now()
@@ -175,6 +193,10 @@ CREATE TABLE IF NOT EXISTS trading.decision_candidate
     stage3_event_score          Float32 DEFAULT 0,
     stage4_timing_score         Float32 DEFAULT 0,
     stage5_risk_score           Float32 DEFAULT 0,
+    stage5_fail_codes           Array(String) DEFAULT [],
+    stage5_exec_multiplier      Float32 DEFAULT 1,
+    stage3_evidence_count       UInt16 DEFAULT 0,
+    stage3_score_capped         UInt8 DEFAULT 0,
     total_score                 Float32 DEFAULT 0,
     absolute_block_reason       Array(String) DEFAULT [],
     primary_cluster_id          String DEFAULT '',
@@ -186,6 +208,20 @@ CREATE TABLE IF NOT EXISTS trading.decision_candidate
 ENGINE = ReplacingMergeTree(created_at)
 ORDER BY (decision_id, ticker)
 """
+    )
+    # 기존 테이블 호환
+    ch_execute("ALTER TABLE trading.decision_run ADD COLUMN IF NOT EXISTS stage_debug_json String DEFAULT '{}'")
+    ch_execute(
+        "ALTER TABLE trading.decision_candidate ADD COLUMN IF NOT EXISTS stage5_fail_codes Array(String) DEFAULT []"
+    )
+    ch_execute(
+        "ALTER TABLE trading.decision_candidate ADD COLUMN IF NOT EXISTS stage5_exec_multiplier Float32 DEFAULT 1"
+    )
+    ch_execute(
+        "ALTER TABLE trading.decision_candidate ADD COLUMN IF NOT EXISTS stage3_evidence_count UInt16 DEFAULT 0"
+    )
+    ch_execute(
+        "ALTER TABLE trading.decision_candidate ADD COLUMN IF NOT EXISTS stage3_score_capped UInt8 DEFAULT 0"
     )
 
 
@@ -618,15 +654,82 @@ def _score_stock_flow_ratio(pct: float, mode: str) -> float:
     return 0.0
 
 
-def compute_stage2_market_score() -> float:
+@dataclass
+class Stage2MarketResult:
+    score: float
+    valid: bool
+    flags: list[str]
+    source: str
+    universe_n: int
+    foreign_net_krw: float
+    foreign_traded_krw: float
+    foreign_pct: float
+    inst_net_krw: float
+    inst_traded_krw: float
+    inst_pct: float
+
+
+def _sanity_check_market_flow(
+    net_buy_krw: float,
+    traded_krw: float,
+    universe_n: int,
+    source: str,
+) -> tuple[bool, float, list[str]]:
+    flags: list[str] = []
+    if traded_krw <= 0:
+        flags.append("DENOM_ZERO_OR_NULL")
+        return False, 0.0, flags
+
+    ratio = (net_buy_krw / traded_krw) * 100.0
+    if universe_n > 0 and universe_n < 200:
+        flags.append(f"DENOM_SAMPLE_UNIVERSE_N={universe_n}")
+    if abs(ratio) > 20.0:
+        flags.append(f"DENOM_SANITY_RATIO_OOB={ratio:.2f}%")
+    if source != "MARKET_TOTAL":
+        flags.append(f"DENOM_SOURCE={source or 'UNKNOWN'}")
+
+    ok = (
+        "DENOM_ZERO_OR_NULL" not in flags
+        and not any(f.startswith("DENOM_SAMPLE_UNIVERSE_N=") for f in flags)
+        and not any(f.startswith("DENOM_SANITY_RATIO_OOB=") for f in flags)
+        and not any(f.startswith("DENOM_SOURCE=") for f in flags)
+    )
+    return ok, ratio, flags
+
+
+def compute_stage2_market_score() -> Stage2MarketResult:
     if not table_exists("market_flow_daily"):
-        return 0.0
+        return Stage2MarketResult(
+            score=0.0,
+            valid=False,
+            flags=["FLOW_TABLE_MISSING", "FLOW_DENOM_INVALID"],
+            source="MISSING",
+            universe_n=0,
+            foreign_net_krw=0.0,
+            foreign_traded_krw=0.0,
+            foreign_pct=0.0,
+            inst_net_krw=0.0,
+            inst_traded_krw=0.0,
+            inst_pct=0.0,
+        )
+
+    source_col = "market_traded_value_krw_source" if column_exists("market_flow_daily", "market_traded_value_krw_source") else ""
+    uni_col = (
+        "market_traded_value_krw_universe_n"
+        if column_exists("market_flow_daily", "market_traded_value_krw_universe_n")
+        else ("n_tickers" if column_exists("market_flow_daily", "n_tickers") else "")
+    )
+    source_expr = f"anyHeavy({source_col}) AS denom_source" if source_col else "'UNKNOWN' AS denom_source"
+    uni_expr = f"toUInt32(max({uni_col})) AS universe_n" if uni_col else "toUInt32(0) AS universe_n"
+
     rows = ch_select(
-        """
+        f"""
 SELECT
     investor_type,
     sum(net_buy_value_krw) AS net_buy_value_krw,
-    sum(market_traded_value_krw) AS market_traded_value_krw
+    sum(market_traded_value_krw) AS market_traded_value_krw,
+    {source_expr},
+    {uni_expr}
 FROM trading.market_flow_daily
 WHERE trade_date >= today() - 5
   AND market = 'ALL'
@@ -635,29 +738,84 @@ GROUP BY investor_type
     )
     if not rows:
         rows = ch_select(
-            """
+            f"""
 SELECT
     investor_type,
     sum(net_buy_value_krw) AS net_buy_value_krw,
-    sum(market_traded_value_krw) AS market_traded_value_krw
+    sum(market_traded_value_krw) AS market_traded_value_krw,
+    {source_expr},
+    {uni_expr}
 FROM trading.market_flow_daily
 WHERE trade_date >= today() - 5
   AND market IN ('KOSPI', 'KOSDAQ')
 GROUP BY investor_type
 """
         )
+    if not rows:
+        return Stage2MarketResult(
+            score=0.0,
+            valid=False,
+            flags=["FLOW_EMPTY", "FLOW_DENOM_INVALID"],
+            source="UNKNOWN",
+            universe_n=0,
+            foreign_net_krw=0.0,
+            foreign_traded_krw=0.0,
+            foreign_pct=0.0,
+            inst_net_krw=0.0,
+            inst_traded_krw=0.0,
+            inst_pct=0.0,
+        )
+
+    source_values = {str(r.get("denom_source", "") or "UNKNOWN").upper() for r in rows}
+    source = source_values.pop() if len(source_values) == 1 else "MIXED"
+    universe_n = max(_to_int(r.get("universe_n"), 0) for r in rows)
+    foreign_net = 0.0
+    foreign_traded = 0.0
     foreign_pct = 0.0
+    inst_net = 0.0
+    inst_traded = 0.0
     inst_pct = 0.0
+    flags: list[str] = []
+    valid = True
+
     for r in rows:
         inv = str(r.get("investor_type", "")).upper()
         net = _to_float(r.get("net_buy_value_krw"), 0.0)
         traded = _to_float(r.get("market_traded_value_krw"), 0.0)
         pct = (net / traded * 100.0) if traded > 0 else 0.0
+        if inv in {"FOREIGN", "INST"}:
+            ok, pct, sanity_flags = _sanity_check_market_flow(net, traded, universe_n, source)
+            if not ok:
+                valid = False
+                flags.extend(sanity_flags)
         if inv == "FOREIGN":
+            foreign_net = net
+            foreign_traded = traded
             foreign_pct = pct
         if inv == "INST":
+            inst_net = net
+            inst_traded = traded
             inst_pct = pct
-    return float(round(_score_market_flow_ratio(foreign_pct, "foreign") + _score_market_flow_ratio(inst_pct, "inst"), 2))
+
+    score = 0.0
+    if valid:
+        score = _score_market_flow_ratio(foreign_pct, "foreign") + _score_market_flow_ratio(inst_pct, "inst")
+    else:
+        flags.append("FLOW_DENOM_INVALID")
+
+    return Stage2MarketResult(
+        score=float(round(score, 2)),
+        valid=valid,
+        flags=sorted(set(flags)),
+        source=source,
+        universe_n=universe_n,
+        foreign_net_krw=foreign_net,
+        foreign_traded_krw=foreign_traded,
+        foreign_pct=foreign_pct,
+        inst_net_krw=inst_net,
+        inst_traded_krw=inst_traded,
+        inst_pct=inst_pct,
+    )
 
 
 def load_stage_maps() -> dict[str, dict[str, Any]]:
@@ -692,14 +850,45 @@ HAVING match(ticker, '^[0-9]{6}$')
         maps["flow"] = {str(r.get("ticker")): r for r in rows}
 
     if table_exists("news_event_frames"):
-        rows = ch_select(
-            """
+        try:
+            rows = ch_select(
+                """
 SELECT
     ticker,
     argMax(frame_id_s, published_at) AS frame_id,
     max(importance_val) AS importance_max,
     avg(importance_val) AS importance_avg,
     count() AS event_cnt,
+    countIf(thesis_path != '' AND evidence_json != '[]') AS explain_ready_cnt,
+    anyHeavy(event_type) AS event_type
+FROM
+(
+    SELECT
+        arrayJoin(tickers) AS ticker,
+        published_at,
+        toString(frame_id) AS frame_id_s,
+        toFloat64(importance) AS importance_val,
+        thesis_path,
+        evidence_json,
+        event_type
+    FROM trading.news_event_frames
+    WHERE published_at >= now() - INTERVAL 3 DAY
+      AND relevant = 1
+)
+WHERE match(ticker, '^[0-9]{6}$')
+GROUP BY ticker
+"""
+            )
+        except Exception:
+            rows = ch_select(
+                """
+SELECT
+    ticker,
+    argMax(frame_id_s, published_at) AS frame_id,
+    max(importance_val) AS importance_max,
+    avg(importance_val) AS importance_avg,
+    count() AS event_cnt,
+    count() AS explain_ready_cnt,
     anyHeavy(event_type) AS event_type
 FROM
 (
@@ -716,7 +905,7 @@ FROM
 WHERE match(ticker, '^[0-9]{6}$')
 GROUP BY ticker
 """
-        )
+            )
         maps["event"] = {str(r.get("ticker")): r for r in rows}
 
     if table_exists("news_cluster_state"):
@@ -898,7 +1087,8 @@ def main() -> int:
     ensure_decision_tables()
     stage0 = compute_stage0()
     stage1 = compute_stage1()
-    market_stage2_score = compute_stage2_market_score()
+    market_stage2 = compute_stage2_market_score()
+    market_stage2_score = market_stage2.score
     maps = load_stage_maps()
     tickers = load_universe(args.universe, args.limit)
 
@@ -918,6 +1108,8 @@ def main() -> int:
         run_abs_blocks.append("STAGE0_FAIL")
     if stage1.hard_riskoff:
         run_abs_blocks.append("HARD_RISK_OFF")
+    if not market_stage2.valid:
+        run_abs_blocks.append("FLOW_DENOM_INVALID")
 
     candidates: list[dict[str, Any]] = []
     s2_scores: list[float] = []
@@ -925,6 +1117,7 @@ def main() -> int:
     s4_scores: list[float] = []
     s5_scores: list[float] = []
     total_scores: list[float] = []
+    stage5_fail_counter: Counter[str] = Counter()
 
     for item in tickers:
         ticker = item["ticker"]
@@ -953,7 +1146,9 @@ def main() -> int:
         s2_stock = _score_stock_flow_ratio(foreign_pct, "foreign") + _score_stock_flow_ratio(inst_pct, "inst") + persist_score
         stage2_score = _clamp(market_stage2_score + s2_stock, 0, 100)
         distribution_block = foreign_pct <= -6.0 and inst_pct <= -3.0
-        stage2_pass = stage2_score >= 55 and not distribution_block
+        stage2_pass = market_stage2.valid and stage2_score >= 55 and not distribution_block
+        if not market_stage2.valid:
+            explain_codes.append("FLOW_DENOM_INVALID")
         if distribution_block:
             abs_blocks.append("FLOW_DISTRIBUTION_BLOCK")
         if foreign_pct >= 2.0:
@@ -967,6 +1162,7 @@ def main() -> int:
         event_imp_avg = _to_float(event.get("importance_avg"), 0.0)
         event_imp_max = _to_float(event.get("importance_max"), 0.0)
         event_cnt = _to_int(event.get("event_cnt"), 0)
+        explain_ready_cnt = _to_int(event.get("explain_ready_cnt"), 0)
         event_type = str(event.get("event_type", "") or "")
         cluster_state = str(cluster.get("state_label", "") or "")
         cluster_score = _cluster_state_score(cluster_state)
@@ -979,6 +1175,11 @@ def main() -> int:
         else:
             novelty_score = 5.0
         stage3_score = _clamp(cluster_score + event_score + relevance_score + novelty_score, 0, 100)
+        stage3_score_capped = False
+        if explain_ready_cnt <= 0:
+            stage3_score = min(stage3_score, 35.0)
+            stage3_score_capped = True
+            explain_codes.append("NO_EVIDENCE_CAP")
         redflag = False
         if _is_event_redflag(event_type, event_imp_max):
             redflag = True
@@ -1045,6 +1246,8 @@ def main() -> int:
         risk = maps["risk"].get(ticker, {})
         liquidity = _to_float(risk.get("liquidity_krw"), 0.0)
         spread_bp = _to_float(risk.get("spread_bp"), 0.0)
+        stage5_fail_codes: list[str] = []
+        stage5_exec_multiplier = 1.0
         if liquidity >= 5_000_000_000:
             stage5_score = 100.0
         elif liquidity >= 1_000_000_000:
@@ -1055,11 +1258,17 @@ def main() -> int:
             stage5_score = 20.0
         if spread_bp > 50:
             stage5_score = max(0.0, stage5_score - 10.0)
+            stage5_fail_codes.append("SPREAD_WIDE")
+            stage5_exec_multiplier = min(stage5_exec_multiplier, 0.6)
         stage5_pass = liquidity >= 1_000_000_000
         if not stage5_pass:
             abs_blocks.append("LOW_LIQUIDITY")
+            stage5_fail_codes.append("LOW_LIQUIDITY")
+            stage5_exec_multiplier = 0.0
         else:
             explain_codes.append("LIQUIDITY_OK")
+        if stage5_fail_codes:
+            stage5_fail_counter.update(stage5_fail_codes)
 
         penalty = 0.0
         if redflag:
@@ -1105,6 +1314,10 @@ def main() -> int:
                 "stage3_event_score": round(stage3_score, 2),
                 "stage4_timing_score": round(stage4_score, 2),
                 "stage5_risk_score": round(stage5_score, 2),
+                "stage5_fail_codes": sorted(set(stage5_fail_codes)),
+                "stage5_exec_multiplier": round(stage5_exec_multiplier, 2),
+                "stage3_evidence_count": max(0, explain_ready_cnt),
+                "stage3_score_capped": 1 if stage3_score_capped else 0,
                 "total_score": round(total, 2),
                 "absolute_block_reason": sorted(set(abs_blocks)),
                 "primary_cluster_id": str(cluster.get("cluster_id", "") or ""),
@@ -1127,6 +1340,24 @@ def main() -> int:
     stage5_run = round(sum(s5_scores) / len(s5_scores), 2) if s5_scores else 0.0
     total_run = round(sum(total_scores) / len(total_scores), 2) if total_scores else 0.0
 
+    stage_debug = {
+        "stage2": {
+            "valid": market_stage2.valid,
+            "flags": market_stage2.flags,
+            "source": market_stage2.source,
+            "universe_n": market_stage2.universe_n,
+            "foreign_net_krw_5d": round(market_stage2.foreign_net_krw, 2),
+            "foreign_traded_krw_5d": round(market_stage2.foreign_traded_krw, 2),
+            "foreign_net_pct_turnover_5d": round(market_stage2.foreign_pct, 4),
+            "inst_net_krw_5d": round(market_stage2.inst_net_krw, 2),
+            "inst_traded_krw_5d": round(market_stage2.inst_traded_krw, 2),
+            "inst_net_pct_turnover_5d": round(market_stage2.inst_pct, 4),
+        },
+        "stage5": {
+            "fail_summary": dict(stage5_fail_counter),
+        },
+    }
+
     run_row = {
         "decision_id": decision_id,
         "decision_time": now_ts,
@@ -1136,7 +1367,7 @@ def main() -> int:
         "stage0_score": round(stage0.score, 2),
         "stage1_pass": 1 if stage1.passed_for_buy else 0,
         "stage1_score": round(stage1.score, 2),
-        "stage2_pass": 1 if stage2_run >= 55 else 0,
+        "stage2_pass": 1 if (market_stage2.valid and stage2_run >= 55) else 0,
         "stage2_score": stage2_run,
         "stage3_pass": 1 if stage3_run >= 50 else 0,
         "stage3_score": stage3_run,
@@ -1148,6 +1379,7 @@ def main() -> int:
         "penalty_score": 0.0,
         "absolute_block_reason": sorted(set(run_abs_blocks)),
         "data_freshness_json": json.dumps(stage0.freshness_map, ensure_ascii=False),
+        "stage_debug_json": json.dumps(stage_debug, ensure_ascii=False),
         "model_version": args.model_version,
         "prompt_hash": "",
         "created_at": now_ts,

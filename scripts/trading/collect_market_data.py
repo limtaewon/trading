@@ -202,6 +202,26 @@ def ch_insert(table, columns, rows, dedup_col=None, dedup_cols=None):
         return 0
 
 
+def _column_exists(table: str, column: str) -> bool:
+    q = (
+        "SELECT count() "
+        "FROM system.columns "
+        "WHERE database='trading' "
+        f"AND table='{table}' "
+        f"AND name='{column}'"
+    )
+    try:
+        out = ch_query(q)
+        return int((out or "0").strip() or "0") > 0
+    except Exception:
+        return False
+
+
+def _ensure_market_index_schema() -> None:
+    if not _column_exists("market_index", "traded_value_krw"):
+        ch_query(None, data="ALTER TABLE trading.market_index ADD COLUMN IF NOT EXISTS traded_value_krw Float64 DEFAULT 0")
+
+
 def _safe_float(val, default=0.0):
     """숫자 문자열/None을 안전하게 float로 변환."""
     if val is None:
@@ -453,6 +473,7 @@ def collect_indices(days=7):
     }
 
     rows = []
+    _ensure_market_index_schema()
     for code, info in INDEX_SYMBOLS.items():
         if code in KOREA_INDEX_CODES:
             # 한국 지수는 Naver 기준값을 우선 사용해 장마감 수치 정합성 확보.
@@ -468,9 +489,11 @@ def collect_indices(days=7):
                 low = round(_safe_number_text(rt.get("low", page.get("low", 0))), 2)
                 open_p = round(_safe_number_text(rt.get("open", 0)), 2)
                 volume = _safe_int(rt.get("volume", page.get("volume", 0)), 0)
+                traded_million_krw = _safe_number_text(page.get("traded_amount", 0))
+                traded_value_krw = float(traded_million_krw * 1_000_000.0)
                 rows.append((
                     date_str, code, info["name"],
-                    close, change_pct, volume, high, low, open_p
+                    close, change_pct, volume, high, low, open_p, traded_value_krw
                 ))
                 log.info(f"  {code:8s} ({info['name']:12s}): Naver 장마감 {date_str} {close:,.2f} ({change_pct:+.2f}%)")
                 continue
@@ -494,7 +517,7 @@ def collect_indices(days=7):
 
                 rows.append((
                     date_str, code, info["name"],
-                    close, change_pct, volume, high, low, open_p
+                    close, change_pct, volume, high, low, open_p, 0.0
                 ))
 
             log.info(f"  {code:8s} ({info['name']:12s}): {len(hist)}일")
@@ -520,8 +543,18 @@ def collect_indices(days=7):
             )
             ch_query(None, data=del_sql)
 
-        columns = ["date", "index_code", "index_name",
-                    "close_price", "change_pct", "volume", "high", "low", "open_price"]
+        columns = [
+            "date",
+            "index_code",
+            "index_name",
+            "close_price",
+            "change_pct",
+            "volume",
+            "high",
+            "low",
+            "open_price",
+            "traded_value_krw",
+        ]
         inserted = ch_insert("trading.market_index", columns, rows, dedup_cols=["date", "index_code"])
         log.info(f"  → 지수 {inserted}건 저장")
         return inserted

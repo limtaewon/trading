@@ -116,6 +116,106 @@ def get_news_sentiment(days: int = 3) -> dict:
     return result
 
 
+def _sum_flow_rows(rows: list[dict]) -> dict:
+    out = {
+        "foreign": 0.0,
+        "inst": 0.0,
+        "foreign_pos_days": 0,
+        "inst_pos_days": 0,
+        "n_days": 0,
+    }
+    if not rows:
+        return out
+    days_seen: set[str] = set()
+    for r in rows:
+        investor = str(r.get("investor_type", "")).strip().upper()
+        d = str(r.get("trade_date", "")).strip()
+        days_seen.add(d)
+        v = float(r.get("net_buy_value_krw", 0) or 0)
+        if investor == "FOREIGN":
+            out["foreign"] += v
+            if v > 0:
+                out["foreign_pos_days"] += 1
+        elif investor in ("INST", "INSTITUTION"):
+            out["inst"] += v
+            if v > 0:
+                out["inst_pos_days"] += 1
+    out["n_days"] = len([x for x in days_seen if x])
+    return out
+
+
+def get_market_flow_trend(days: int = 3) -> dict:
+    """시장 수급 추세(외국인/기관) 조회.
+
+    우선순위:
+    1) market_flow_daily (market='ALL')
+    2) market_flow_daily (KOSPI+KOSDAQ 합산)
+    """
+    d = max(1, int(days))
+    rows_all = ch_query_json(
+        f"""
+SELECT
+    trade_date,
+    investor_type,
+    net_buy_value_krw
+FROM trading.market_flow_daily
+WHERE market = 'ALL'
+  AND investor_type IN ('FOREIGN', 'INST', 'INSTITUTION')
+  AND trade_date IN (
+    SELECT trade_date
+    FROM trading.market_flow_daily
+    WHERE market = 'ALL'
+    ORDER BY trade_date DESC
+    LIMIT {d}
+  )
+ORDER BY trade_date DESC, investor_type
+"""
+    )
+    agg = _sum_flow_rows(rows_all)
+    if agg["n_days"] > 0:
+        agg["source"] = "market_flow_daily:ALL"
+        return agg
+
+    rows_mkt = ch_query_json(
+        f"""
+SELECT
+    trade_date,
+    investor_type,
+    sum(net_buy_value_krw) AS net_buy_value_krw
+FROM trading.market_flow_daily
+WHERE market IN ('KOSPI', 'KOSDAQ')
+  AND investor_type IN ('FOREIGN', 'INST', 'INSTITUTION')
+  AND trade_date IN (
+    SELECT DISTINCT trade_date
+    FROM trading.market_flow_daily
+    WHERE market IN ('KOSPI', 'KOSDAQ')
+    ORDER BY trade_date DESC
+    LIMIT {d}
+  )
+GROUP BY trade_date, investor_type
+ORDER BY trade_date DESC, investor_type
+"""
+    )
+    agg = _sum_flow_rows(rows_mkt)
+    agg["source"] = "market_flow_daily:KOSPI+KOSDAQ"
+    return agg
+
+
+def _fmt_krw_jo(v: float) -> str:
+    return f"{(float(v) / 1_000_000_000_000):+.2f}조"
+
+
+def _build_flow_summary(flow: dict) -> str:
+    n = int(flow.get("n_days", 0) or 0)
+    if n <= 0:
+        return "수급데이터 부족"
+    fsum = _fmt_krw_jo(float(flow.get("foreign", 0.0) or 0.0))
+    isum = _fmt_krw_jo(float(flow.get("inst", 0.0) or 0.0))
+    fpos = int(flow.get("foreign_pos_days", 0) or 0)
+    ipos = int(flow.get("inst_pos_days", 0) or 0)
+    return f"외인 {fsum}({fpos}/{n}일+), 기관 {isum}({ipos}/{n}일+)"
+
+
 # ─── 레짐 분류 로직 ───────────────────────────────────────────
 
 def classify_trend(kospi_data: list[dict]) -> tuple[str, float, float]:
@@ -312,6 +412,7 @@ def main():
     dxy_data = get_index_data("DXY", 10)
     usdkrw_data = get_fx_data("USDKRW", 10)
     news_sentiment = get_news_sentiment(3)
+    flow_trend = get_market_flow_trend(3)
 
     # 2) 분류
     log.info("레짐 분류 중...")
@@ -332,6 +433,8 @@ def main():
         trend, volatility, appetite, vix_level,
         dxy_level, usdkrw_level, news_mood, kospi_close, kosdaq_close
     )
+    flow_summary = _build_flow_summary(flow_trend)
+    summary = f"{summary} | 수급 {flow_summary}"
 
     today_str = kospi_data[0].get("date", datetime.now().strftime("%Y-%m-%d")) if kospi_data else datetime.now().strftime("%Y-%m-%d")
 
@@ -346,6 +449,17 @@ def main():
     log.info(f"  추세:     {trend}")
     log.info(f"  변동성:   {volatility}")
     log.info(f"  위험선호: {appetite}")
+    log.info(
+        "  수급(최근 %s일): 외인 %s (%s/%s일+), 기관 %s (%s/%s일+) [%s]",
+        int(flow_trend.get("n_days", 0) or 0),
+        _fmt_krw_jo(float(flow_trend.get("foreign", 0.0) or 0.0)),
+        int(flow_trend.get("foreign_pos_days", 0) or 0),
+        int(flow_trend.get("n_days", 0) or 0),
+        _fmt_krw_jo(float(flow_trend.get("inst", 0.0) or 0.0)),
+        int(flow_trend.get("inst_pos_days", 0) or 0),
+        int(flow_trend.get("n_days", 0) or 0),
+        str(flow_trend.get("source", "-")),
+    )
     log.info(f"  레짐:     {regime_label}")
     log.info(f"  뉴스:     pos={news_sentiment['positive']} neg={news_sentiment['negative']} neu={news_sentiment['neutral']} → {news_mood}")
     log.info(f"  요약:     {summary}")
@@ -403,6 +517,7 @@ def main():
             f"{emoji} <b>시장 레짐: {regime_label}</b>\n"
             f"KOSPI {kospi_close:,.0f} | KOSDAQ {kosdaq_close:,.0f} | VIX {vix_level:.1f}\n"
             f"USD/KRW {usdkrw_level:,.0f} | DXY {dxy_level:.1f}\n"
+            f"수급(최근 {int(flow_trend.get('n_days', 0) or 0)}일): {flow_summary}\n"
             f"→ {guide_text}"
         )
     except Exception as e:
