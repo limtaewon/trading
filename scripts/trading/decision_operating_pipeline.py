@@ -21,7 +21,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -32,7 +32,7 @@ def _log(msg: str) -> None:
 def _ch_url_and_headers() -> tuple[str, dict[str, str]]:
     host = os.getenv("CLICKHOUSE_HOST", "").strip()
     user = os.getenv("CLICKHOUSE_USER", "").strip()
-    pw = os.getenv("CLICKHOUSE_PASS", "").strip()
+    pw = os.getenv("CLICKHOUSE_PASS", os.getenv("CLICKHOUSE_PASSWORD", "")).strip()
     headers: dict[str, str] = {"Content-Type": "text/plain; charset=utf-8"}
 
     if host:
@@ -44,6 +44,10 @@ def _ch_url_and_headers() -> tuple[str, dict[str, str]]:
         return f"{host}{sep}user={user}&password={pw}", headers
 
     url = os.getenv("CLICKHOUSE_URL", "http://localhost:8123").strip()
+    if not user:
+        user = "default"
+    if not pw:
+        pw = "trading"
     sp = urlsplit(url)
     if sp.username is not None:
         auth = f"{sp.username}:{sp.password or ''}".encode("utf-8")
@@ -54,7 +58,16 @@ def _ch_url_and_headers() -> tuple[str, dict[str, str]]:
         clean = urlunsplit((sp.scheme or "http", netloc, sp.path or "", sp.query, sp.fragment))
         return clean, headers
 
-    return url, headers
+    # query string에 user/password가 없으면 기본 인증 파라미터를 덧붙인다.
+    q_pairs = parse_qsl(sp.query, keep_blank_values=True)
+    q_keys = {k.lower() for k, _ in q_pairs}
+    if "user" not in q_keys:
+        q_pairs.append(("user", user))
+    if "password" not in q_keys:
+        q_pairs.append(("password", pw))
+    new_query = urlencode(q_pairs, doseq=True)
+    with_auth = urlunsplit((sp.scheme or "http", sp.netloc or "localhost:8123", sp.path or "", new_query, sp.fragment))
+    return with_auth, headers
 
 
 def ch_select(sql: str, timeout_sec: int = 60) -> list[dict[str, Any]]:
