@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """OpenClaw agent execution helper with cache + lock.
 
-기존 codex exec fallback 경로는 제거하고 openclaw agent 단일 경로만 유지한다.
+기본 경로는 openclaw agent이며, 컨텍스트 초과/세션 만료 등 복구 가능 오류에서는
+재시도 후 codex exec 폴백을 선택적으로 사용한다.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -21,6 +23,29 @@ from typing import List, Optional, Sequence
 DEFAULT_CACHE_TTL_SEC = int(os.environ.get("CODEX_EXEC_CACHE_TTL", "0"))
 DEFAULT_CACHE_DIR = os.path.expanduser(os.environ.get("CODEX_EXEC_CACHE_DIR", "~/.openclaw/cache/codex-exec"))
 DEFAULT_CACHE_LOCK_WAIT = int(os.environ.get("CODEX_EXEC_CACHE_LOCK_WAIT", "20"))
+DEFAULT_OPENCLAW_RETRY_MAX = max(0, int(os.environ.get("OPENCLAW_AGENT_RETRY_MAX", "2")))
+DEFAULT_OPENCLAW_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("OPENCLAW_AGENT_RETRY_DELAY_SEC", "1.0")))
+DEFAULT_ENABLE_CODEX_EXEC_FALLBACK = os.environ.get("ENABLE_CODEX_EXEC_FALLBACK", "1") == "1"
+DEFAULT_CODEX_FALLBACK_ON_ANY_ERROR = os.environ.get("CODEX_FALLBACK_ON_ANY_ERROR", "0") == "1"
+
+
+RECOVERABLE_OPENCLAW_ERROR_PATTERNS = (
+    "ctx max",
+    "context max",
+    "context limit",
+    "context length",
+    "context overflow",
+    "maximum context",
+    "prompt too large",
+    "token limit",
+    "too many tokens",
+    "conversation too long",
+    "session expired",
+    "session has expired",
+    "session not found",
+    "invalid session",
+    "stale session",
+)
 
 
 def _resolve_openclaw_bin() -> Optional[str]:
@@ -56,6 +81,25 @@ def _normalize_model_name(model: str) -> str:
         "openai-codex/gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
     }
     return aliases.get(m, m)
+
+
+def _normalize_fallback_model(model: str) -> str:
+    override = os.environ.get("CODEX_FALLBACK_MODEL", "").strip()
+    if override:
+        return override
+    m = (model or "").strip()
+    if not m:
+        return "gpt-5"
+    if "codex-spark" in m or m.startswith("openai-codex/"):
+        return "gpt-5"
+    return m
+
+
+def _is_recoverable_openclaw_error(msg: str) -> bool:
+    text = (msg or "").lower()
+    if not text:
+        return False
+    return any(pat in text for pat in RECOVERABLE_OPENCLAW_ERROR_PATTERNS)
 
 
 def _sha256_text(value: str) -> str:
@@ -169,6 +213,47 @@ def _inject_schema_hint(prompt: str, output_schema_path: Optional[str]) -> str:
     return prompt + hint
 
 
+def _resolve_session_id(prompt: str) -> str:
+    explicit = (
+        os.environ.get("OPENCLAW_SESSION_ID", "").strip()
+        or os.environ.get("OPENCLAW_AGENT_SESSION_ID", "").strip()
+    )
+    if explicit:
+        return explicit
+
+    mode = os.environ.get("OPENCLAW_SESSION_MODE", "ephemeral").strip().lower()
+    if mode in {"shared", "sticky", "fixed"}:
+        return "openclaw-codex-bridge"
+
+    prefix = os.environ.get("OPENCLAW_SESSION_PREFIX", "openclaw-codex-bridge").strip() or "openclaw-codex-bridge"
+    nonce = hashlib.sha1(f"{os.getpid()}:{time.time_ns()}:{len(prompt)}".encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{nonce}"
+
+
+def _resolve_codex_fallback_bin(codex_bin: str) -> Optional[str]:
+    preferred = os.environ.get("CODEX_FALLBACK_BIN", "").strip()
+    candidates: list[str] = []
+    if preferred:
+        candidates.append(preferred)
+    if codex_bin and "openclaw" not in codex_bin.lower():
+        candidates.append(codex_bin)
+    candidates.extend(
+        [
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            "/usr/bin/codex",
+            "codex",
+        ]
+    )
+    for cand in candidates:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+        found = shutil.which(cand)
+        if found:
+            return found
+    return None
+
+
 def _run_openclaw_agent(
     prompt: str,
     timeout_sec: int,
@@ -207,7 +292,134 @@ def _run_openclaw_agent(
     output = _extract_openclaw_reply(raw)
     if not output:
         raise RuntimeError("openclaw parsed empty output")
+    if _is_recoverable_openclaw_error(output):
+        raise RuntimeError(f"openclaw recoverable output: {output[:400]}")
     return output
+
+
+def _run_codex_exec_fallback(
+    *,
+    prompt: str,
+    codex_bin: str,
+    model: str,
+    workdir: Optional[str],
+    timeout_sec: int,
+    output_schema_path: Optional[str] = None,
+) -> str:
+    resolved_bin = _resolve_codex_fallback_bin(codex_bin)
+    if not resolved_bin:
+        raise RuntimeError("codex exec fallback binary not found")
+
+    with tempfile.NamedTemporaryFile(prefix="codex_last_", suffix=".txt", delete=False) as fp:
+        out_path = fp.name
+
+    base_cmd = [
+        resolved_bin,
+        "exec",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--output-last-message",
+        out_path,
+    ]
+    fallback_model = _normalize_fallback_model(model)
+    if fallback_model:
+        base_cmd.extend(["--model", fallback_model])
+
+    def _run_once(use_schema: bool) -> str:
+        try:
+            Path(out_path).write_text("", encoding="utf-8")
+        except Exception:
+            pass
+        cmd = [*base_cmd]
+        if use_schema and output_schema_path and Path(output_schema_path).exists():
+            cmd.extend(["--output-schema", output_schema_path])
+        cmd.append("-")
+        run = subprocess.run(
+            cmd,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=max(timeout_sec, int(os.environ.get("CODEX_FALLBACK_TIMEOUT_SEC", "240"))),
+            check=False,
+            cwd=workdir or None,
+        )
+        if run.returncode != 0:
+            err = (run.stderr or run.stdout or "").strip()
+            low = err.lower()
+            if "invalid_json_schema" in low or "invalid schema for response_format" in low:
+                raise RuntimeError("codex exec fallback invalid_json_schema")
+            raise RuntimeError(f"codex exec fallback exited {run.returncode}: {err[:500]}")
+        output = ""
+        try:
+            output = Path(out_path).read_text(encoding="utf-8").strip()
+        except Exception:
+            output = ""
+        if not output:
+            output = (run.stdout or "").strip()
+        if not output:
+            raise RuntimeError("codex exec fallback empty output")
+        return output
+
+    try:
+        return _run_once(use_schema=True)
+    except Exception as exc:
+        msg = str(exc).lower()
+        schema_err = "invalid_json_schema" in msg or "invalid schema for response_format" in msg
+        if output_schema_path and schema_err:
+            return _run_once(use_schema=False)
+        raise
+    finally:
+        try:
+            Path(out_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _run_with_recovery(
+    *,
+    prompt: str,
+    codex_bin: str,
+    model: str,
+    workdir: Optional[str],
+    timeout_sec: int,
+    base_args: Sequence[str],
+    output_schema_path: Optional[str],
+) -> str:
+    max_retry = DEFAULT_OPENCLAW_RETRY_MAX
+    delay_sec = DEFAULT_OPENCLAW_RETRY_DELAY_SEC
+    last_err = ""
+    for attempt in range(max_retry + 1):
+        session_id = _resolve_session_id(prompt)
+        try:
+            return _run_openclaw_agent(
+                prompt=prompt,
+                timeout_sec=timeout_sec,
+                session_id=session_id,
+                base_args=base_args,
+                workdir=workdir,
+            )
+        except Exception as exc:
+            last_err = str(exc)
+            recoverable = _is_recoverable_openclaw_error(last_err)
+            if recoverable and attempt < max_retry:
+                if delay_sec > 0:
+                    time.sleep(delay_sec)
+                continue
+            break
+
+    fallback_allowed = DEFAULT_ENABLE_CODEX_EXEC_FALLBACK and (
+        DEFAULT_CODEX_FALLBACK_ON_ANY_ERROR or _is_recoverable_openclaw_error(last_err)
+    )
+    if fallback_allowed:
+        return _run_codex_exec_fallback(
+            prompt=prompt,
+            codex_bin=codex_bin,
+            model=model,
+            workdir=workdir,
+            timeout_sec=timeout_sec,
+            output_schema_path=output_schema_path,
+        )
+    raise RuntimeError(last_err or "openclaw agent failed")
 
 
 @contextlib.contextmanager
@@ -252,11 +464,17 @@ def run_codex_cached(
     cache_ttl_sec: int = DEFAULT_CACHE_TTL_SEC,
     cache_lock_wait_sec: int = DEFAULT_CACHE_LOCK_WAIT,
 ) -> str:
-    # codex_bin 파라미터는 하위호환 유지용. 실행은 openclaw agent만 사용한다.
-    _ = codex_bin
-
     resolved_openclaw_bin = _resolve_openclaw_bin()
     if not resolved_openclaw_bin:
+        if DEFAULT_ENABLE_CODEX_EXEC_FALLBACK:
+            return _run_codex_exec_fallback(
+                prompt=_inject_schema_hint(prompt, output_schema_path),
+                codex_bin=codex_bin,
+                model=_normalize_model_name(model or ""),
+                workdir=workdir or None,
+                timeout_sec=timeout_sec,
+                output_schema_path=output_schema_path,
+            )
         raise RuntimeError("openclaw binary not found")
 
     normalized_model = _normalize_model_name(model or "")
@@ -290,31 +508,27 @@ def run_codex_cached(
             if cached is not None:
                 output = cached
             else:
-                session_id = (
-                    os.environ.get("OPENCLAW_SESSION_ID", "").strip()
-                    or os.environ.get("OPENCLAW_AGENT_SESSION_ID", "").strip()
-                    or "openclaw-codex-bridge"
-                )
-                output = _run_openclaw_agent(
+                session_id = _resolve_session_id(final_prompt)
+                _ = session_id
+                output = _run_with_recovery(
                     prompt=final_prompt,
-                    timeout_sec=timeout_sec,
-                    session_id=session_id,
-                    base_args=base_args_list,
+                    codex_bin=codex_bin,
+                    model=normalized_model,
                     workdir=workdir or None,
+                    timeout_sec=timeout_sec,
+                    base_args=base_args_list,
+                    output_schema_path=output_schema_path,
                 )
                 _write_cache(cache_file, output)
         else:
-            session_id = (
-                os.environ.get("OPENCLAW_SESSION_ID", "").strip()
-                or os.environ.get("OPENCLAW_AGENT_SESSION_ID", "").strip()
-                or "openclaw-codex-bridge"
-            )
-            output = _run_openclaw_agent(
+            output = _run_with_recovery(
                 prompt=final_prompt,
-                timeout_sec=timeout_sec,
-                session_id=session_id,
-                base_args=base_args_list,
+                codex_bin=codex_bin,
+                model=normalized_model,
                 workdir=workdir or None,
+                timeout_sec=timeout_sec,
+                base_args=base_args_list,
+                output_schema_path=output_schema_path,
             )
 
     return output

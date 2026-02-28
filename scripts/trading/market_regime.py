@@ -38,12 +38,19 @@ logging.basicConfig(
 )
 log = logging.getLogger("market-regime")
 
-CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "http://localhost:8123")
+CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "").strip()
+if not CLICKHOUSE_URL:
+    CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_HOST", "http://localhost:8123").strip()
+if not CLICKHOUSE_URL:
+    CLICKHOUSE_URL = "http://localhost:8123"
+CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "").strip()
+CLICKHOUSE_PASS = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
+CLICKHOUSE_AUTH = (CLICKHOUSE_USER, CLICKHOUSE_PASS) if CLICKHOUSE_USER else None
 
 
 def ch_query(query: str) -> str | None:
     try:
-        resp = requests.get(CLICKHOUSE_URL, params={"query": query}, timeout=10)
+        resp = requests.get(CLICKHOUSE_URL, params={"query": query}, timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         return resp.text.strip()
     except Exception as e:
@@ -57,6 +64,7 @@ def ch_query_json(query: str) -> list[dict]:
             CLICKHOUSE_URL,
             params={"query": query, "default_format": "JSONEachRow"},
             timeout=10,
+            auth=CLICKHOUSE_AUTH,
         )
         resp.raise_for_status()
         rows = []
@@ -260,7 +268,7 @@ def save_regime(data: dict) -> bool:
     # 같은 날짜 기존 데이터 삭제 (중복 방지)
     delete_sql = f"DELETE FROM trading.market_regime WHERE date = '{data['date']}'"
     try:
-        resp = requests.post(CLICKHOUSE_URL, data=delete_sql.encode("utf-8"), timeout=10)
+        resp = requests.post(CLICKHOUSE_URL, data=delete_sql.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         log.info(f"기존 레짐 데이터 삭제 완료 (date={data['date']})")
     except Exception as e:
@@ -280,7 +288,7 @@ def save_regime(data: dict) -> bool:
         f"'{esc(data['summary'])}', now())"
     )
     try:
-        resp = requests.post(CLICKHOUSE_URL, data=sql.encode("utf-8"), timeout=10)
+        resp = requests.post(CLICKHOUSE_URL, data=sql.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         return True
     except Exception as e:

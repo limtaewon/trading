@@ -125,7 +125,9 @@ ORDER BY (trade_date, market, investor_type)
     )
 
 
-def sync_stock_flow(days: int) -> int:
+def sync_stock_flow(days: int, sessions: list[str]) -> int:
+    session_filter = ",".join("'" + s.replace("'", "\\'") + "'" for s in sessions if s)
+    where_session = f"AND session IN ({session_filter})" if session_filter else ""
     ch_execute(f"DELETE FROM trading.stock_flow_daily WHERE trade_date >= today() - {int(days)}")
     sql = f"""
 INSERT INTO trading.stock_flow_daily
@@ -160,6 +162,7 @@ base AS (
     FROM trading.feature_snapshot
     WHERE ts >= now() - INTERVAL {int(days)} DAY
       AND match(symbol, '^[0-9]{{6}}$')
+      {where_session}
     GROUP BY trade_date, ticker
 ),
 tmap AS (
@@ -213,7 +216,98 @@ LEFT JOIN tmap t ON t.ticker = b.ticker
     return n
 
 
+def sync_market_flow_from_investor_flow(days: int) -> int:
+    if not table_exists("investor_flow"):
+        return 0
+    rows = int(
+        ch_scalar(
+            f"""
+SELECT count()
+FROM trading.investor_flow
+WHERE date >= today() - {int(days)}
+"""
+        )
+        or "0"
+    )
+    if rows <= 0:
+        return 0
+
+    ch_execute(f"DELETE FROM trading.market_flow_daily WHERE trade_date >= today() - {int(days)}")
+    sql = f"""
+INSERT INTO trading.market_flow_daily
+(
+    trade_date,
+    market,
+    investor_type,
+    net_buy_value_krw,
+    market_traded_value_krw,
+    net_buy_pct_turnover,
+    n_tickers,
+    ingested_at
+)
+WITH
+base AS (
+    SELECT
+        date AS trade_date,
+        market,
+        multiIf(
+            lower(investor_type) = 'foreign', 'FOREIGN',
+            lower(investor_type) = 'institution', 'INST',
+            lower(investor_type) = 'individual', 'RETAIL',
+            upper(investor_type)
+        ) AS investor_type,
+        toFloat64(net_amount) * 1000000.0 AS net_buy_value_krw
+    FROM trading.investor_flow
+    WHERE date >= today() - {int(days)}
+),
+traded AS (
+    SELECT
+        trade_date,
+        market,
+        sum(traded_value_krw) AS traded_value_krw,
+        toUInt32(uniqExact(ticker)) AS n_tickers
+    FROM trading.stock_flow_daily
+    WHERE trade_date >= today() - {int(days)}
+      AND source_session = 'REGULAR'
+    GROUP BY trade_date, market
+)
+SELECT
+    b.trade_date AS trade_date,
+    b.market AS market,
+    b.investor_type AS investor_type,
+    b.net_buy_value_krw AS net_buy_value_krw,
+    ifNull(t.traded_value_krw, 0.0) AS market_traded_value_krw,
+    if(ifNull(t.traded_value_krw, 0.0) > 0, (b.net_buy_value_krw / t.traded_value_krw) * 100, 0.0) AS net_buy_pct_turnover,
+    ifNull(t.n_tickers, toUInt32(0)) AS n_tickers,
+    now() AS ingested_at
+FROM base b
+LEFT JOIN traded t ON t.trade_date = b.trade_date AND t.market = b.market
+UNION ALL
+SELECT
+    b.trade_date AS trade_date,
+    'ALL' AS market,
+    b.investor_type AS investor_type,
+    sum(b.net_buy_value_krw) AS net_buy_value_krw,
+    sum(ifNull(t.traded_value_krw, 0.0)) AS market_traded_value_krw,
+    if(sum(ifNull(t.traded_value_krw, 0.0)) > 0, (sum(b.net_buy_value_krw) / sum(ifNull(t.traded_value_krw, 0.0))) * 100, 0.0) AS net_buy_pct_turnover,
+    toUInt32(sum(ifNull(t.n_tickers, 0))) AS n_tickers,
+    now() AS ingested_at
+FROM base b
+LEFT JOIN traded t ON t.trade_date = b.trade_date AND t.market = b.market
+GROUP BY b.trade_date, b.investor_type
+"""
+    ch_execute(sql, timeout_sec=180)
+    n = int(ch_scalar(f"SELECT count() FROM trading.market_flow_daily WHERE trade_date >= today() - {int(days)}") or "0")
+    return n
+
+
 def sync_market_flow(days: int) -> int:
+    # 1순위: 공식 시장 수급(investor_flow)
+    n_official = sync_market_flow_from_investor_flow(days)
+    if n_official > 0:
+        return n_official
+
+    # 2순위: 종목 수급 합산(stock_flow_daily)
     ch_execute(f"DELETE FROM trading.market_flow_daily WHERE trade_date >= today() - {int(days)}")
     sql = f"""
 INSERT INTO trading.market_flow_daily
@@ -265,7 +359,7 @@ def sync_legacy_investor_flow(days: int) -> int:
         f"""
 DELETE FROM trading.investor_flow
 WHERE date >= today() - {int(days)}
-  AND investor_type IN ('foreign', 'institution')
+  AND investor_type IN ('foreign', 'institution', 'individual')
 """
     )
     ch_execute(
@@ -284,14 +378,19 @@ SELECT
     trade_date AS date,
     now() AS collected_at,
     market,
-    if(investor_type = 'FOREIGN', 'foreign', 'institution') AS investor_type,
+    multiIf(
+        investor_type = 'FOREIGN', 'foreign',
+        investor_type = 'INST', 'institution',
+        investor_type = 'RETAIL', 'individual',
+        lower(investor_type)
+    ) AS investor_type,
     toInt64(0) AS buy_amount,
     toInt64(0) AS sell_amount,
     toInt64(round(net_buy_value_krw / 1000000.0, 0)) AS net_amount
 FROM trading.market_flow_daily
 WHERE trade_date >= today() - {int(days)}
   AND market IN ('KOSPI', 'KOSDAQ')
-  AND investor_type IN ('FOREIGN', 'INST')
+  AND investor_type IN ('FOREIGN', 'INST', 'RETAIL')
 """
     )
     n = int(
@@ -300,7 +399,7 @@ WHERE trade_date >= today() - {int(days)}
 SELECT count()
 FROM trading.investor_flow
 WHERE date >= today() - {int(days)}
-  AND investor_type IN ('foreign', 'institution')
+  AND investor_type IN ('foreign', 'institution', 'individual')
 """
         )
         or "0"
@@ -316,9 +415,17 @@ def main() -> int:
         action="store_true",
         help="legacy trading.investor_flow를 함께 갱신",
     )
+    ap.add_argument(
+        "--sessions",
+        default=os.getenv("STOCK_FLOW_SOURCE_SESSIONS", "REGULAR"),
+        help="feature_snapshot에서 집계할 세션 CSV (기본: REGULAR)",
+    )
     args = ap.parse_args()
 
     days = max(1, int(args.days))
+    sessions = [s.strip().upper() for s in str(args.sessions or "").split(",") if s.strip()]
+    if not sessions:
+        sessions = ["REGULAR"]
 
     if not table_exists("feature_snapshot"):
         _log("feature_snapshot 테이블이 없어 중단")
@@ -326,8 +433,8 @@ def main() -> int:
 
     try:
         ensure_tables()
-        _log(f"정규화 수급 동기화 시작 (days={days})")
-        stock_rows = sync_stock_flow(days)
+        _log(f"정규화 수급 동기화 시작 (days={days}, sessions={','.join(sessions)})")
+        stock_rows = sync_stock_flow(days, sessions=sessions)
         _log(f"stock_flow_daily rows={stock_rows}")
         market_rows = sync_market_flow(days)
         _log(f"market_flow_daily rows={market_rows}")

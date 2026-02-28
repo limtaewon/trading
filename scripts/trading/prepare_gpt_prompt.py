@@ -19,11 +19,13 @@ from __future__ import annotations
 import os
 import sys
 import json
+import time
 import subprocess
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 # ── logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -44,7 +46,12 @@ Path(UV_CACHE_DIR).mkdir(parents=True, exist_ok=True)
 # ClickHouse: 쿼리 파라미터로 인증 (URL에 user:pass 넣으면 404 발생하는 경우 대응)
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://localhost:8123")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
-CLICKHOUSE_PASS = os.getenv("CLICKHOUSE_PASS", "")
+CLICKHOUSE_PASS = os.getenv("CLICKHOUSE_PASS", os.getenv("CLICKHOUSE_PASSWORD", ""))
+CH_QUERY_TIMEOUT_SEC = int(os.getenv("CH_QUERY_TIMEOUT_SEC", "30"))
+CH_QUERY_RETRIES = max(0, int(os.getenv("CH_QUERY_RETRIES", "2")))
+CH_QUERY_RETRY_BACKOFF_SEC = max(0.1, float(os.getenv("CH_QUERY_RETRY_BACKOFF_SEC", "0.35")))
+CH_MAX_EXECUTION_TIME = max(5, int(os.getenv("CH_MAX_EXECUTION_TIME", "12")))
+CH_MAX_THREADS = max(1, int(os.getenv("CH_MAX_THREADS", "2")))
 OUTPUT_PATH = "/tmp/gpt_prompt.txt"
 HOME = Path.home()
 ADAPTIVE_POLICY_FILE = HOME / ".openclaw" / "state" / "adaptive_policy.json"
@@ -101,9 +108,48 @@ def _get_requests():
 
 
 def _build_ch_url() -> str:
-    """ClickHouse URL에 인증 파라미터를 붙여 반환."""
-    sep = "&" if "?" in CLICKHOUSE_HOST else "?"
-    return f"{CLICKHOUSE_HOST}{sep}user={CLICKHOUSE_USER}&password={CLICKHOUSE_PASS}"
+    """ClickHouse URL에 인증 파라미터를 안전하게 붙여 반환."""
+    host = (CLICKHOUSE_HOST or "http://localhost:8123").strip()
+    if not host:
+        host = "http://localhost:8123"
+    sp = urlsplit(host)
+    scheme = sp.scheme or "http"
+    netloc = sp.netloc or sp.path
+    path = sp.path if sp.netloc else ""
+    if "@" in netloc:
+        netloc = netloc.split("@", 1)[1]
+    pairs = parse_qsl(sp.query, keep_blank_values=True)
+    if CLICKHOUSE_USER:
+        pairs.append(("user", CLICKHOUSE_USER))
+    if CLICKHOUSE_PASS:
+        pairs.append(("password", CLICKHOUSE_PASS))
+    query = urlencode(pairs, doseq=True)
+    return urlunsplit((scheme, netloc, path or "", query, sp.fragment))
+
+
+def _build_ch_query(sql: str) -> str:
+    """SELECT 쿼리에 안전한 실행 설정/포맷을 추가한다."""
+    q = sql.strip().rstrip(";")
+    upper = q.upper()
+    if "FORMAT JSON" in upper:
+        return q
+    if " SETTINGS " not in upper:
+        q += (
+            f"\nSETTINGS max_execution_time={CH_MAX_EXECUTION_TIME},"
+            f" max_threads={CH_MAX_THREADS}"
+        )
+    return q + "\nFORMAT JSON"
+
+
+def _extract_status_code(err: Exception) -> int | None:
+    response = getattr(err, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status
+    code = getattr(err, "code", None)
+    if isinstance(code, int):
+        return code
+    return None
 
 
 def ch_query(sql: str) -> list[dict]:
@@ -113,15 +159,35 @@ def ch_query(sql: str) -> list[dict]:
     """
     _req = _get_requests()
     url = _build_ch_url()
-    query = sql.strip() + "\nFORMAT JSON"
-    try:
-        resp = _req.post(url, data=query.encode("utf-8"), timeout=30)
-        resp.raise_for_status()
-        body = resp.json() if hasattr(resp, 'json') else json.loads(resp.text)
-        return body.get("data", [])
-    except Exception as e:
-        log.warning(f"ClickHouse 쿼리 실패: {e}")
-        return []
+    query = _build_ch_query(sql)
+    attempts = CH_QUERY_RETRIES + 1
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = _req.post(url, data=query.encode("utf-8"), timeout=CH_QUERY_TIMEOUT_SEC)
+            status = int(getattr(resp, "status_code", 0) or 0)
+            if status >= 500 and attempt < attempts:
+                time.sleep(CH_QUERY_RETRY_BACKOFF_SEC * attempt)
+                continue
+            resp.raise_for_status()
+            body = resp.json() if hasattr(resp, "json") else json.loads(resp.text)
+            return body.get("data", [])
+        except Exception as e:
+            last_err = e
+            status = _extract_status_code(e)
+            retryable = status in {429, 500, 502, 503, 504} or status is None
+            if retryable and attempt < attempts:
+                time.sleep(CH_QUERY_RETRY_BACKOFF_SEC * attempt)
+                continue
+            break
+    sql_preview = " ".join(sql.strip().split())[:180]
+    if last_err is not None:
+        status = _extract_status_code(last_err)
+        if status is not None:
+            log.warning(f"ClickHouse 쿼리 실패(status={status}): {sql_preview}")
+        else:
+            log.warning(f"ClickHouse 쿼리 실패: {last_err} | query={sql_preview}")
+    return []
 
 
 def mcporter_call(tool: str, args: str = "") -> dict | None:
@@ -483,7 +549,7 @@ def get_hidden_relation_reasonings(limit: int = 12, min_confidence: float = 0.30
             arrayStringConcat(source_urls, ',') AS source_urls_str,
             arrayStringConcat(evidence_titles, ',') AS evidence_titles_str
         FROM trading.v_hidden_relation_reasoning
-        WHERE toFloat64OrNull(confidence) >= {min_confidence}
+        WHERE toFloat64OrZero(toString(confidence)) >= {min_confidence}
         ORDER BY asof_ts DESC
         LIMIT {limit}
     """)

@@ -203,44 +203,45 @@ class Stage0Result:
 
 
 def compute_stage0() -> Stage0Result:
+    feature_lookback_hours = max(24, int(os.getenv("STAGE0_FEATURE_LOOKBACK_HOURS", "72")))
     freshness_cfg = {
         "feature_snapshot": (
-            "SELECT if(count()=0, 99999, dateDiff('minute', max(ts), now())) AS stale FROM trading.feature_snapshot",
+            "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(ts), now()), 0)) AS stale FROM trading.feature_snapshot",
             int(os.getenv("STAGE0_MAX_STALE_FEATURE_MIN", "30")),
             True,
         ),
         "technical_signals": (
-            "SELECT if(count()=0, 99999, dateDiff('minute', max(updated_at), now())) AS stale FROM trading.technical_signals",
+            "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(updated_at), now()), 0)) AS stale FROM trading.technical_signals",
             int(os.getenv("STAGE0_MAX_STALE_TECH_MIN", "1500")),
             True,
         ),
         "market_regime": (
-            "SELECT if(count()=0, 99999, dateDiff('minute', max(updated_at), now())) AS stale FROM trading.market_regime",
+            "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(updated_at), now()), 0)) AS stale FROM trading.market_regime",
             int(os.getenv("STAGE0_MAX_STALE_REGIME_MIN", "1500")),
             True,
         ),
         "market_index": (
-            "SELECT if(count()=0, 99999, dateDiff('minute', max(collected_at), now())) AS stale FROM trading.market_index",
+            "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(collected_at), now()), 0)) AS stale FROM trading.market_index",
             int(os.getenv("STAGE0_MAX_STALE_MARKET_INDEX_MIN", "1500")),
             False,
         ),
         "exchange_rate": (
-            "SELECT if(count()=0, 99999, dateDiff('minute', max(collected_at), now())) AS stale FROM trading.exchange_rate",
+            "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(collected_at), now()), 0)) AS stale FROM trading.exchange_rate",
             int(os.getenv("STAGE0_MAX_STALE_FX_MIN", "1500")),
             False,
         ),
         "interest_rate": (
-            "SELECT if(count()=0, 99999, dateDiff('minute', max(collected_at), now())) AS stale FROM trading.interest_rate",
+            "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(collected_at), now()), 0)) AS stale FROM trading.interest_rate",
             int(os.getenv("STAGE0_MAX_STALE_RATE_MIN", "2880")),
             False,
         ),
         "news_clusters": (
-            "SELECT if(count()=0, 99999, dateDiff('minute', max(asof_ts), now())) AS stale FROM trading.news_clusters",
+            "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(asof_ts), now()), 0)) AS stale FROM trading.news_clusters",
             int(os.getenv("STAGE0_MAX_STALE_NEWS_CLUSTER_MIN", "1440")),
             False,
         ),
         "dart_disclosure": (
-            "SELECT if(count()=0, 99999, dateDiff('minute', max(collected_at), now())) AS stale FROM trading.dart_disclosure",
+            "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(collected_at), now()), 0)) AS stale FROM trading.dart_disclosure",
             int(os.getenv("STAGE0_MAX_STALE_DART_MIN", "4320")),
             False,
         ),
@@ -273,7 +274,7 @@ def compute_stage0() -> Stage0Result:
         try:
             null_ratio_feature = _to_float(
                 ch_scalar(
-                    """
+                    f"""
 SELECT
     if(
         count() = 0,
@@ -281,7 +282,8 @@ SELECT
         sum(if(symbol = '' OR toFloat64(price) <= 0, 1, 0)) / count()
     )
 FROM trading.feature_snapshot
-WHERE ts >= now() - INTERVAL 1 DAY
+WHERE ts >= now() - INTERVAL {feature_lookback_hours} HOUR
+  AND session = 'REGULAR'
 """
                 ),
                 1.0,
@@ -317,7 +319,7 @@ WHERE date = (SELECT max(date) FROM trading.technical_signals)
         try:
             outlier_count = _to_int(
                 ch_scalar(
-                    """
+                    f"""
 SELECT countIf(
     abs(toFloat64(news_event_score)) > 100000000
     OR abs(toFloat64(inst_flow)) > 100000000
@@ -325,7 +327,8 @@ SELECT countIf(
     OR toFloat64(price) > 5000000
 )
 FROM trading.feature_snapshot
-WHERE ts >= now() - INTERVAL 1 DAY
+WHERE ts >= now() - INTERVAL {feature_lookback_hours} HOUR
+  AND session = 'REGULAR'
 """
                 ),
                 10,
@@ -338,7 +341,14 @@ WHERE ts >= now() - INTERVAL 1 DAY
     if table_exists("news_event_frames"):
         try:
             future_cnt = _to_int(
-                ch_scalar("SELECT count() FROM trading.news_event_frames WHERE published_at > now() + INTERVAL 1 MINUTE"),
+                ch_scalar(
+                    """
+SELECT count()
+FROM trading.news_event_frames
+WHERE collected_at >= now() - INTERVAL 7 DAY
+  AND published_at > collected_at + INTERVAL 10 MINUTE
+"""
+                ),
                 0,
             )
             time_alignment_ok = future_cnt == 0
@@ -775,15 +785,47 @@ HAVING match(ticker, '^[0-9]{6}$')
             """
 SELECT
     symbol AS ticker,
-    argMax(liquidity_krw, ts) AS liquidity_krw,
-    argMax(spread_bp, ts) AS spread_bp
+    argMaxIf(liquidity_krw, ts, session = 'REGULAR') AS liquidity_krw,
+    argMaxIf(spread_bp, ts, session = 'REGULAR') AS spread_bp
 FROM trading.feature_snapshot
-WHERE ts >= now() - INTERVAL 2 DAY
+WHERE ts >= now() - INTERVAL 5 DAY
   AND match(symbol, '^[0-9]{6}$')
 GROUP BY symbol
 """
         )
         maps["risk"] = {str(r.get("ticker")): r for r in rows}
+
+    if table_exists("stock_flow_daily"):
+        rows = ch_select(
+            """
+SELECT
+    ticker,
+    avg(day_traded_value_krw) AS adv20_traded_value_krw
+FROM
+(
+    SELECT
+        trade_date,
+        ticker,
+        max(traded_value_krw) AS day_traded_value_krw
+    FROM trading.stock_flow_daily
+    WHERE trade_date >= today() - 20
+      AND source_session = 'REGULAR'
+      AND match(ticker, '^[0-9]{6}$')
+    GROUP BY trade_date, ticker
+)
+GROUP BY ticker
+"""
+        )
+        for r in rows:
+            ticker = str(r.get("ticker") or "")
+            if not ticker:
+                continue
+            adv20 = _to_float(r.get("adv20_traded_value_krw"), 0.0)
+            if ticker not in maps["risk"]:
+                maps["risk"][ticker] = {"ticker": ticker, "liquidity_krw": adv20, "spread_bp": 0.0}
+                continue
+            if _to_float(maps["risk"][ticker].get("liquidity_krw"), 0.0) <= 0 and adv20 > 0:
+                maps["risk"][ticker]["liquidity_krw"] = adv20
 
     if table_exists("hidden_relation_reasoning"):
         rows = ch_select(

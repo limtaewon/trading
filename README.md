@@ -25,7 +25,7 @@
 - 프롬프트를 생성한 뒤 OpenClaw Agent를 호출한다.
 - 동일 프롬프트 해시 캐시(TTL)와 락을 사용해 중복 호출을 줄인다.
 - 응답 JSON 유효성을 확인하고 `/tmp/gpt_response.json`에 저장한다.
-- 현재 브레인 실행은 `openclaw agent` 단일 경로만 사용한다.
+- 기본 실행은 `openclaw agent`이며, 실패 시 `codex exec` 폴백 경로를 사용한다.
 
 ### 2-3. `prepare_gpt_prompt.py`
 - ClickHouse, KIS(mcporter), 워크스페이스 메모리 파일을 합쳐 판단 프롬프트를 만든다.
@@ -60,6 +60,7 @@
 ### 4-1. `enrich_data.sh`
 - `collect_market_data.py`, `technical_indicators.py`, `market_regime.py`, `collect_dart.py`를 오케스트레이션한다.
 - `sync_normalized_flow_daily.py`로 `stock_flow_daily`/`market_flow_daily`를 정규화 갱신한다.
+- `refresh_interest_watchlist.py`로 동적 watchlist를 재산출한다(룰 + LLM 리랭크).
 - `decision_operating_pipeline.py`로 Stage 기반 판단 로그(`decision_run`, `decision_candidate`)를 생성한다.
 - 장전/장중 빠른 갱신 모드(`--quick`)를 지원한다.
 
@@ -100,7 +101,39 @@ bash scripts/ops/deploy_to_runtime.sh
 ## 8) 현재 정리 원칙
 - 주식 로직은 `scripts/trading` 중심으로만 관리한다.
 - 레거시/백업 성격 파일은 지속적으로 제거한다.
-- LLM 실행 경로는 OpenClaw Agent 단일 경로를 유지한다.
+- LLM 실행은 OpenClaw Agent를 우선 사용하고, 장애 시 Codex fallback을 허용한다.
+
+## 11) 유망주 선정/브리핑 기준(최신)
+
+### 11-1. 유망주 데이터 소스
+- 두레이/파이프라인 브리핑의 유망주는 `trading.decision_candidate`를 기준으로 표시한다.
+- `decision_candidate`는 `decision_operating_pipeline.py`가 생성하며, 기본 universe는 `watchlist`다.
+- `watchlist` 소스는 `trading.interest_watchlist`이고, `refresh_interest_watchlist.py`가 아래 신호를 합성해 갱신한다.
+- 기술: `technical_signals` (signal_score, RSI, BB, 거래량)
+- 뉴스: `news`, `news_event_frames` (pos/neg, 뉴스건수, explain_ready)
+- 연관: `hidden_relation_signals` (relation_score, bias, source_tickers/channels)
+- 수급: `feature_snapshot` (foreign_flow, inst_flow)
+
+### 11-2. LLM 반영 방식
+- 후보군은 룰 기반 `composite_score`로 1차 정렬한다.
+- 같은 후보를 LLM에 전달해 `llm_score/verdict/reason/risk_flags/catalysts`를 얻는다.
+- 최종 점수는 `rule_weight` + `llm_weight` 가중합으로 산출한다.
+- LLM 호출 실패 시 자동으로 룰 기반 점수만 사용한다.
+
+### 11-3. 두레이 보고 흐름
+- 기본값(`DOORAY_USE_PIPELINE_BRIEFING=1`)에서 `send_dooray_briefing.py`는 파이프라인 모드를 사용한다.
+- 파이프라인 모드는 `send_decision_dryrun_telegram.py`를 재사용해 `decision_run/decision_candidate` 기반 메시지를 생성한다.
+- 유망주 상세(뉴스 링크/연관 해석/타이밍 근거)는 브리핑 생성 시 `news`, `news_event_frames`, `hidden_relation_signals`, `technical_signals`를 추가 조회해 보강한다.
+
+### 11-4. 운영 실행 예시
+```bash
+# 1) 전체 데이터/의사결정 파이프라인
+set -a; source ~/.openclaw/.env.trading; set +a
+bash ~/.openclaw/scripts/trading/enrich_data.sh all
+
+# 2) 최신 decision_id 기준 두레이 보고
+python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py
+```
 
 ## 9) 보안 운영
 - 민감값은 코드 하드코딩 금지, `.env` 기반으로만 주입한다.

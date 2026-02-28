@@ -28,6 +28,7 @@ fi
 
 BASE="$HOME/.openclaw"
 TRADING_SCRIPTS="$BASE/scripts/trading"
+CODEX_ENV_FILE="$BASE/cron/codex_env.sh"
 JOBS_FILE="$BASE/cron/codex_jobs.json"
 LEGACY_JOBS_FILE="$BASE/cron/jobs.json"
 LOG_FILE="$BASE/logs/codex-trading-cron.log"
@@ -48,6 +49,12 @@ mkdir -p "$STATE_DIR" "$BASE/logs"
 
 # cron 최소 PATH 환경에서 mcporter/codex/python을 안정적으로 찾도록 보강.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
+
+# 공통 크론 환경 로드 (.env.public/.env/.env.trading)
+if [[ -f "$CODEX_ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CODEX_ENV_FILE"
+fi
 
 ts_now() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$JOB_NAME] $*" >> "$LOG_FILE"; }

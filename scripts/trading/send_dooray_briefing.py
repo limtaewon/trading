@@ -14,6 +14,7 @@ import hashlib
 import subprocess
 import argparse
 import re
+import html
 from datetime import datetime
 from urllib.parse import quote_plus
 from urllib.request import urlopen, Request
@@ -36,6 +37,38 @@ URGENT_CONTEXT_PATH = os.path.expanduser("~/.openclaw/state/news_urgent_context.
 
 def run_cmd(cmd: str):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+
+def _dooray_text_from_html(src: str) -> str:
+    t = str(src or "")
+    t = re.sub(
+        r'<a\s+href="([^"]+)">([^<]+)</a>',
+        lambda m: f"{m.group(2)}: {m.group(1)}",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(r"</?(b|code)>", "", t, flags=re.IGNORECASE)
+    t = html.unescape(t)
+    return t
+
+
+def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clusters: int = 3):
+    from send_decision_dryrun_telegram import resolve_decision_id, build_message  # type: ignore
+
+    did = resolve_decision_id((decision_id or "").strip())
+    html_msg = build_message(
+        decision_id=did,
+        top_n=max(1, int(top_candidates)),
+        clusters_n=max(1, int(clusters)),
+    )
+    msg = _dooray_text_from_html(html_msg)
+    raw = {
+        "mode": "pipeline",
+        "decision_id": did,
+        "top_candidates": max(1, int(top_candidates)),
+        "clusters": max(1, int(clusters)),
+    }
+    return msg, raw
 
 
 def refresh_market_data():
@@ -726,44 +759,38 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="웹훅 전송 없이 메시지만 출력")
     ap.add_argument("--breaking", action="store_true", help="속보 기반 매매 해석 브리핑 모드")
     ap.add_argument("--context-file", default=URGENT_CONTEXT_PATH, help="속보 컨텍스트 JSON 경로")
+    ap.add_argument("--decision-id", default="", help="파이프라인 브리핑 decision_id(기본: 최신)")
+    ap.add_argument("--top-candidates", type=int, default=5, help="유망주 표시 개수")
+    ap.add_argument("--clusters", type=int, default=3, help="클러스터 표시 개수")
+    ap.add_argument("--legacy-format", action="store_true", help="기존 도레이 브리핑 포맷 사용")
     args = ap.parse_args()
     if not WEBHOOK and not args.dry_run:
         raise SystemExit("DOORAY_WEBHOOK_URL 환경변수가 없습니다.")
 
     refresh_market_data()
-    urgent_context = load_urgent_context(args.context_file) if args.breaking else {}
-    msg, raw = build_message(urgent_context)
+    use_pipeline = os.environ.get("DOORAY_USE_PIPELINE_BRIEFING", "1") == "1" and not args.legacy_format
+    if use_pipeline:
+        msg, raw = build_pipeline_message(
+            decision_id=args.decision_id,
+            top_candidates=args.top_candidates,
+            clusters=args.clusters,
+        )
+    else:
+        urgent_context = load_urgent_context(args.context_file) if args.breaking else {}
+        msg, raw = build_message(urgent_context)
 
     if args.dry_run:
         print(msg)
         return
 
-    digest = hashlib.sha256(json.dumps(raw, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-    news_only = {
-        "major_news": raw.get("major_news", []),
-        "breaking": raw.get("breaking", []),
-    }
-    news_digest = hashlib.sha256(json.dumps(news_only, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(msg.encode("utf-8")).hexdigest()
+    news_digest = digest
 
     state = load_state()
-    # 사용자가 요청: 기존에 보낸 뉴스면 재전송 금지
-    if args.breaking:
-        urgent_context = raw.get("urgent_context", {})
-        urgent_digest_payload = {
-            "holdings": urgent_context.get("holdings", []),
-            "alerts": urgent_context.get("alerts", []),
-        }
-        urgent_digest = hashlib.sha256(
-            json.dumps(urgent_digest_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        ).hexdigest() if urgent_context else None
-        if urgent_digest and state.get("last_breaking_context_digest") == urgent_digest:
-            return
-    else:
-        if state.get("last_news_digest") == news_digest:
-            return
-        # 안전장치: 완전 동일 브리핑이면 중복 전송 금지
-        if state.get("last_digest") == digest:
-            return
+    if state.get("last_news_digest") == news_digest:
+        return
+    if state.get("last_digest") == digest:
+        return
 
     resp = requests.post(WEBHOOK, json={"text": msg}, timeout=10)
     resp.raise_for_status()
@@ -774,16 +801,11 @@ def main():
         "last_news_digest": news_digest,
         "sent_at": datetime.now().isoformat(),
     })
-    if args.breaking:
-        urgent_context = raw.get("urgent_context", {})
-        if urgent_context:
-            urgent_digest_payload = {
-                "holdings": urgent_context.get("holdings", []),
-                "alerts": urgent_context.get("alerts", []),
-            }
-            next_state["last_breaking_context_digest"] = hashlib.sha256(
-                json.dumps(urgent_digest_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-            ).hexdigest()
+    if use_pipeline:
+        next_state["last_mode"] = "pipeline"
+        next_state["last_decision_id"] = str(raw.get("decision_id", ""))
+    else:
+        next_state["last_mode"] = "legacy"
     save_state(next_state)
 
 

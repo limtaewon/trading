@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -81,6 +83,9 @@ HARD_STOP_LOSS_ORDER_TYPE = "MARKET" if HARD_STOP_LOSS_ORDER_TYPE in {"MARKET", 
 HARD_STOP_LOSS_PRICE_TYPE = os.getenv("HARD_STOP_LOSS_PRICE_TYPE", "bidp1").lower().strip() or "bidp1"
 HARD_STOP_LOSS_PRICE_TYPE = HARD_STOP_LOSS_PRICE_TYPE if HARD_STOP_LOSS_PRICE_TYPE in {"bidp1", "askp1", "mid", "limit"} else "bidp1"
 EVENT_HORIZON_SET = {"intraday", "1d", "1-3d", "1w", "1-2w", "2w+"}
+TELEGRAM_ORDER_BRIEF_ENABLED = os.getenv("TELEGRAM_ORDER_BRIEF_ENABLED", "1") == "1"
+TELEGRAM_ORDER_BRIEF_MAX_EXEC = max(1, int(os.getenv("TELEGRAM_ORDER_BRIEF_MAX_EXEC", "6")))
+TELEGRAM_ORDER_BRIEF_MAX_SKIP = max(1, int(os.getenv("TELEGRAM_ORDER_BRIEF_MAX_SKIP", "6")))
 
 try:
     HARD_TAKE_PROFIT_PCT = float(os.getenv("HARD_TAKE_PROFIT_PCT", "0.15"))
@@ -1393,6 +1398,100 @@ def append_journal(event: dict[str, Any]) -> None:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def _load_telegram_notify():
+    here = Path(__file__).resolve().parent
+    scripts_parent = str(here.parent)
+    if scripts_parent not in sys.path:
+        sys.path.insert(0, scripts_parent)
+    from telegram_notify import notify  # type: ignore
+
+    return notify
+
+
+def _short(v: Any, max_len: int = 140) -> str:
+    s = str(v or "").replace("\n", " ").strip()
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 3] + "..."
+
+
+def _ticker_label(item: dict[str, Any]) -> str:
+    ticker = str(item.get("ticker", "") or "").strip()
+    name = str(item.get("ticker_name", "") or "").strip()
+    if name and ticker:
+        return f"{name}({ticker})"
+    return ticker or name or "-"
+
+
+def build_telegram_order_brief(result: dict[str, Any]) -> str:
+    ts = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    decision_id = str(result.get("decision_id", "") or "")
+    session_id = str(result.get("session_id", "") or "")
+    kill_state = str(result.get("kill_switch_state", "") or "")
+    executed = result.get("executed", [])
+    skipped = result.get("skipped", [])
+    attempted = result.get("attempted", [])
+
+    if not isinstance(executed, list):
+        executed = []
+    if not isinstance(skipped, list):
+        skipped = []
+    if not isinstance(attempted, list):
+        attempted = []
+
+    lines: list[str] = []
+    lines.append(f"📒 <b>매매 후 브리핑</b> ({ts})")
+    lines.append(f"- decision_id: <code>{html.escape(decision_id)}</code>")
+    lines.append(f"- 세션: {html.escape(session_id)} / kill_switch: {html.escape(kill_state)}")
+    lines.append(
+        f"- 주문 요약: 시도 {len(attempted)}건 / 실행 {len(executed)}건 / 미실행 {len(skipped)}건"
+    )
+    lines.append("")
+
+    lines.append("<b>실행 주문</b>")
+    if not executed:
+        lines.append("- 실행 주문 없음")
+    else:
+        for i, e in enumerate(executed[:TELEGRAM_ORDER_BRIEF_MAX_EXEC], 1):
+            side = str(e.get("action", "") or "").upper()
+            qty = to_int(e.get("quantity", 0), 0)
+            order_price = to_int(e.get("order_price", e.get("price", 0)), 0)
+            status = str(e.get("status", "") or "")
+            lines.append(
+                f"{i}) {html.escape(side)} {_ticker_label(e)} {qty}주 @ {order_price:,} ({html.escape(status)})"
+            )
+            lines.append(f"   - 이유: {html.escape(_short(e.get('reasoning', '-'), 160))}")
+            msg1 = _short(e.get("msg1", ""), 120)
+            if msg1:
+                lines.append(f"   - 체결응답: {html.escape(msg1)}")
+
+    lines.append("")
+    lines.append("<b>미실행 사유</b>")
+    if not skipped:
+        lines.append("- 미실행 없음")
+    else:
+        reason_counts: dict[str, int] = {}
+        for s in skipped:
+            reason = str(s.get("reason", "unknown") or "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        top_reason_items = sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[:4]
+        lines.append(
+            "- 사유 집계: "
+            + ", ".join(f"{html.escape(_short(k, 40))} {v}건" for k, v in top_reason_items)
+        )
+        for i, s in enumerate(skipped[:TELEGRAM_ORDER_BRIEF_MAX_SKIP], 1):
+            side = str(s.get("action", "") or "").upper()
+            qty = to_int(s.get("quantity", 0), 0)
+            reason = _short(s.get("reason", "unknown"), 120)
+            lines.append(f"{i}) {html.escape(side)} {_ticker_label(s)} {qty}주")
+            lines.append(f"   - 사유: {html.escape(reason)}")
+            reasoning = _short(s.get("reasoning", ""), 120)
+            if reasoning:
+                lines.append(f"   - 원주문 이유: {html.escape(reasoning)}")
+
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--response", default="/tmp/gpt_response.json")
@@ -1540,6 +1639,8 @@ def main() -> int:
         time_horizon = str(o.get("time_horizon", "") or "").strip()[:16].lower()
         lag_hours = max(0, min(336, to_int(o.get("lag_hours", 0), 0)))
         channels = normalize_text_list(o.get("channels", []), max_items=8, max_len=24)
+        ticker_name = str(o.get("ticker_name", "") or "").strip()
+        reasoning = str(o.get("reasoning", "") or "").strip().replace("\n", " ")[:280]
         thesis_path = str(o.get("thesis_path", "") or "").strip().replace("\n", " ")[:280]
         invalidation = str(o.get("invalidation", "") or "").strip().replace("\n", " ")[:280]
         evidence_refs, evidence_urls = parse_evidence_fields(o)
@@ -1586,10 +1687,12 @@ def main() -> int:
             "idx": idx,
             "action": action,
             "ticker": ticker,
+            "ticker_name": ticker_name,
             "quantity": qty,
             "order_type": order_type,
             "price_type": price_type,
             "price": raw_price,
+            "reasoning": reasoning,
             "confidence": conf,
             "venue_preference": venue_pref,
             "p_fill": p_fill,
@@ -1904,6 +2007,14 @@ def main() -> int:
             "dry_run": args.dry_run,
         }
     )
+
+    if TELEGRAM_ORDER_BRIEF_ENABLED and not args.dry_run and (attempted or executed or skipped):
+        try:
+            notify = _load_telegram_notify()
+            msg = build_telegram_order_brief(result)
+            _ = bool(notify(msg))
+        except Exception:
+            pass
 
     print(json.dumps(result, ensure_ascii=False))
     return 0

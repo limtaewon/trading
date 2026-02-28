@@ -6,9 +6,13 @@
 핵심 실행 흐름:
 - codex_cron_router.sh -> codex_brain.sh -> prepare_gpt_prompt.py -> execute_gpt_orders.py
 - 뉴스/데이터 파이프라인: collect_news.py, monitor_news.py, cluster_news.py, llm_relation_reasoner.py
-- P0 의사결정 로그 파이프라인: enrich_data.sh -> sync_normalized_flow_daily.py -> decision_operating_pipeline.py
+- P0 의사결정 로그 파이프라인:
+  enrich_data.sh -> refresh_interest_watchlist.py -> decision_operating_pipeline.py
+- 브리핑 파이프라인:
+  send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
+  (decision_run / decision_candidate 기반)
 
 정리 정책:
 - 불필요 백업 파일(*.bak) 삭제
-- LLM 실행은 openclaw agent 전용(codex exec fallback 제거)
+- LLM 실행은 openclaw agent 우선 + codex exec fallback 허용
 - 실행 경로는 `~/.openclaw/scripts/trading/...` 기준으로 통일

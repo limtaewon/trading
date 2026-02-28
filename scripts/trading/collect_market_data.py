@@ -25,6 +25,7 @@ import sys
 import json
 import subprocess
 import shutil
+import re
 
 # ensure local imports work regardless of CWD (cron, manual run, etc.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -47,7 +48,14 @@ logging.basicConfig(
 log = logging.getLogger("market-data")
 
 # ─── 설정 ───────────────────────────────────────────────────
-CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "http://localhost:8123")
+CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "").strip()
+if not CLICKHOUSE_URL:
+    CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_HOST", "http://localhost:8123").strip()
+if not CLICKHOUSE_URL:
+    CLICKHOUSE_URL = "http://localhost:8123"
+CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "").strip()
+CLICKHOUSE_PASS = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
+CLICKHOUSE_AUTH = (CLICKHOUSE_USER, CLICKHOUSE_PASS) if CLICKHOUSE_USER else None
 MCPORTER_PATH = os.getenv("MCPORTER")
 MCPORTER = None
 if MCPORTER_PATH and os.path.isfile(MCPORTER_PATH) and os.access(MCPORTER_PATH, os.X_OK):
@@ -55,6 +63,13 @@ if MCPORTER_PATH and os.path.isfile(MCPORTER_PATH) and os.access(MCPORTER_PATH, 
 else:
     MCPORTER = shutil.which("mcporter")
 FLOW_SYMBOL_LIMIT = int(os.getenv("INVESTOR_FLOW_SYMBOL_LIMIT", "30"))
+
+NAVER_RT_URL = "https://polling.finance.naver.com/api/realtime"
+NAVER_INDEX_PAGE_URL = "https://finance.naver.com/sise/sise_index.naver?code={code}"
+NAVER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    "Referer": "https://finance.naver.com/",
+}
 
 # ECOS (한국은행) - https://ecos.bok.or.kr/api/ 에서 인증키 발급
 ECOS_API_KEY = os.environ.get("ECOS_API_KEY", "")
@@ -85,6 +100,8 @@ COMMODITY_SYMBOLS = {
     "COPPER": {"symbol": "HG=F",  "name": "구리"},
 }
 
+KOREA_INDEX_CODES = {"KOSPI", "KOSDAQ"}
+
 # ECOS 금리 코드
 ECOS_RATES = {
     "BOK_BASE":  {"stat": "722Y001", "item": "0101000", "name": "한국은행 기준금리", "cycle": "D"},
@@ -99,9 +116,9 @@ def ch_query(query, data=None):
     """ClickHouse 쿼리 실행"""
     try:
         if data:
-            resp = requests.post(CLICKHOUSE_URL, data=data.encode("utf-8"), timeout=10)
+            resp = requests.post(CLICKHOUSE_URL, data=data.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
         else:
-            resp = requests.get(CLICKHOUSE_URL, params={"query": query}, timeout=10)
+            resp = requests.get(CLICKHOUSE_URL, params={"query": query}, timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         return resp.text.strip()
     except Exception as e:
@@ -136,7 +153,7 @@ def ch_insert(table, columns, rows, dedup_col=None, dedup_cols=None):
 
             key_sql = ", ".join(dedup_cols)
             q = f"SELECT DISTINCT {key_sql} FROM {table} {where_sql} LIMIT 50000"
-            r = requests.get(CLICKHOUSE_URL, params={"query": q}, timeout=15)
+            r = requests.get(CLICKHOUSE_URL, params={"query": q}, timeout=15, auth=CLICKHOUSE_AUTH)
             r.raise_for_status()
 
             for line in r.text.strip().splitlines():
@@ -177,7 +194,7 @@ def ch_insert(table, columns, rows, dedup_col=None, dedup_cols=None):
 
     query = f"INSERT INTO {table} ({col_str}) VALUES {','.join(val_strs)}"
     try:
-        resp = requests.post(CLICKHOUSE_URL, data=query.encode("utf-8"), timeout=10)
+        resp = requests.post(CLICKHOUSE_URL, data=query.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         return len(rows)
     except Exception as e:
@@ -222,6 +239,112 @@ def _safe_int(val, default=0):
         return int(val)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_number_text(v) -> float:
+    s = str(v or "").strip().replace(",", "")
+    if not s:
+        return 0.0
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def _fetch_naver_realtime_korea_indices() -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    try:
+        r = requests.get(
+            NAVER_RT_URL,
+            params={"query": "SERVICE_INDEX:KOSPI,KOSDAQ"},
+            headers=NAVER_HEADERS,
+            timeout=10,
+        )
+        r.raise_for_status()
+        j = r.json()
+        result = j.get("result", {}) if isinstance(j, dict) else {}
+        areas = result.get("areas", []) if isinstance(result, dict) else []
+        datas = []
+        if areas and isinstance(areas[0], dict):
+            datas = areas[0].get("datas", []) or []
+        for d in datas:
+            if not isinstance(d, dict):
+                continue
+            code = str(d.get("cd", "")).strip().upper()
+            if code not in KOREA_INDEX_CODES:
+                continue
+            out[code] = {
+                "close": _safe_number_text(d.get("nv")) / 100.0,
+                "change_pct": _safe_number_text(d.get("cr")),
+                "open": _safe_number_text(d.get("ov")) / 100.0,
+                "high": _safe_number_text(d.get("hv")) / 100.0,
+                "low": _safe_number_text(d.get("lv")) / 100.0,
+                "volume": _safe_int(d.get("aq"), 0),
+                "market_state": str(d.get("ms", "") or ""),
+            }
+    except Exception as e:
+        log.warning(f"  Naver 실시간 지수 조회 실패: {e}")
+    return out
+
+
+def _fetch_naver_index_page_snapshot(code: str) -> dict:
+    code = (code or "").strip().upper()
+    if code not in KOREA_INDEX_CODES:
+        return {}
+    try:
+        r = requests.get(
+            NAVER_INDEX_PAGE_URL.format(code=code),
+            headers=NAVER_HEADERS,
+            timeout=10,
+        )
+        r.raise_for_status()
+        html = r.text
+    except Exception as e:
+        log.warning(f"  Naver 지수 페이지 조회 실패 [{code}]: {e}")
+        return {}
+
+    date_m = re.search(r"(\d{4}\.\d{2}\.\d{2})\s*장마감", html)
+    trade_date = date_m.group(1).replace(".", "-") if date_m else datetime.now().strftime("%Y-%m-%d")
+    now_m = re.search(r'id="now_value"[^>]*>([^<]+)<', html)
+    close_price = _safe_number_text(now_m.group(1) if now_m else 0)
+    chg_m = re.search(r'id="change_value_and_rate"[^>]*>.*?([+\-]?\d+\.\d+)%', html, re.S)
+    change_pct = _safe_number_text(chg_m.group(1) if chg_m else 0)
+
+    def _extract_by_id(tag_id: str) -> float:
+        m = re.search(rf'id="{tag_id}"[^>]*>([^<]+)<', html)
+        return _safe_number_text(m.group(1) if m else 0)
+
+    flow_map = {}
+    for label, inv in (("개인", "individual"), ("외국인", "foreign"), ("기관", "institution")):
+        m = re.search(
+            rf"{label}<br><span class=\"[^\"]*\">([+\-]?[0-9,]+)\s*<span>억</span>",
+            html,
+            re.S,
+        )
+        if m:
+            flow_map[inv] = _safe_number_text(m.group(1))
+
+    program_map = {}
+    for label, key in (("차익", "program_arb"), ("비차익", "program_nonarb"), ("전체", "program_total")):
+        m = re.search(
+            rf"{label}<br><span class=\"[^\"]*\">([+\-]?[0-9,]+)\s*<span>억</span>",
+            html,
+            re.S,
+        )
+        if m:
+            program_map[key] = _safe_number_text(m.group(1))
+
+    return {
+        "trade_date": trade_date,
+        "close_price": close_price,
+        "change_pct": change_pct,
+        "high": _extract_by_id("high_value"),
+        "low": _extract_by_id("low_value"),
+        "volume": _safe_int(_extract_by_id("quant"), 0),
+        "traded_amount": _extract_by_id("amount"),
+        "investor_flow_eok": flow_map,
+        "program_flow_eok": program_map,
+    }
 
 
 def _run_kis_stock_quote(symbol: str):
@@ -280,7 +403,7 @@ def _query_top_tickers_for_flow(limit: int = 30) -> list[str]:
         f"ORDER BY score DESC LIMIT {int(limit)} FORMAT JSONEachRow"
     )
     try:
-        resp = requests.post(CLICKHOUSE_URL, data=q.encode("utf-8"), timeout=10)
+        resp = requests.post(CLICKHOUSE_URL, data=q.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         rows = []
         for line in resp.text.strip().splitlines():
@@ -301,6 +424,9 @@ def _query_top_tickers_for_flow(limit: int = 30) -> list[str]:
 
 def _market_session_label(now_ts=None):
     now_ts = now_ts or datetime.now()
+    # 주말은 항상 OFF
+    if now_ts.weekday() >= 5:
+        return "OFF"
     hhmm = int(now_ts.strftime("%H%M"))
     if 900 <= hhmm < 1520:
         return "REGULAR"
@@ -320,8 +446,35 @@ def collect_indices(days=7):
         log.error("yfinance 미설치: pip install yfinance --break-system-packages")
         return 0
 
+    naver_rt = _fetch_naver_realtime_korea_indices()
+    naver_pages = {
+        "KOSPI": _fetch_naver_index_page_snapshot("KOSPI"),
+        "KOSDAQ": _fetch_naver_index_page_snapshot("KOSDAQ"),
+    }
+
     rows = []
     for code, info in INDEX_SYMBOLS.items():
+        if code in KOREA_INDEX_CODES:
+            # 한국 지수는 Naver 기준값을 우선 사용해 장마감 수치 정합성 확보.
+            page = naver_pages.get(code, {})
+            rt = naver_rt.get(code, {})
+            if not page and not rt:
+                log.warning(f"  {code}: Naver 데이터 없음, yfinance 폴백 시도")
+            else:
+                date_str = str(page.get("trade_date") or datetime.now().strftime("%Y-%m-%d"))
+                close = round(_safe_number_text(rt.get("close", page.get("close_price", 0))), 2)
+                change_pct = round(_safe_number_text(rt.get("change_pct", page.get("change_pct", 0))), 2)
+                high = round(_safe_number_text(rt.get("high", page.get("high", 0))), 2)
+                low = round(_safe_number_text(rt.get("low", page.get("low", 0))), 2)
+                open_p = round(_safe_number_text(rt.get("open", 0)), 2)
+                volume = _safe_int(rt.get("volume", page.get("volume", 0)), 0)
+                rows.append((
+                    date_str, code, info["name"],
+                    close, change_pct, volume, high, low, open_p
+                ))
+                log.info(f"  {code:8s} ({info['name']:12s}): Naver 장마감 {date_str} {close:,.2f} ({change_pct:+.2f}%)")
+                continue
+
         try:
             ticker = yf.Ticker(info["symbol"])
             hist = ticker.history(period=f"{days}d")
@@ -351,6 +504,22 @@ def collect_indices(days=7):
             log.warning(f"  {code} 수집 실패: {e}")
 
     if rows:
+        # KOSPI/KOSDAQ는 장마감 공식값으로 덮어쓰기 위해 기존 일자 데이터 삭제 후 재삽입
+        korea_dates = sorted(
+            {
+                str(r[0])
+                for r in rows
+                if len(r) >= 2 and str(r[1]) in KOREA_INDEX_CODES
+            }
+        )
+        if korea_dates:
+            date_list = ", ".join(f"'{d}'" for d in korea_dates)
+            del_sql = (
+                "DELETE FROM trading.market_index "
+                f"WHERE index_code IN ('KOSPI','KOSDAQ') AND date IN ({date_list})"
+            )
+            ch_query(None, data=del_sql)
+
         columns = ["date", "index_code", "index_name",
                     "close_price", "change_pct", "volume", "high", "low", "open_price"]
         inserted = ch_insert("trading.market_index", columns, rows, dedup_cols=["date", "index_code"])
@@ -517,18 +686,64 @@ def collect_investor_flow(days=7):
     """
     KIS API 투자자별 매매동향
     """
+    total_inserted = 0
+    session = _market_session_label()
+
+    # (1) 시장 전체 수급: Naver 지수 페이지의 투자자별 순매수(개인/외국인/기관) 반영
+    market_rows = []
+    for code in ("KOSPI", "KOSDAQ"):
+        snap = _fetch_naver_index_page_snapshot(code)
+        if not snap:
+            continue
+        trade_date = str(snap.get("trade_date", "") or "")
+        flow = snap.get("investor_flow_eok", {}) or {}
+        if not trade_date or not flow:
+            continue
+        for inv_name, inv_code in (("individual", "individual"), ("foreign", "foreign"), ("institution", "institution")):
+            if inv_name not in flow:
+                continue
+            net_eok = _safe_number_text(flow.get(inv_name))
+            # investor_flow 단위는 "백만원"으로 맞춤: 1억 = 100백만원
+            net_amount = _safe_int(round(net_eok * 100, 0), 0)
+            market_rows.append((
+                trade_date,
+                code,
+                inv_code,
+                0,          # buy_amount (페이지에 미노출)
+                0,          # sell_amount (페이지에 미노출)
+                net_amount
+            ))
+
+    if market_rows:
+        columns = ["date", "market", "investor_type", "buy_amount", "sell_amount", "net_amount"]
+        inserted_market = ch_insert(
+            "trading.investor_flow",
+            columns,
+            market_rows,
+            dedup_cols=["date", "market", "investor_type"],
+        )
+        total_inserted += inserted_market
+        log.info(f"  → 시장 수급(investor_flow) {inserted_market}건 저장")
+    else:
+        log.warning("  시장 수급: Naver 파싱 데이터 없음")
+
+    # (2) 종목 스냅샷 수급: 정규장(REGULAR)에서만 반영 (OFF/주말 왜곡 방지)
+    if session != "REGULAR":
+        log.info(f"  종목 수급 스냅샷: session={session} → 저장 스킵")
+        return total_inserted
+
     if not MCPORTER:
-        log.info("  투자자 동향: mcporter 미설치 → 수집 스킵")
-        return 0
+        log.info("  종목 수급 스냅샷: mcporter 미설치 → 스킵")
+        return total_inserted
 
     symbols = _query_top_tickers_for_flow(FLOW_SYMBOL_LIMIT)
     if not symbols:
-        log.info("  투자자 동향: 상위 종목 후보 없음 → 수집 스킵")
-        return 0
+        log.info("  종목 수급 스냅샷: 상위 종목 후보 없음 → 스킵")
+        return total_inserted
 
-    rows = []
-    session = _market_session_label()
+    snapshot_rows = []
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    skipped_invalid_price = 0
 
     for symbol in symbols:
         payload = _run_kis_stock_quote(symbol)
@@ -540,8 +755,11 @@ def collect_investor_flow(days=7):
         inst_flow = _safe_int(quote.get("pgtr_ntby_qty"), 0)
         price = _safe_float(quote.get("stck_prpr"), 0.0)
         foreign_net_flow = _safe_int(quote.get("frgn_ntby_qty"), 0)
+        if price <= 0:
+            skipped_invalid_price += 1
+            continue
 
-        rows.append((
+        snapshot_rows.append((
             now_ts,
             symbol,
             session,
@@ -551,29 +769,32 @@ def collect_investor_flow(days=7):
             0.0,      # rsi14
             0.0,      # spread_bp
             0.0,      # liquidity_krw
-            foreign_ownership,   # feature_snapshot.foreign_flow 사용
-            inst_flow,           # feature_snapshot.inst_flow 사용
-            foreign_net_flow,    # feature_snapshot.news_event_score 사용(외국인 순매수)
-            0.0,                # dart_event_score
-            ""                  # regime_label
+            foreign_ownership,
+            inst_flow,
+            foreign_net_flow,
+            0.0,      # dart_event_score
+            ""
         ))
         time.sleep(0.15)
 
-    if rows:
+    if snapshot_rows:
         columns = [
             "ts", "symbol", "session", "price", "vwap", "atr14", "rsi14",
             "spread_bp", "liquidity_krw", "foreign_flow", "inst_flow",
             "news_event_score", "dart_event_score", "regime_label",
         ]
-        inserted = ch_insert(
+        inserted_snapshot = ch_insert(
             "trading.feature_snapshot",
             columns,
-            rows,
+            snapshot_rows,
             dedup_cols=["ts", "symbol"],
         )
-        log.info(f"  → 투자자 동향 {inserted}건 저장")
-        return inserted
-    return 0
+        total_inserted += inserted_snapshot
+        log.info(f"  → 종목 수급(feature_snapshot) {inserted_snapshot}건 저장")
+    if skipped_invalid_price > 0:
+        log.info(f"  종목 수급 스냅샷: 무효 가격(price<=0) {skipped_invalid_price}건 스킵")
+
+    return total_inserted
 
 
 # ─── 메인 ───────────────────────────────────────────────────

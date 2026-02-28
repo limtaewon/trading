@@ -4,6 +4,7 @@
 # 흐름:
 #   1. prepare_gpt_prompt.py → 프롬프트 생성
 #   2. openclaw agent → GPT 두뇌에 전달 → 구조화된 JSON 응답
+#      (컨텍스트 초과/세션 만료 등 복구 가능 오류는 재시도 후 codex exec 폴백)
 #   3. 응답 파일 저장 → codex_cron_router/execute_gpt_orders.py가 주문 실행
 #
 # 사용법:
@@ -31,6 +32,20 @@ CODEX_BRAIN_CACHE_TTL="${CODEX_BRAIN_CACHE_TTL:-120}"
 CODEX_BRAIN_LOCK_WAIT="${CODEX_BRAIN_LOCK_WAIT:-20}"
 OPENCLAW_SESSION_ID="${OPENCLAW_SESSION_ID:-openclaw-codex-bridge}"
 OPENCLAW_ERR_LOG="/tmp/openclaw_agent_stderr.log"
+OPENCLAW_AGENT_RETRY_MAX="${OPENCLAW_AGENT_RETRY_MAX:-2}"
+OPENCLAW_AGENT_RETRY_DELAY_SEC="${OPENCLAW_AGENT_RETRY_DELAY_SEC:-1}"
+ENABLE_CODEX_EXEC_FALLBACK="${ENABLE_CODEX_EXEC_FALLBACK:-1}"
+CODEX_FALLBACK_ON_ANY_ERROR="${CODEX_FALLBACK_ON_ANY_ERROR:-0}"
+CODEX_FALLBACK_BIN="${CODEX_FALLBACK_BIN:-codex}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-}"
+if [[ -z "$CODEX_FALLBACK_MODEL" ]]; then
+    if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
+        CODEX_FALLBACK_MODEL="gpt-5"
+    else
+        CODEX_FALLBACK_MODEL="$CODEX_MODEL"
+    fi
+fi
+CODEX_FALLBACK_TIMEOUT_SEC="${CODEX_FALLBACK_TIMEOUT_SEC:-240}"
 
 # npm/homebrew global bin 경로 추가 (macOS 호환)
 export PATH="/opt/homebrew/bin:$HOME/.npm-global/bin:$HOME/.openclaw/bin:/usr/local/bin:$PATH"
@@ -43,6 +58,87 @@ mkdir -p "$UV_CACHE_DIR"
 # ── 로깅 ────────────────────────────────────────────────────────────────────
 log() { echo "[$(date '+%H:%M:%S')] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
+
+is_recoverable_openclaw_error() {
+    local text="${1:-}"
+    text="$(echo "$text" | tr '[:upper:]' '[:lower:]')"
+    [[ "$text" == *"ctx max"* ]] \
+        || [[ "$text" == *"context max"* ]] \
+        || [[ "$text" == *"context limit"* ]] \
+        || [[ "$text" == *"context length"* ]] \
+        || [[ "$text" == *"context overflow"* ]] \
+        || [[ "$text" == *"maximum context"* ]] \
+        || [[ "$text" == *"prompt too large"* ]] \
+        || [[ "$text" == *"too many tokens"* ]] \
+        || [[ "$text" == *"token limit"* ]] \
+        || [[ "$text" == *"conversation too long"* ]] \
+        || [[ "$text" == *"session expired"* ]] \
+        || [[ "$text" == *"session has expired"* ]] \
+        || [[ "$text" == *"session not found"* ]] \
+        || [[ "$text" == *"invalid session"* ]] \
+        || [[ "$text" == *"stale session"* ]]
+}
+
+resolve_codex_fallback_bin() {
+    for cand in \
+        "$CODEX_FALLBACK_BIN" \
+        "/opt/homebrew/bin/codex" \
+        "/usr/local/bin/codex" \
+        "/usr/bin/codex" \
+        "codex"; do
+        if [ -n "$cand" ] && command -v "$cand" >/dev/null 2>&1; then
+            command -v "$cand"
+            return 0
+        fi
+        if [ -x "$cand" ] 2>/dev/null; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+run_codex_exec_fallback() {
+    local fallback_bin
+    local fallback_log="/tmp/codex_exec_fallback.log"
+    if ! fallback_bin="$(resolve_codex_fallback_bin)"; then
+        log "  codex exec 폴백 바이너리를 찾지 못함"
+        return 1
+    fi
+    log "  codex exec 폴백 시도: $fallback_bin"
+    : > "$fallback_log"
+    if run_with_timeout "${CODEX_FALLBACK_TIMEOUT_SEC}" \
+        "$fallback_bin" exec \
+        --skip-git-repo-check \
+        --dangerously-bypass-approvals-and-sandbox \
+        --model "$CODEX_FALLBACK_MODEL" \
+        --output-schema "$SCHEMA_FILE" \
+        --output-last-message "$RESPONSE_FILE" \
+        - < "$PROMPT_FILE" >"$fallback_log" 2>&1; then
+        if [[ -s "$RESPONSE_FILE" ]]; then
+            return 0
+        fi
+        log "  codex exec 폴백 응답이 비어 있음"
+    fi
+
+    if rg -qi "invalid_json_schema|invalid schema for response_format" "$fallback_log"; then
+        log "  codex output-schema 비호환 감지 → schema 없이 재시도"
+        if run_with_timeout "${CODEX_FALLBACK_TIMEOUT_SEC}" \
+            "$fallback_bin" exec \
+            --skip-git-repo-check \
+            --dangerously-bypass-approvals-and-sandbox \
+            --model "$CODEX_FALLBACK_MODEL" \
+            --output-last-message "$RESPONSE_FILE" \
+            - < "$PROMPT_FILE" >>"$fallback_log" 2>&1; then
+            if [[ -s "$RESPONSE_FILE" ]]; then
+                return 0
+            fi
+            log "  codex exec 재시도 응답도 비어 있음"
+        fi
+    fi
+    tail -n 30 "$fallback_log" 2>/dev/null | while read -r line; do log "  $line"; done
+    return 1
+}
 
 # ── macOS 호환 timeout 함수 ──────────────────────────────────────────────────
 # macOS에는 coreutils timeout이 없으므로 perl로 대체
@@ -158,7 +254,8 @@ if [[ "${LLM_BACKEND}" == "openclaw" ]]; then
     log "  OpenClaw session: ${OPENCLAW_SESSION_ID}"
 
     run_openclaw() {
-        python3 - "$OPENCLAW_BIN" "$OPENCLAW_SESSION_ID" "$PROMPT_FILE" "$RESPONSE_FILE" "$TIMEOUT_SEC" <<'PY'
+        local session_id="$1"
+        python3 - "$OPENCLAW_BIN" "$session_id" "$PROMPT_FILE" "$RESPONSE_FILE" "$TIMEOUT_SEC" <<'PY'
 import json
 import os
 import pathlib
@@ -191,11 +288,42 @@ raw = (run.stdout or "").strip()
 if not raw:
     raise SystemExit("openclaw agent empty output")
 
+def is_recoverable_text(text: str) -> bool:
+    s = (text or "").lower()
+    pats = (
+        "ctx max",
+        "context max",
+        "context limit",
+        "context length",
+        "context overflow",
+        "maximum context",
+        "prompt too large",
+        "too many tokens",
+        "token limit",
+        "conversation too long",
+        "session expired",
+        "session has expired",
+        "session not found",
+        "invalid session",
+        "stale session",
+    )
+    return any(p in s for p in pats)
+
 try:
     obj = json.loads(raw)
 except Exception:
+    if is_recoverable_text(raw):
+        raise SystemExit(f"openclaw recoverable: {raw[:400]}")
     pathlib.Path(response_path).write_text(raw, encoding="utf-8")
     sys.exit(0)
+
+if is_recoverable_text(raw):
+    raise SystemExit(f"openclaw recoverable: {raw[:400]}")
+if isinstance(obj, dict):
+    for ek in ("error", "message", "detail"):
+        ev = obj.get(ek)
+        if isinstance(ev, str) and is_recoverable_text(ev):
+            raise SystemExit(f"openclaw recoverable: {ev[:400]}")
 
 if isinstance(obj, dict):
     result = obj.get("result")
@@ -206,6 +334,8 @@ if isinstance(obj, dict):
             if isinstance(first, dict):
                 text = first.get("text", "").strip()
                 if isinstance(text, str) and text:
+                    if is_recoverable_text(text):
+                        raise SystemExit(f"openclaw recoverable: {text[:400]}")
                     try:
                         payload_json = json.loads(text)
                         pathlib.Path(response_path).write_text(
@@ -218,6 +348,8 @@ if isinstance(obj, dict):
         for key in ("output", "summary"):
             text = result.get(key)
             if isinstance(text, str) and text.strip():
+                if is_recoverable_text(text):
+                    raise SystemExit(f"openclaw recoverable: {text[:400]}")
                 pathlib.Path(response_path).write_text(text.strip(), encoding="utf-8")
                 sys.exit(0)
 
@@ -267,17 +399,47 @@ PY
         fi
 
         if [[ "${CACHE_HIT}" != "1" ]]; then
-            if run_with_timeout "${TIMEOUT_SEC}" run_openclaw 2>"$OPENCLAW_ERR_LOG"; then
-                log "  OpenClaw 응답 수신 완료"
-            else
-                LLM_EXIT=$?
-                if [ "$LLM_EXIT" -eq 124 ]; then
-                    [[ "$LOCK_OK" -eq 1 ]] && rm -rf "$CACHE_LOCK_DIR" || true
-                    die "OpenClaw 응답 타임아웃 (${TIMEOUT_SEC}초 초과)"
+            OPENCLAW_OK=0
+            OPENCLAW_LAST_ERR=""
+            LLM_EXIT=1
+            TRY=0
+            while true; do
+                CURRENT_SESSION_ID="$OPENCLAW_SESSION_ID"
+                if (( TRY > 0 )); then
+                    CURRENT_SESSION_ID="${OPENCLAW_SESSION_ID}-retry-${TRY}-$(date +%s)"
                 fi
+                if run_openclaw "$CURRENT_SESSION_ID" 2>"$OPENCLAW_ERR_LOG"; then
+                    OPENCLAW_OK=1
+                    log "  OpenClaw 응답 수신 완료 (attempt=$((TRY + 1)))"
+                    break
+                fi
+                LLM_EXIT=$?
+                OPENCLAW_LAST_ERR="$(tail -n 40 "$OPENCLAW_ERR_LOG" 2>/dev/null | tr '\n' ' ')"
                 tail -n 20 "$OPENCLAW_ERR_LOG" 2>/dev/null | while read -r line; do log "  $line"; done
-                [[ "$LOCK_OK" -eq 1 ]] && rm -rf "$CACHE_LOCK_DIR" || true
-                die "OpenClaw agent 실행 실패 (exit code: $LLM_EXIT)"
+                if (( TRY < OPENCLAW_AGENT_RETRY_MAX )) && is_recoverable_openclaw_error "$OPENCLAW_LAST_ERR"; then
+                    TRY=$((TRY + 1))
+                    sleep "$OPENCLAW_AGENT_RETRY_DELAY_SEC"
+                    continue
+                fi
+                break
+            done
+
+            if [[ "$OPENCLAW_OK" != "1" ]]; then
+                USE_FALLBACK=0
+                if [[ "$ENABLE_CODEX_EXEC_FALLBACK" == "1" ]]; then
+                    if [[ "$CODEX_FALLBACK_ON_ANY_ERROR" == "1" ]] || is_recoverable_openclaw_error "$OPENCLAW_LAST_ERR"; then
+                        USE_FALLBACK=1
+                    fi
+                fi
+                if [[ "$USE_FALLBACK" == "1" ]] && run_codex_exec_fallback; then
+                    log "  OpenClaw 실패 → codex exec 폴백 성공"
+                else
+                    [[ "$LOCK_OK" -eq 1 ]] && rm -rf "$CACHE_LOCK_DIR" || true
+                    if [ "${LLM_EXIT:-1}" -eq 124 ]; then
+                        die "OpenClaw 응답 타임아웃 (${TIMEOUT_SEC}초 초과)"
+                    fi
+                    die "OpenClaw agent 실행 실패 (exit code: ${LLM_EXIT:-1})"
+                fi
             fi
 
             cp "$RESPONSE_FILE" "$CACHE_FILE"
@@ -288,7 +450,7 @@ PY
         fi
     fi
 else
-    die "codex 브레인 실행기는 openclaw 전용입니다. LLM_BACKEND=openclaw 로 설정하세요."
+    die "codex 브레인 실행기는 openclaw 우선 경로만 지원합니다. LLM_BACKEND=openclaw 로 설정하세요."
 fi
 
 # ── 3단계: 응답 검증 ───────────────────────────────────────────────────────
