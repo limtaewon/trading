@@ -5,6 +5,7 @@
 
 핵심 실행 흐름:
 - codex_cron_router.sh -> codex_brain.sh -> prepare_gpt_prompt.py -> execute_gpt_orders.py
+- 보유 포지션 동적 관리: manage_positions.py -> execute_gpt_orders.py
 - 뉴스/데이터 파이프라인: collect_news.py, monitor_news.py, cluster_news.py, llm_relation_reasoner.py
 - P0 의사결정 로그 파이프라인:
   enrich_data.sh -> refresh_interest_watchlist.py -> decision_operating_pipeline.py

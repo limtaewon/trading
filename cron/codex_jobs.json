@@ -419,6 +419,19 @@
       "source": "legacy-crontab"
     },
     {
+      "name": "position-manager-20m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/20 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
       "name": "data-refresh-stocks-weekly",
       "enabled": true,
       "schedule": {

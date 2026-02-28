@@ -99,3 +99,48 @@ CREATE TABLE IF NOT EXISTS trading.decision_candidate
 ENGINE = ReplacingMergeTree(created_at)
 ORDER BY (decision_id, ticker)
 COMMENT '티커별 의사결정 후보/근거 로그';
+
+-- 5) 포지션 매니저 실행 로그 (보유종목 동적 관리)
+CREATE TABLE IF NOT EXISTS trading.position_review_run
+(
+    review_id               String,
+    review_time             DateTime,
+    mode                    LowCardinality(String), -- position_manager
+    holdings_count          UInt16,
+    llm_status              LowCardinality(String), -- ok / fallback / llm_call_failed...
+    market_regime           String,
+    market_summary          String,
+    proposed_actions        UInt16,
+    executable_orders       UInt16,
+    dry_run                 UInt8,
+    response_path           String,
+    created_at              DateTime DEFAULT now()
+)
+ENGINE = MergeTree
+ORDER BY (review_time, review_id)
+COMMENT '포지션 매니저 실행 단위 로그';
+
+-- 6) 포지션 매니저 티커별 액션 로그
+CREATE TABLE IF NOT EXISTS trading.position_review_action
+(
+    review_id               String,
+    review_time             DateTime,
+    ticker                  String,
+    ticker_name             String,
+    action                  LowCardinality(String), -- HOLD/REDUCE/EXIT/ADD/...
+    size_change_pct         Float32,
+    confidence              Float32,
+    thesis_status           LowCardinality(String),
+    reasoning               String,
+    invalidation            String,
+    time_horizon            LowCardinality(String),
+    evidence_refs           Array(String),
+    risk_flags              Array(String),
+    block_codes             Array(String),
+    order_action            String, -- BUY/SELL/""
+    order_qty               UInt32,
+    created_at              DateTime DEFAULT now()
+)
+ENGINE = MergeTree
+ORDER BY (review_time, review_id, ticker)
+COMMENT '포지션 매니저 티커별 액션/차단 사유 로그';

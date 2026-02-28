@@ -12,6 +12,9 @@
 ## 2) 핵심 실행 흐름
 `cron -> codex_cron_router.sh -> codex_brain.sh -> prepare_gpt_prompt.py -> execute_gpt_orders.py`
 
+보유 포지션 동적 관리 루프:
+`cron(command) -> manage_positions.py -> execute_gpt_orders.py`
+
 ### 2-1. `codex_cron_router.sh`
 - 잡 단위 락으로 중복 실행을 방지한다.
 - `payload.kind`별 분기 실행:
@@ -35,6 +38,12 @@
 - 주문 JSON을 파싱 후 규칙 검증(신뢰도/리스크/데이터 신선도/계좌 상태)을 수행한다.
 - 하드 스탑로스, 하드 테이크프로핏, 포지션/현금/일일 주문 제한 등 강제 가드레일을 적용한다.
 - 검증 통과 주문만 KIS MCP로 실행하고 실행 이력을 상태 파일에 남긴다.
+
+### 2-5. `manage_positions.py`
+- 보유종목만 대상으로 LLM 기반 동적 관리 판단(HOLD/REDUCE/EXIT/ADD/TIGHTEN_STOP/TAKE_PROFIT_PARTIAL)을 수행한다.
+- 판단 결과를 `trading_response` 포맷으로 변환해 `execute_gpt_orders.py` 가드레일을 그대로 통과시킨다.
+- 포지션 상태(thesis/action/cooldown/next trigger)를 `~/.openclaw/state/position_manager_state.json`에 저장한다.
+- 리뷰 로그를 `position_review_run`, `position_review_action` 테이블에 기록한다.
 
 ## 3) 뉴스/이벤트 파이프라인
 
@@ -76,6 +85,7 @@
 - `cron/jobs.json`
 - 생성기:
 - `scripts/build_codex_jobs_manifest.py`
+- 보유 포지션 동적 관리는 `position-manager-20m` command 잡(평일 09:00~15:59, 20분 주기)으로 실행한다.
 - 주식 파이프라인 경로는 `~/.openclaw/scripts/trading/...`로 통일되어 있다.
 - 코인/바이빗 작업은 별도 스크립트 경로를 유지한다.
 
@@ -133,6 +143,9 @@ bash ~/.openclaw/scripts/trading/enrich_data.sh all
 
 # 2) 최신 decision_id 기준 두레이 보고
 python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py
+
+# 3) 보유 포지션 동적 관리 실행(실주문)
+python3 ~/.openclaw/scripts/trading/manage_positions.py --execute
 ```
 
 ## 9) 보안 운영
@@ -156,6 +169,8 @@ python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py
 | `order_log` | 주문 시도/성공/스킵 사유 감사 로그 | `execute_gpt_orders.py`(INSERT) | `stock_rag_report_api.py` |
 | `execution_pred` | 체결확률/슬리피지 추정치 기록 | `execute_gpt_orders.py`(INSERT) | 운영 감사/분석 |
 | `kill_switch_event` | kill-switch/가드레일 발동 이력 | `execute_gpt_orders.py`(INSERT) | 운영 감사/리스크 추적 |
+| `position_review_run` | 포지션 매니저 실행 단위 리뷰 로그 | `manage_positions.py`(INSERT) | 보유관리 회고/튜닝 |
+| `position_review_action` | 포지션 매니저 티커별 액션 로그 | `manage_positions.py`(INSERT) | 보유관리 회고/튜닝 |
 | `session_calendar` | 장 세션(정규/경매/NXT) 판정 기준 | 운영 기준 테이블 | `execute_gpt_orders.py` |
 
 ### 10-2. 뉴스/이벤트 파이프라인

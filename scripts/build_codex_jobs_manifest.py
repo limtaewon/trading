@@ -114,6 +114,16 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "position-manager-20m",
+            "enabled": True,
+            "schedule": {"expr": "*/20 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/manage_positions.py --execute >> {logs}/position-manager.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "data-refresh-stocks-weekly",
             "enabled": True,
             "schedule": {"expr": "0 6 * * 1", "tz": "Asia/Seoul"},

@@ -5,6 +5,7 @@
 - codex_brain.sh
 - prepare_gpt_prompt.py
 - execute_gpt_orders.py
+- manage_positions.py
 - trading_preflight.sh
 
 ## News / event pipeline
@@ -43,3 +44,4 @@
 - schema_news_research.sql
 - schema_decision_operating.sql
 - trading_response_schema.json
+- position_manager_response_schema.json

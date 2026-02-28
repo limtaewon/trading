@@ -662,6 +662,26 @@
         "lastDurationMs": 120207,
         "consecutiveErrors": 0
       }
+    },
+    {
+      "id": "c37a21b1-f736-4035-9be9-64d707dd77aa",
+      "agentId": "main",
+      "name": "position-manager-20m",
+      "enabled": false,
+      "createdAtMs": 0,
+      "updatedAtMs": 0,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/20 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
+      },
+      "state": {}
     }
   ]
 }

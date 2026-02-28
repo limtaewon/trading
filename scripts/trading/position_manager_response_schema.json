@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Position Manager LLM Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market_view",
+    "portfolio_plan",
+    "positions",
+    "risk_notes"
+  ],
+  "properties": {
+    "market_view": { "type": "string" },
+    "portfolio_plan": { "type": "string" },
+    "risk_notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "positions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ticker",
+          "action",
+          "confidence",
+          "size_change_pct",
+          "reasoning",
+          "thesis_status",
+          "thesis_update",
+          "time_horizon",
+          "evidence_refs",
+          "next_review_trigger",
+          "take_profit_pct",
+          "stop_loss_pct"
+        ],
+        "properties": {
+          "ticker": { "type": "string" },
+          "action": {
+            "type": "string",
+            "enum": [
+              "HOLD",
+              "REDUCE",
+              "EXIT",
+              "ADD",
+              "TIGHTEN_STOP",
+              "TAKE_PROFIT_PARTIAL",
+              "NO_ACTION_REVIEW_LATER"
+            ]
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "size_change_pct": { "type": "number", "minimum": -1, "maximum": 1 },
+          "reasoning": { "type": "string" },
+          "thesis_status": {
+            "type": "string",
+            "enum": ["maintain", "strengthen", "weaken", "invalidate"]
+          },
+          "thesis_update": { "type": "string" },
+          "invalidation": { "type": "string" },
+          "time_horizon": {
+            "type": "string",
+            "enum": ["intraday", "1d", "1-3d", "1w", "1-2w", "2w+"]
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "risk_flags": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "next_review_trigger": { "type": "string" },
+          "take_profit_pct": { "type": "number", "minimum": 0, "maximum": 0.6 },
+          "stop_loss_pct": { "type": "number", "minimum": -0.6, "maximum": 0 }
+        }
+      }
+    }
+  }
+}
