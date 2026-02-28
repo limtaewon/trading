@@ -60,6 +60,9 @@ DEFAULT_MIN_CASH_RATIO = float(os.getenv("DEFAULT_MIN_CASH_RATIO", "0.15"))
 DEFAULT_ORDER_CAP_MULT = float(os.getenv("DEFAULT_ORDER_CAP_MULT", "1.0"))
 DEFAULT_DAILY_ORDER_LIMIT = int(os.getenv("DEFAULT_DAILY_ORDER_LIMIT", "3"))
 DEFAULT_POSITION_WEIGHT_LIMIT = float(os.getenv("DEFAULT_POSITION_WEIGHT_LIMIT", "0.25"))
+ENABLE_RSI_OVERHEAT_BLOCK = os.getenv("ENABLE_RSI_OVERHEAT_BLOCK", "0") == "1"
+STAGE2_EXTREME_BLOCK_ENABLED = os.getenv("STAGE2_EXTREME_BLOCK_ENABLED", "1") == "1"
+STAGE2_SHOCK_LOOKBACK_DAYS = max(3, int(os.getenv("STAGE2_SHOCK_LOOKBACK_DAYS", "5")))
 REQUIRE_EVENT_EXPLAIN_FOR_BUY = os.getenv("REQUIRE_EVENT_EXPLAIN_FOR_BUY", "1") == "1"
 MIN_EVENT_EVIDENCE_REFS = max(1, int(os.getenv("MIN_EVENT_EVIDENCE_REFS", "1")))
 # Per-order notional cap in KRW. Set 0 to disable (we still enforce position_weight_limit <= 25%).
@@ -596,6 +599,66 @@ def ch_execute(query: str) -> bool:
             return True
     except Exception:
         return False
+
+
+def get_stage2_market_flow_shock(lookback_days: int = 5) -> dict[str, Any]:
+    n = max(3, int(lookback_days))
+    rows = ch_select(
+        f"""
+SELECT
+  investor_type,
+  sum(toFloat64(net_buy_value_krw)) AS net_buy_krw,
+  sum(toFloat64(market_traded_value_krw)) AS traded_krw,
+  anyHeavy(market_traded_value_krw_source) AS denom_source,
+  max(market_traded_value_krw_universe_n) AS universe_n
+FROM trading.market_flow_daily
+WHERE market = 'ALL'
+  AND investor_type IN ('FOREIGN', 'INST')
+  AND trade_date >= addDays(today(), -{n + 2})
+  AND trade_date <= today()
+GROUP BY investor_type
+"""
+    )
+    by_inv: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        inv = str(r.get("investor_type", "") or "").upper().strip()
+        if inv:
+            by_inv[inv] = r
+    fr = by_inv.get("FOREIGN", {})
+    ins = by_inv.get("INST", {})
+    fr_traded = to_float(fr.get("traded_krw"), 0.0)
+    in_traded = to_float(ins.get("traded_krw"), 0.0)
+    if fr_traded <= 0.0 or in_traded <= 0.0:
+        return {
+            "valid": False,
+            "shock_level": "UNKNOWN",
+            "foreign_pct": 0.0,
+            "inst_pct": 0.0,
+            "reason": "DENOM_ZERO_OR_MISSING",
+            "lookback_days": n,
+        }
+    fr_pct = (to_float(fr.get("net_buy_krw"), 0.0) / fr_traded) * 100.0
+    in_pct = (to_float(ins.get("net_buy_krw"), 0.0) / in_traded) * 100.0
+    shock_abs = max(abs(fr_pct), abs(in_pct))
+    if shock_abs > 12.0:
+        level = "EXTREME"
+    elif shock_abs > 8.0:
+        level = "ALERT"
+    elif shock_abs > 3.0:
+        level = "WARN"
+    else:
+        level = "PASS"
+    return {
+        "valid": True,
+        "shock_level": level,
+        "foreign_pct": round(fr_pct, 4),
+        "inst_pct": round(in_pct, 4),
+        "lookback_days": n,
+        "denom_source_foreign": str(fr.get("denom_source", "") or ""),
+        "denom_source_inst": str(ins.get("denom_source", "") or ""),
+        "universe_n_foreign": to_int(fr.get("universe_n"), 0),
+        "universe_n_inst": to_int(ins.get("universe_n"), 0),
+    }
 
 
 def sql_quote(v: Any) -> str:
@@ -1604,6 +1667,7 @@ def main() -> int:
     kill_name = str(kill_state.get("state", "NORMAL")).upper()
     session_id = detect_market_session()
     freshness = get_data_freshness(session_id)
+    stage2_market_shock = get_stage2_market_flow_shock(STAGE2_SHOCK_LOOKBACK_DAYS)
 
     if freshness.get("block"):
         log_kill_switch_event(
@@ -1766,6 +1830,10 @@ def main() -> int:
         if conf < min_confidence:
             skipped.append({**item, "reason": "low_confidence"})
             continue
+        if action == "BUY" and STAGE2_EXTREME_BLOCK_ENABLED:
+            if str(stage2_market_shock.get("shock_level", "UNKNOWN")) == "EXTREME":
+                skipped.append({**item, "reason": "stage2_extreme_shock_block"})
+                continue
         if action == "BUY" and ENABLE_RELATION_SCORE_BUY_FILTER and relation_sig is not None:
             if relation_score < MIN_RELATION_SCORE_BUY:
                 skipped.append({**item, "reason": f"relation_score_too_low:{relation_score:.3f}"})
@@ -1811,7 +1879,7 @@ def main() -> int:
             if kst_time_hhmm() >= 1510:
                 skipped.append({**item, "reason": "buy_cutoff_after_1510"})
                 continue
-            if rsi is not None and rsi > 70:
+            if ENABLE_RSI_OVERHEAT_BLOCK and rsi is not None and rsi > 70:
                 skipped.append({**item, "reason": f"rsi_too_high:{rsi:.2f}"})
                 continue
             eps = get_eps_if_available(ticker)
@@ -1972,6 +2040,7 @@ def main() -> int:
             "acnt_prdt_cd": kis_profile.get("acnt_prdt_cd", ""),
         },
         "adaptive_policy": adaptive_policy,
+        "stage2_market_flow_shock": stage2_market_shock,
         "data_freshness": freshness,
         "missing_fields": missing_fields if isinstance(missing_fields, list) else [],
         "orders_total": len(orders),
@@ -2003,6 +2072,8 @@ def main() -> int:
         "min_relation_score_buy": round(MIN_RELATION_SCORE_BUY, 4),
         "daily_order_limit": int(daily_order_limit),
         "position_weight_limit": round(position_weight_limit, 4),
+        "stage2_extreme_block_enabled": bool(STAGE2_EXTREME_BLOCK_ENABLED),
+        "rsi_overheat_block_enabled": bool(ENABLE_RSI_OVERHEAT_BLOCK),
     }
 
     EXEC_DIR.mkdir(parents=True, exist_ok=True)
