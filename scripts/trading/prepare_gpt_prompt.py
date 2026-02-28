@@ -59,6 +59,7 @@ DYNAMIC_EXIT_STATE_FILE = HOME / ".openclaw" / "state" / "stock_dynamic_exits.js
 DEFAULT_MIN_CONFIDENCE = float(os.getenv("DEFAULT_MIN_CONFIDENCE", "0.70"))
 DEFAULT_MIN_CASH_RATIO = float(os.getenv("DEFAULT_MIN_CASH_RATIO", "0.15"))
 DEFAULT_DAILY_ORDER_LIMIT = int(os.getenv("DEFAULT_DAILY_ORDER_LIMIT", "3"))
+DEFAULT_POSITION_WEIGHT_LIMIT = float(os.getenv("DEFAULT_POSITION_WEIGHT_LIMIT", "0.25"))
 POSITION_MANAGER_ENABLED = os.getenv("POSITION_MANAGER_ENABLED", "1") == "1"
 RISK_TARGET_MIN_TP_DELTA = max(0.0, float(os.getenv("RISK_TARGET_MIN_TP_DELTA", "0.02")))
 RISK_TARGET_MIN_SL_DELTA = max(0.0, float(os.getenv("RISK_TARGET_MIN_SL_DELTA", "0.015")))
@@ -236,11 +237,18 @@ def clamp(v: float, lo: float, hi: float) -> float:
 
 
 def load_adaptive_policy() -> dict[str, Any]:
+    def _norm_daily_order_limit(v: Any, fallback: int) -> int:
+        n = int(safe_float(v, fallback))
+        if n <= 0:
+            return 0  # unlimited
+        return max(1, min(50, n))
+
     policy = {
         "mode": "normal",
-        "min_confidence": clamp(DEFAULT_MIN_CONFIDENCE, 0.65, 0.9),
+        "min_confidence": clamp(DEFAULT_MIN_CONFIDENCE, 0.55, 0.9),
         "min_cash_ratio": clamp(DEFAULT_MIN_CASH_RATIO, 0.10, 0.40),
-        "daily_order_limit": max(1, min(10, DEFAULT_DAILY_ORDER_LIMIT)),
+        "daily_order_limit": _norm_daily_order_limit(DEFAULT_DAILY_ORDER_LIMIT, 3),
+        "position_weight_limit": clamp(DEFAULT_POSITION_WEIGHT_LIMIT, 0.10, 0.60),
         "updated_at": "",
         "source": "default",
     }
@@ -251,7 +259,7 @@ def load_adaptive_policy() -> dict[str, Any]:
                 policy["mode"] = str(raw.get("mode", policy["mode"]))
                 policy["min_confidence"] = clamp(
                     safe_float(raw.get("min_confidence", policy["min_confidence"]), policy["min_confidence"]),
-                    0.65,
+                    0.55,
                     0.9,
                 )
                 policy["min_cash_ratio"] = clamp(
@@ -259,9 +267,14 @@ def load_adaptive_policy() -> dict[str, Any]:
                     0.10,
                     0.40,
                 )
-                policy["daily_order_limit"] = max(
-                    1,
-                    min(10, int(safe_float(raw.get("daily_order_limit", policy["daily_order_limit"]), policy["daily_order_limit"]))),
+                policy["daily_order_limit"] = _norm_daily_order_limit(
+                    raw.get("daily_order_limit", policy["daily_order_limit"]),
+                    policy["daily_order_limit"],
+                )
+                policy["position_weight_limit"] = clamp(
+                    safe_float(raw.get("position_weight_limit", policy["position_weight_limit"]), policy["position_weight_limit"]),
+                    0.10,
+                    0.60,
                 )
                 policy["updated_at"] = str(raw.get("updated_at", ""))
                 policy["source"] = "adaptive_policy_file"
@@ -1159,8 +1172,13 @@ def build_prompt() -> str:
     log.info("[8/9] 실행기 하드룰 파라미터 동기화...")
     min_conf = safe_float(adaptive_policy.get("min_confidence", 0.70), 0.70)
     min_cash_ratio = safe_float(adaptive_policy.get("min_cash_ratio", 0.15), 0.15)
-    daily_order_limit = max(1, int(safe_float(adaptive_policy.get("daily_order_limit", 3), 3)))
+    daily_order_limit = int(safe_float(adaptive_policy.get("daily_order_limit", 3), 3))
+    if daily_order_limit < 0:
+        daily_order_limit = 0
+    position_weight_limit = safe_float(adaptive_policy.get("position_weight_limit", 0.25), 0.25)
     min_cash_ratio_pct = round(min_cash_ratio * 100, 1)
+    pos_w_pct = round(position_weight_limit * 100, 1)
+    daily_limit_text = "무제한" if daily_order_limit == 0 else str(daily_order_limit)
 
     # 7. 프롬프트 조립
     log.info("[9/9] 프롬프트 조립...")
@@ -1206,7 +1224,8 @@ def build_prompt() -> str:
 - mode: {adaptive_policy.get('mode', 'normal')}
 - min_confidence: {min_conf:.2f}
 - min_cash_ratio: {min_cash_ratio:.3f} ({min_cash_ratio_pct}%)
-- daily_order_limit(종목당): {daily_order_limit}
+- daily_order_limit(종목당): {daily_limit_text}
+- position_weight_limit(종목당): {position_weight_limit:.3f} ({pos_w_pct}%)
 - position_manager_enabled: {"yes" if POSITION_MANAGER_ENABLED else "no"}
 - risk_target_stability_delta: take_profit {RISK_TARGET_MIN_TP_DELTA:.3f}, stop_loss {RISK_TARGET_MIN_SL_DELTA:.3f}
 - policy_updated_at: {adaptive_policy.get('updated_at', '-') or '-'}
@@ -1269,14 +1288,14 @@ def build_prompt() -> str:
 ## 절대 규칙 (반드시 준수)
 1. RSI > 70인 종목은 신규 매수 금지
 2. EPS 음수 종목 매수 금지
-3. 1회 주문 한도: 없음 (단, 종목당 포트폴리오 최대 비중 25% 규칙 준수)
-4. 종목당 포트폴리오 최대 비중: 25%
+3. 1회 주문 한도: 없음 (단, 종목당 포트폴리오 최대 비중 {pos_w_pct}% 규칙 준수)
+4. 종목당 포트폴리오 최대 비중: {pos_w_pct}%
 5. 매수 후에도 현금 비중 {min_cash_ratio_pct}% 이상 유지
 6. 교체매매: 매도 체결 확인 후 매수 (역순 금지)
 7. 같은 종목 같은 방향 미체결 있으면 추가 주문 금지
 8. 장 마감 20분 전(15:10 이후) 신규 매수 금지
 9. BB%(볼린저밴드) > 1.0인 종목 매수 주의 (과열 경고)
-10. 같은 종목 1일 최대 {daily_order_limit}회 주문
+10. 같은 종목 1일 최대 {daily_limit_text} 주문
 11. confidence는 {min_conf:.2f} 이상만 주문 생성
 12. BUY 주문은 thesis_path/time_horizon/evidence_refs(or evidence_urls) 누락 시 생성 금지
 13. risk_targets는 현재 보유수량>0인 모든 종목에 대해 반드시 1개씩 작성 (보유종목 없으면 빈 배열)

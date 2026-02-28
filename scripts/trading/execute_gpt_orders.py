@@ -59,6 +59,7 @@ DEFAULT_MIN_CONFIDENCE = float(os.getenv("DEFAULT_MIN_CONFIDENCE", "0.70"))
 DEFAULT_MIN_CASH_RATIO = float(os.getenv("DEFAULT_MIN_CASH_RATIO", "0.15"))
 DEFAULT_ORDER_CAP_MULT = float(os.getenv("DEFAULT_ORDER_CAP_MULT", "1.0"))
 DEFAULT_DAILY_ORDER_LIMIT = int(os.getenv("DEFAULT_DAILY_ORDER_LIMIT", "3"))
+DEFAULT_POSITION_WEIGHT_LIMIT = float(os.getenv("DEFAULT_POSITION_WEIGHT_LIMIT", "0.25"))
 REQUIRE_EVENT_EXPLAIN_FOR_BUY = os.getenv("REQUIRE_EVENT_EXPLAIN_FOR_BUY", "1") == "1"
 MIN_EVENT_EVIDENCE_REFS = max(1, int(os.getenv("MIN_EVENT_EVIDENCE_REFS", "1")))
 # Per-order notional cap in KRW. Set 0 to disable (we still enforce position_weight_limit <= 25%).
@@ -855,12 +856,19 @@ def log_rule_kill_switch(
 
 
 def load_adaptive_policy() -> dict[str, Any]:
+    def _norm_daily_order_limit(v: Any, fallback: int) -> int:
+        n = to_int(v, fallback)
+        if n <= 0:
+            return 0  # unlimited
+        return max(1, min(50, n))
+
     policy = {
         "mode": "normal",
-        "min_confidence": clamp(DEFAULT_MIN_CONFIDENCE, 0.65, 0.9),
+        "min_confidence": clamp(DEFAULT_MIN_CONFIDENCE, 0.55, 0.9),
         "min_cash_ratio": clamp(DEFAULT_MIN_CASH_RATIO, 0.10, 0.40),
         "order_cap_mult": clamp(DEFAULT_ORDER_CAP_MULT, 0.50, 1.20),
-        "daily_order_limit": max(1, min(10, DEFAULT_DAILY_ORDER_LIMIT)),
+        "daily_order_limit": _norm_daily_order_limit(DEFAULT_DAILY_ORDER_LIMIT, 3),
+        "position_weight_limit": clamp(DEFAULT_POSITION_WEIGHT_LIMIT, 0.10, 0.60),
         "updated_at": "",
         "source": "default",
     }
@@ -871,7 +879,7 @@ def load_adaptive_policy() -> dict[str, Any]:
                 policy["mode"] = str(raw.get("mode", policy["mode"]))
                 policy["min_confidence"] = clamp(
                     to_float(raw.get("min_confidence", policy["min_confidence"]), policy["min_confidence"]),
-                    0.65,
+                    0.55,
                     0.9,
                 )
                 policy["min_cash_ratio"] = clamp(
@@ -884,9 +892,14 @@ def load_adaptive_policy() -> dict[str, Any]:
                     0.50,
                     1.20,
                 )
-                policy["daily_order_limit"] = max(
-                    1,
-                    min(10, to_int(raw.get("daily_order_limit", policy["daily_order_limit"]), policy["daily_order_limit"])),
+                policy["daily_order_limit"] = _norm_daily_order_limit(
+                    raw.get("daily_order_limit", policy["daily_order_limit"]),
+                    policy["daily_order_limit"],
+                )
+                policy["position_weight_limit"] = clamp(
+                    to_float(raw.get("position_weight_limit", policy["position_weight_limit"]), policy["position_weight_limit"]),
+                    0.10,
+                    0.60,
                 )
                 policy["updated_at"] = str(raw.get("updated_at", ""))
                 policy["source"] = "adaptive_policy_file"
@@ -1546,6 +1559,11 @@ def main() -> int:
         per_order_cap = base_per_order_cap * to_float(adaptive_policy.get("order_cap_mult", 1.0), 1.0)
     min_confidence = to_float(adaptive_policy.get("min_confidence", 0.7), 0.7)
     daily_order_limit = to_int(adaptive_policy.get("daily_order_limit", 3), 3)
+    position_weight_limit = clamp(
+        to_float(adaptive_policy.get("position_weight_limit", 0.25), 0.25),
+        0.10,
+        0.60,
+    )
 
     today_orders = load_today_orders()
     holdings = build_holdings_map(holdings_rows)
@@ -1772,7 +1790,7 @@ def main() -> int:
         if (ticker, action) in unfilled_side:
             skipped.append({**item, "reason": "same_side_unfilled_exists"})
             continue
-        if day_count.get(ticker, 0) >= daily_order_limit:
+        if daily_order_limit > 0 and day_count.get(ticker, 0) >= daily_order_limit:
             skipped.append({**item, "reason": "daily_order_limit_reached"})
             continue
 
@@ -1806,7 +1824,7 @@ def main() -> int:
             if (cash - order_value) < min_cash:
                 skipped.append({**item, "reason": "min_cash_ratio_violation"})
                 continue
-            if total_asset > 0 and ((hold.eval_amt + order_value) / total_asset) > 0.25:
+            if total_asset > 0 and ((hold.eval_amt + order_value) / total_asset) > position_weight_limit:
                 skipped.append({**item, "reason": "position_weight_limit_violation"})
                 continue
         else:
@@ -1984,6 +2002,7 @@ def main() -> int:
         "relation_filter_enabled": ENABLE_RELATION_SCORE_BUY_FILTER,
         "min_relation_score_buy": round(MIN_RELATION_SCORE_BUY, 4),
         "daily_order_limit": int(daily_order_limit),
+        "position_weight_limit": round(position_weight_limit, 4),
     }
 
     EXEC_DIR.mkdir(parents=True, exist_ok=True)
