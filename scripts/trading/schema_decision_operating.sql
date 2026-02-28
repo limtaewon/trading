@@ -144,3 +144,71 @@ CREATE TABLE IF NOT EXISTS trading.position_review_action
 ENGINE = MergeTree
 ORDER BY (review_time, review_id, ticker)
 COMMENT '포지션 매니저 티커별 액션/차단 사유 로그';
+
+-- 7) Decision Replay 로그 (원본 decision_run 재현성 점검)
+CREATE TABLE IF NOT EXISTS trading.decision_replay
+(
+    replay_id                UUID,
+    decision_id              UUID,
+    source_decision_time     DateTime,
+    replay_time              DateTime,
+    horizon                  LowCardinality(String),
+    universe                 LowCardinality(String),
+    candidate_count          UInt16,
+    orig_stage2_score        Float32,
+    orig_stage3_score        Float32,
+    orig_stage4_score        Float32,
+    orig_stage5_score        Float32,
+    orig_total_score         Float32,
+    recalc_stage2_score      Float32,
+    recalc_stage3_score      Float32,
+    recalc_stage4_score      Float32,
+    recalc_stage5_score      Float32,
+    recalc_total_score       Float32,
+    diff_stage2_score        Float32,
+    diff_stage3_score        Float32,
+    diff_stage4_score        Float32,
+    diff_stage5_score        Float32,
+    diff_total_score         Float32,
+    buy_count                UInt16,
+    hold_count               UInt16,
+    reduce_count             UInt16,
+    replay_status            LowCardinality(String), -- PASS/FAIL
+    replay_reason_codes      Array(String) DEFAULT [],
+    detail_json              String DEFAULT '{}',
+    created_at               DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (source_decision_time, decision_id, replay_time)
+COMMENT 'decision_run vs decision_candidate 재집계 검증 로그';
+
+-- 8) Decision Outcome 로그 (사후 성과 연결)
+CREATE TABLE IF NOT EXISTS trading.decision_outcome
+(
+    decision_id             UUID,
+    decision_time           DateTime,
+    ticker                  String,
+    action                  LowCardinality(String),
+    horizon_days            UInt16, -- 1/3/5 trading days
+    entry_date              Date,
+    entry_price             Float64,
+    exit_date               Date,
+    exit_price              Float64,
+    raw_return_pct          Float32,
+    action_return_pct       Float32,
+    max_drawdown_pct        Float32,
+    max_runup_pct           Float32,
+    realized_vol_pct        Float32,
+    bars                    UInt16,
+    resolved                UInt8, -- 1: horizon available, 0: pending/no-exit
+    quality_code            LowCardinality(String),
+    candidate_total_score   Float32,
+    stage2_score            Float32,
+    stage3_score            Float32,
+    stage4_score            Float32,
+    stage5_score            Float32,
+    created_at              DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (decision_time, decision_id, ticker, horizon_days)
+COMMENT '의사결정 후보의 사후 수익률/리스크 성과 로그';

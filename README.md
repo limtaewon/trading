@@ -150,6 +150,12 @@ python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py
 
 # 3) 보유 포지션 동적 관리 실행(실주문)
 python3 ~/.openclaw/scripts/trading/manage_positions.py --execute
+
+# 4) Replay 검증(최근 20개 decision 재집계 일치성 점검)
+python3 ~/.openclaw/scripts/trading/replay_decision.py --lookback-days 14 --limit 20
+
+# 5) Outcome 집계(최근 decision 후보의 1/3/5일 성과 연결)
+python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45 --limit-decisions 150 --horizons 1,3,5
 ```
 
 ## 9) 보안 운영
@@ -170,6 +176,8 @@ python3 ~/.openclaw/scripts/trading/manage_positions.py --execute
 | `decision_log` | LLM 판단 원문/검증 입력 로그 저장 | `execute_gpt_orders.py`(INSERT) | `stock_rag_report_api.py` |
 | `decision_run` | Stage0~5 실행 점수/패스/차단사유 로그 | `decision_operating_pipeline.py`(INSERT) | 운영 점검/전략 튜닝 |
 | `decision_candidate` | 티커별 행동(BUY/HOLD/REDUCE) 및 근거코드 | `decision_operating_pipeline.py`(INSERT) | 운영 점검/전략 튜닝 |
+| `decision_replay` | `decision_run` 재집계 일치성(PASS/FAIL) 검증 로그 | `replay_decision.py`(INSERT) | 운영 감사/리플레이 검증 |
+| `decision_outcome` | 후보별 사후 성과(N일 수익률/MDD/변동성) 로그 | `build_decision_outcome.py`(INSERT) | 성과분석/가중치 튜닝 |
 | `order_log` | 주문 시도/성공/스킵 사유 감사 로그 | `execute_gpt_orders.py`(INSERT) | `stock_rag_report_api.py` |
 | `execution_pred` | 체결확률/슬리피지 추정치 기록 | `execute_gpt_orders.py`(INSERT) | 운영 감사/분석 |
 | `kill_switch_event` | kill-switch/가드레일 발동 이력 | `execute_gpt_orders.py`(INSERT) | 운영 감사/리스크 추적 |

@@ -26,6 +26,8 @@
 - enrich_data.sh
 - sync_normalized_flow_daily.py
 - decision_operating_pipeline.py
+- replay_decision.py
+- build_decision_outcome.py
 - refresh_stocks.py
 - refresh_interest_watchlist.py
 
