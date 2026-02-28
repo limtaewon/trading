@@ -1,0 +1,466 @@
+{
+  "config": {
+    "start_date": "2025-12-01",
+    "end_date": "2026-02-27",
+    "initial_cash": 100000000.0,
+    "mode": "neutral",
+    "universe": "watchlist",
+    "disable_stage4": true,
+    "s2_reference_only": true,
+    "llm_decision": false,
+    "llm_model": "openai-codex/gpt-5.3-codex-spark",
+    "llm_min_confidence": 0.6,
+    "prefilter_liquidity_krw": 1000000000.0,
+    "max_new_buys_per_day": 2,
+    "force_liquidate_on_end": false,
+    "buy_threshold": 60.0,
+    "universe_size": 120,
+    "max_positions": 10,
+    "fee_bps": 3.0,
+    "sell_tax_bps": 18.0,
+    "slippage_bps": 10.0
+  },
+  "metrics": {
+    "total_return_pct": 23.01,
+    "cagr_pct": 142.16,
+    "max_drawdown_pct": -7.01,
+    "sharpe": 3.211,
+    "days": 59,
+    "final_equity": 123007224.6,
+    "order_count": 30,
+    "buy_order_count": 20,
+    "sell_order_count": 10,
+    "round_trip_count": 10,
+    "win_rate_closed_pct": 20.0,
+    "realized_pnl_krw": -349331.37,
+    "unrealized_pnl_end_krw": 23356555.98,
+    "fees_paid_krw": 52948.06,
+    "taxes_paid_krw": 74620.98,
+    "avg_gross_exposure": 0.7386,
+    "unique_ticker_count": 18
+  },
+  "quality": {
+    "flow_market_fallback_days": 0,
+    "flow_stock_fallback_count": 0,
+    "trade_days": 59,
+    "diagnostics": {
+      "prefilter_low_liquidity": 7480,
+      "fail_s1": 221,
+      "all_fail": 221,
+      "score_ge_buy_threshold": 6427,
+      "action_hold": 391,
+      "days_no_buy_candidates": 1,
+      "all_pass": 6706,
+      "action_buy": 6422,
+      "days_no_open_slots": 46,
+      "hard_riskoff_days": 1,
+      "action_sell": 114
+    }
+  },
+  "sample_trades": [
+    {
+      "date": "2025-12-03",
+      "ticker": "086520",
+      "side": "BUY",
+      "qty": 106,
+      "price": 93493.4,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-03",
+      "ticker": "373220",
+      "side": "BUY",
+      "qty": 20,
+      "price": 418418.0,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-04",
+      "ticker": "055550",
+      "side": "BUY",
+      "qty": 48,
+      "price": 78778.7,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-04",
+      "ticker": "000810",
+      "side": "BUY",
+      "qty": 7,
+      "price": 497497.0,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-05",
+      "ticker": "105560",
+      "side": "BUY",
+      "qty": 16,
+      "price": 130830.7,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-05",
+      "ticker": "086790",
+      "side": "BUY",
+      "qty": 23,
+      "price": 95295.2,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-08",
+      "ticker": "196170",
+      "side": "BUY",
+      "qty": 4,
+      "price": 458458.0,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-08",
+      "ticker": "002020",
+      "side": "BUY",
+      "qty": 45,
+      "price": 48748.7,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-09",
+      "ticker": "000120",
+      "side": "BUY",
+      "qty": 41,
+      "price": 95895.8,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-09",
+      "ticker": "003550",
+      "side": "BUY",
+      "qty": 47,
+      "price": 83383.3,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "373220",
+      "side": "SELL",
+      "qty": 20,
+      "price": 389110.5,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "000120",
+      "side": "SELL",
+      "qty": 41,
+      "price": 94805.1,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "003550",
+      "side": "SELL",
+      "qty": 47,
+      "price": 82717.2,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "086520",
+      "side": "SELL",
+      "qty": 106,
+      "price": 97902.0,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "002020",
+      "side": "SELL",
+      "qty": 45,
+      "price": 51848.1,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "055550",
+      "side": "SELL",
+      "qty": 48,
+      "price": 78521.4,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "196170",
+      "side": "SELL",
+      "qty": 4,
+      "price": 439060.5,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "086790",
+      "side": "SELL",
+      "qty": 23,
+      "price": 94005.9,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "105560",
+      "side": "SELL",
+      "qty": 16,
+      "price": 126373.5,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "000810",
+      "side": "SELL",
+      "qty": 7,
+      "price": 497002.5,
+      "reason": "rule_reduce"
+    },
+    {
+      "date": "2025-12-23",
+      "ticker": "086520",
+      "side": "BUY",
+      "qty": 102,
+      "price": 97397.3,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-23",
+      "ticker": "010130",
+      "side": "BUY",
+      "qty": 7,
+      "price": 1357356.0,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-24",
+      "ticker": "373220",
+      "side": "BUY",
+      "qty": 25,
+      "price": 390890.5,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-24",
+      "ticker": "207940",
+      "side": "BUY",
+      "qty": 5,
+      "price": 1692691.0,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-26",
+      "ticker": "000670",
+      "side": "BUY",
+      "qty": 192,
+      "price": 48349.27,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-26",
+      "ticker": "002800",
+      "side": "BUY",
+      "qty": 1607,
+      "price": 5785.78,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-29",
+      "ticker": "000080",
+      "side": "BUY",
+      "qty": 500,
+      "price": 18508.49,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-29",
+      "ticker": "000390",
+      "side": "BUY",
+      "qty": 1279,
+      "price": 7237.23,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-30",
+      "ticker": "000990",
+      "side": "BUY",
+      "qty": 137,
+      "price": 67667.6,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2025-12-30",
+      "ticker": "328130",
+      "side": "BUY",
+      "qty": 226,
+      "price": 41141.1,
+      "reason": "score_buy"
+    }
+  ],
+  "traded_tickers": [
+    "000080",
+    "000120",
+    "000390",
+    "000670",
+    "000810",
+    "000990",
+    "002020",
+    "002800",
+    "003550",
+    "010130",
+    "055550",
+    "086520",
+    "086790",
+    "105560",
+    "196170",
+    "207940",
+    "328130",
+    "373220"
+  ],
+  "equity_curve_head": [
+    {
+      "date": "2025-12-01",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0,
+      "gross_exposure": 0.0
+    },
+    {
+      "date": "2025-12-02",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0,
+      "gross_exposure": 0.0
+    },
+    {
+      "date": "2025-12-03",
+      "equity": 99976256.0,
+      "cash": 81715856.0,
+      "positions": 2,
+      "gross_exposure": 0.182647
+    },
+    {
+      "date": "2025-12-04",
+      "equity": 99605420.24,
+      "cash": 74449820.24,
+      "positions": 4,
+      "gross_exposure": 0.252553
+    },
+    {
+      "date": "2025-12-05",
+      "equity": 100739253.92,
+      "cash": 70163453.92,
+      "positions": 6,
+      "gross_exposure": 0.303514
+    },
+    {
+      "date": "2025-12-08",
+      "equity": 103081622.16,
+      "cash": 66134722.16,
+      "positions": 8,
+      "gross_exposure": 0.358424
+    },
+    {
+      "date": "2025-12-09",
+      "equity": 102961774.04,
+      "cash": 58281624.04,
+      "positions": 10,
+      "gross_exposure": 0.433949
+    },
+    {
+      "date": "2025-12-10",
+      "equity": 102579324.04,
+      "cash": 58281624.04,
+      "positions": 10,
+      "gross_exposure": 0.431838
+    },
+    {
+      "date": "2025-12-11",
+      "equity": 103114324.04,
+      "cash": 58281624.04,
+      "positions": 10,
+      "gross_exposure": 0.434786
+    },
+    {
+      "date": "2025-12-12",
+      "equity": 102399624.04,
+      "cash": 58281624.04,
+      "positions": 10,
+      "gross_exposure": 0.430841
+    }
+  ],
+  "equity_curve_tail": [
+    {
+      "date": "2026-02-11",
+      "equity": 117700714.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.94655
+    },
+    {
+      "date": "2026-02-12",
+      "equity": 118670134.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.946987
+    },
+    {
+      "date": "2026-02-13",
+      "equity": 116199394.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.945859
+    },
+    {
+      "date": "2026-02-19",
+      "equity": 119318874.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.947275
+    },
+    {
+      "date": "2026-02-20",
+      "equity": 119779614.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.947478
+    },
+    {
+      "date": "2026-02-23",
+      "equity": 119797914.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.947486
+    },
+    {
+      "date": "2026-02-24",
+      "equity": 121019844.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.948016
+    },
+    {
+      "date": "2026-02-25",
+      "equity": 123222444.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.948945
+    },
+    {
+      "date": "2026-02-26",
+      "equity": 123690524.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.949138
+    },
+    {
+      "date": "2026-02-27",
+      "equity": 123007224.6,
+      "cash": 6291114.6,
+      "positions": 10,
+      "gross_exposure": 0.948856
+    }
+  ]
+}

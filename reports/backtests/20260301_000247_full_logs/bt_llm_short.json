@@ -1,0 +1,205 @@
+{
+  "config": {
+    "start_date": "2025-12-01",
+    "end_date": "2026-02-27",
+    "initial_cash": 100000000,
+    "mode": "neutral",
+    "universe": "technical",
+    "disable_stage4": true,
+    "s2_reference_only": true,
+    "llm_decision": true,
+    "llm_model": "openai-codex/gpt-5.3-codex-spark",
+    "llm_min_confidence": 0.6,
+    "buy_threshold": 60.0,
+    "universe_size": 120,
+    "max_positions": 10,
+    "fee_bps": 3.0,
+    "sell_tax_bps": 18.0,
+    "slippage_bps": 10.0
+  },
+  "metrics": {
+    "total_return_pct": 0.24,
+    "cagr_pct": 10.76,
+    "max_drawdown_pct": -0.02,
+    "sharpe": 8.683,
+    "days": 6,
+    "final_equity": 100243545.77,
+    "trade_count": 10,
+    "closed_ticker_count": 10,
+    "win_rate_pct": 0.0
+  },
+  "quality": {
+    "flow_market_fallback_days": 0,
+    "flow_stock_fallback_count": 20,
+    "trade_days": 6,
+    "diagnostics": {
+      "fail_s5": 208,
+      "all_fail": 208,
+      "all_pass": 402,
+      "llm_status_ok": 5,
+      "action_hold": 589,
+      "action_buy": 21,
+      "days_no_buy_candidates": 1,
+      "score_ge_buy_threshold": 21,
+      "days_no_open_slots": 2
+    }
+  },
+  "sample_trades": [
+    {
+      "date": "2026-02-23",
+      "ticker": "004020",
+      "side": "BUY",
+      "qty": 80,
+      "price": 37087.05,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2026-02-25",
+      "ticker": "086790",
+      "side": "BUY",
+      "qty": 42,
+      "price": 126126.0,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2026-02-25",
+      "ticker": "000370",
+      "side": "BUY",
+      "qty": 559,
+      "price": 7987.98,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2026-02-25",
+      "ticker": "000880",
+      "side": "BUY",
+      "qty": 32,
+      "price": 139239.1,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2026-02-25",
+      "ticker": "001450",
+      "side": "BUY",
+      "qty": 121,
+      "price": 35485.45,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2026-02-25",
+      "ticker": "000070",
+      "side": "BUY",
+      "qty": 37,
+      "price": 72672.6,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2026-02-25",
+      "ticker": "328130",
+      "side": "BUY",
+      "qty": 87,
+      "price": 40940.9,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2026-02-25",
+      "ticker": "003530",
+      "side": "BUY",
+      "qty": 401,
+      "price": 8208.2,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2026-02-25",
+      "ticker": "001500",
+      "side": "BUY",
+      "qty": 250,
+      "price": 12902.89,
+      "reason": "score_buy"
+    },
+    {
+      "date": "2026-02-25",
+      "ticker": "042660",
+      "side": "BUY",
+      "qty": 21,
+      "price": 142142.0,
+      "reason": "score_buy"
+    }
+  ],
+  "equity_curve_head": [
+    {
+      "date": "2026-02-20",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-23",
+      "equity": 99996145.91,
+      "cash": 97032145.91,
+      "positions": 1
+    },
+    {
+      "date": "2026-02-24",
+      "equity": 99980145.91,
+      "cash": 97032145.91,
+      "positions": 1
+    },
+    {
+      "date": "2026-02-25",
+      "equity": 100039635.77,
+      "cash": 62756965.77,
+      "positions": 10
+    },
+    {
+      "date": "2026-02-26",
+      "equity": 100239025.77,
+      "cash": 62756965.77,
+      "positions": 10
+    },
+    {
+      "date": "2026-02-27",
+      "equity": 100243545.77,
+      "cash": 62756965.77,
+      "positions": 10
+    }
+  ],
+  "equity_curve_tail": [
+    {
+      "date": "2026-02-20",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-23",
+      "equity": 99996145.91,
+      "cash": 97032145.91,
+      "positions": 1
+    },
+    {
+      "date": "2026-02-24",
+      "equity": 99980145.91,
+      "cash": 97032145.91,
+      "positions": 1
+    },
+    {
+      "date": "2026-02-25",
+      "equity": 100039635.77,
+      "cash": 62756965.77,
+      "positions": 10
+    },
+    {
+      "date": "2026-02-26",
+      "equity": 100239025.77,
+      "cash": 62756965.77,
+      "positions": 10
+    },
+    {
+      "date": "2026-02-27",
+      "equity": 100243545.77,
+      "cash": 62756965.77,
+      "positions": 10
+    }
+  ]
+}

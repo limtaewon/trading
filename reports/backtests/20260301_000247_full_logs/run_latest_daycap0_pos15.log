@@ -1,0 +1,10 @@
+/Users/imtaewon/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+00:02:54 [bt2025] load range=2025-12-01..2026-02-27
+00:02:54 [bt2025] trade_days=59
+00:02:55 [bt2025] stage1 fallback: yfinance KOSPI rows=79
+00:02:55 [bt2025] stage1 fallback: yfinance USDKRW rows=83
+00:02:55 [bt2025] progress 20/59 day=2025-12-29 equity=100,231,410 holdings=8 pending=2
+00:02:55 [bt2025] progress 40/59 day=2026-01-28 equity=118,932,569 holdings=15 pending=0
+00:02:55 [bt2025] done final=124,893,870 return=+24.89% mdd=-5.67% sharpe=4.256 trades=60
+00:02:55 [bt2025] result saved: reports/backtests/20260301_000247_full_logs/bt_latest_daycap0_pos15.json

@@ -1,0 +1,170 @@
+{
+  "config": {
+    "start_date": "2025-12-01",
+    "end_date": "2026-02-27",
+    "initial_cash": 100000000,
+    "mode": "balanced",
+    "universe": "technical",
+    "disable_stage4": false,
+    "buy_threshold": 65.0,
+    "universe_size": 120,
+    "max_positions": 10,
+    "fee_bps": 3.0,
+    "sell_tax_bps": 18.0,
+    "slippage_bps": 10.0
+  },
+  "metrics": {
+    "total_return_pct": 0.0,
+    "cagr_pct": 0.0,
+    "max_drawdown_pct": 0.0,
+    "sharpe": 0.0,
+    "days": 59,
+    "final_equity": 100000000.0,
+    "trade_count": 0,
+    "closed_ticker_count": 0,
+    "win_rate_pct": 0.0
+  },
+  "quality": {
+    "flow_market_fallback_days": 0,
+    "flow_stock_fallback_count": 240,
+    "trade_days": 59,
+    "diagnostics": {
+      "fail_s1": 240,
+      "fail_s4": 5888,
+      "all_fail": 6951,
+      "action_hold": 6837,
+      "fail_s5": 3081,
+      "fail_s2": 6495,
+      "action_sell": 123,
+      "days_no_buy_candidates": 57,
+      "all_pass": 9,
+      "score_ge_buy_threshold": 8,
+      "hard_riskoff_days": 1
+    }
+  },
+  "sample_trades": [],
+  "equity_curve_head": [
+    {
+      "date": "2025-12-01",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2025-12-02",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2025-12-03",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2025-12-04",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2025-12-05",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2025-12-08",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2025-12-09",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2025-12-10",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2025-12-11",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2025-12-12",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    }
+  ],
+  "equity_curve_tail": [
+    {
+      "date": "2026-02-11",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-12",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-13",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-19",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-20",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-23",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-24",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-25",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-26",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    },
+    {
+      "date": "2026-02-27",
+      "equity": 100000000.0,
+      "cash": 100000000.0,
+      "positions": 0
+    }
+  ]
+}
