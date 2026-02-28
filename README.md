@@ -59,6 +59,8 @@
 
 ### 4-1. `enrich_data.sh`
 - `collect_market_data.py`, `technical_indicators.py`, `market_regime.py`, `collect_dart.py`를 오케스트레이션한다.
+- `sync_normalized_flow_daily.py`로 `stock_flow_daily`/`market_flow_daily`를 정규화 갱신한다.
+- `decision_operating_pipeline.py`로 Stage 기반 판단 로그(`decision_run`, `decision_candidate`)를 생성한다.
 - 장전/장중 빠른 갱신 모드(`--quick`)를 지원한다.
 
 ### 4-2. 핵심 데이터 산출물
@@ -112,6 +114,8 @@ bash scripts/ops/deploy_to_runtime.sh
 | 테이블 | 역할 | 주 생성/갱신 스크립트 | 주 사용 스크립트 |
 |---|---|---|---|
 | `decision_log` | LLM 판단 원문/검증 입력 로그 저장 | `execute_gpt_orders.py`(INSERT) | `stock_rag_report_api.py` |
+| `decision_run` | Stage0~5 실행 점수/패스/차단사유 로그 | `decision_operating_pipeline.py`(INSERT) | 운영 점검/전략 튜닝 |
+| `decision_candidate` | 티커별 행동(BUY/HOLD/REDUCE) 및 근거코드 | `decision_operating_pipeline.py`(INSERT) | 운영 점검/전략 튜닝 |
 | `order_log` | 주문 시도/성공/스킵 사유 감사 로그 | `execute_gpt_orders.py`(INSERT) | `stock_rag_report_api.py` |
 | `execution_pred` | 체결확률/슬리피지 추정치 기록 | `execute_gpt_orders.py`(INSERT) | 운영 감사/분석 |
 | `kill_switch_event` | kill-switch/가드레일 발동 이력 | `execute_gpt_orders.py`(INSERT) | 운영 감사/리스크 추적 |
@@ -146,7 +150,9 @@ bash scripts/ops/deploy_to_runtime.sh
 | `exchange_rate` | 환율 시계열(USDKRW 등) | `collect_market_data.py` | `market_regime.py`, 브리핑/리포트 |
 | `interest_rate` | 금리 시계열 | `collect_market_data.py` | `market_briefing.py` |
 | `commodity` | 원자재 시계열 | `collect_market_data.py` | `market_briefing.py`, 뉴스 분석 보조 |
-| `investor_flow` | 투자주체 수급 데이터 | 외부 수집 파이프라인/적재 | `market_briefing.py` |
+| `stock_flow_daily` | 종목 일별 정규화 수급(외국인/기관, 금액/수량/회전율) | `sync_normalized_flow_daily.py` | `decision_operating_pipeline.py` |
+| `market_flow_daily` | 시장 일별 정규화 수급(시장/전체 집계) | `sync_normalized_flow_daily.py` | `decision_operating_pipeline.py` |
+| `investor_flow` | 레거시 투자주체 수급(브리핑 호환) | 외부 수집 또는 `sync_normalized_flow_daily.py --sync-legacy-investor-flow` | `market_briefing.py` |
 | `dart_disclosure` | DART 공시 원천/정규화 저장 | `collect_dart.py` | `prepare_gpt_prompt.py`, `technical_indicators.py` |
 
 ### 10-5. 참고: 조회용 뷰(테이블 아님)

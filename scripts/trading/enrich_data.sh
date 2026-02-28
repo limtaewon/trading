@@ -80,7 +80,23 @@ if [[ "$MODE" == "all" || "$MODE" == "--dart" ]]; then
     fi
 fi
 
-# ─── 6. 결과 요약 ─────────────────────────────────────────────
+# ─── 6. 정규화 수급 동기화 ─────────────────────────────────────
+if [[ "$MODE" == "all" || "$MODE" == "--quick" ]]; then
+    echo ""
+    echo "▸ 정규화 수급 동기화..."
+    python3 "$SCRIPT_DIR/sync_normalized_flow_daily.py" --days 14 2>&1 | tail -10
+    echo "  완료"
+fi
+
+# ─── 7. Decision Operating(P0) 로그 생성 ─────────────────────
+if [[ "$MODE" == "all" || "$MODE" == "--quick" ]]; then
+    echo ""
+    echo "▸ 의사결정 파이프라인(P0) 실행..."
+    python3 "$SCRIPT_DIR/decision_operating_pipeline.py" --horizon INTRADAY --universe watchlist --limit 30 2>&1 | tail -10
+    echo "  완료"
+fi
+
+# ─── 8. 결과 요약 ─────────────────────────────────────────────
 echo ""
 echo "============================================================"
 echo "$(date '+%Y-%m-%d %H:%M:%S') [보조 데이터 강화] 완료"
@@ -90,9 +106,11 @@ echo "  SELECT * FROM trading.v_trading_dashboard    -- 종합 대시보드"
 echo "  SELECT * FROM trading.v_stock_signals        -- 종목별 시그널"
 echo "  SELECT * FROM trading.v_regime               -- 시장 레짐"
 echo "  SELECT * FROM trading.v_recent_disclosures   -- 최근 공시"
+echo "  SELECT * FROM trading.decision_run ORDER BY decision_time DESC LIMIT 5"
+echo "  SELECT * FROM trading.decision_candidate WHERE decision_id='...'"
 echo "============================================================"
 
-# ─── 7. 텔레그램 요약 ─────────────────────────────────────────────
+# ─── 9. 텔레그램 요약 ─────────────────────────────────────────────
 python3 "$SCRIPT_DIR/telegram_notify.py" "📊 <b>보조 데이터 강화 완료</b> (${MODE})
 $(date '+%H:%M') | 시장데이터+기술지표+레짐+DART
 → gpt-5.2 HEARTBEAT 준비 완료" 2>/dev/null || true

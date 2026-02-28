@@ -23,6 +23,8 @@
 - technical_indicators.py
 - market_regime.py
 - enrich_data.sh
+- sync_normalized_flow_daily.py
+- decision_operating_pipeline.py
 - refresh_stocks.py
 - refresh_interest_watchlist.py
 
@@ -39,4 +41,5 @@
 - run_news_backfill_2025_all_months.sh
 - run_news_backfill_2025_resume_09_12.sh
 - schema_news_research.sql
+- schema_decision_operating.sql
 - trading_response_schema.json

@@ -6,6 +6,7 @@
 핵심 실행 흐름:
 - codex_cron_router.sh -> codex_brain.sh -> prepare_gpt_prompt.py -> execute_gpt_orders.py
 - 뉴스/데이터 파이프라인: collect_news.py, monitor_news.py, cluster_news.py, llm_relation_reasoner.py
+- P0 의사결정 로그 파이프라인: enrich_data.sh -> sync_normalized_flow_daily.py -> decision_operating_pipeline.py
 
 정리 정책:
 - 불필요 백업 파일(*.bak) 삭제
