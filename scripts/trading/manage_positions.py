@@ -46,6 +46,7 @@ POSITION_SCHEMA_FILE = SCRIPT_DIR / "position_manager_response_schema.json"
 ORDER_EXEC_SCRIPT = SCRIPT_DIR / "execute_gpt_orders.py"
 TELEGRAM_NOTIFY_SCRIPT = HOME / ".openclaw" / "scripts" / "telegram_notify.py"
 MCPORTER_BIN = os.getenv("MCPORTER_BIN") or shutil.which("mcporter") or "/opt/homebrew/bin/mcporter"
+MCP_CONFIG = str(HOME / ".openclaw" / "config" / "mcporter.json")
 
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://localhost:8123")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
@@ -333,7 +334,7 @@ def mcporter_call(tool: str, args: str = "") -> dict[str, Any] | None:
         cmd += f"({args})"
     try:
         res = subprocess.run(
-            [MCPORTER_BIN, "call", cmd, "--output", "json"],
+            [MCPORTER_BIN, "--config", MCP_CONFIG, "call", cmd, "--output", "json"],
             capture_output=True,
             text=True,
             timeout=30,
