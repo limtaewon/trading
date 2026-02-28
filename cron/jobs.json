@@ -491,56 +491,6 @@
       }
     },
     {
-      "id": "18d60b4d-41f3-40c6-b547-a06243df280e",
-      "name": "data-news-backfill-2025",
-      "enabled": false,
-      "createdAtMs": 1771142652089,
-      "updatedAtMs": 1771142652089,
-      "schedule": {
-        "kind": "cron",
-        "expr": "30 2 * * 0",
-        "tz": "Asia/Seoul"
-      },
-      "sessionTarget": "main",
-      "wakeMode": "next-heartbeat",
-      "payload": {
-        "kind": "command",
-        "command": "bash $HOME/.openclaw/scripts/trading/run_news_backfill_2025.sh"
-      },
-      "state": {
-        "lastStatus": "new",
-        "consecutiveErrors": 0
-      }
-    },
-    {
-      "id": "90189093-0804-4e39-8c0e-b0faecad5ffb",
-      "agentId": "main",
-      "name": "data-news-backfill-2025-isolated",
-      "enabled": false,
-      "createdAtMs": 1771210345724,
-      "updatedAtMs": 1771223495745,
-      "schedule": {
-        "kind": "cron",
-        "expr": "30 2 * * 0",
-        "tz": "Asia/Seoul"
-      },
-      "sessionTarget": "isolated",
-      "wakeMode": "now",
-      "payload": {
-        "kind": "agentTurn",
-        "message": "리마인더: 2025년 뉴스 백필 작업을 실행하라. 다음 명령을 실행하고 결과를 요약 보고하라.\n\nbash $HOME/.openclaw/scripts/trading/run_news_backfill_2025.sh\n\n실행 성공/실패, 처리 건수(가능하면), 오류 로그 경로를 간단히 보고."
-      },
-      "delivery": {
-        "mode": "announce"
-      },
-      "state": {
-        "lastRunAtMs": 1771210418451,
-        "lastStatus": "ok",
-        "lastDurationMs": 246255,
-        "consecutiveErrors": 0
-      }
-    },
-    {
       "id": "ca407c78-954a-4191-8a3b-d0d296b6f85a",
       "agentId": "main",
       "name": "crypto-news-collector-30m",
@@ -682,6 +632,28 @@
         "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
       },
       "state": {}
+    },
+    {
+      "id": "1ef91a88-4b76-483c-9ff6-41962ef8d332",
+      "name": "data-news-weekend-hourly",
+      "enabled": true,
+      "createdAtMs": 1772268556806,
+      "updatedAtMs": 1772268556806,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 * * * 0,6",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1"
+      },
+      "state": {
+        "lastStatus": "new",
+        "consecutiveErrors": 0
+      }
     }
   ]
 }

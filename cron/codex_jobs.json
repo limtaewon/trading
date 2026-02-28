@@ -263,32 +263,6 @@
       "source": "openclaw-jobs"
     },
     {
-      "name": "data-news-backfill-2025",
-      "enabled": true,
-      "schedule": {
-        "expr": "30 2 * * 0",
-        "tz": "Asia/Seoul"
-      },
-      "payload": {
-        "kind": "command",
-        "command": "bash $HOME/.openclaw/scripts/trading/run_news_backfill_2025.sh"
-      },
-      "source": "openclaw-jobs"
-    },
-    {
-      "name": "data-news-backfill-2025-isolated",
-      "enabled": true,
-      "schedule": {
-        "expr": "30 2 * * 0",
-        "tz": "Asia/Seoul"
-      },
-      "payload": {
-        "kind": "agentTurn",
-        "message": "리마인더: 2025년 뉴스 백필 작업을 실행하라. 다음 명령을 실행하고 결과를 요약 보고하라.\n\nbash $HOME/.openclaw/scripts/trading/run_news_backfill_2025.sh\n\n실행 성공/실패, 처리 건수(가능하면), 오류 로그 경로를 간단히 보고."
-      },
-      "source": "openclaw-jobs"
-    },
-    {
       "name": "crypto-news-collector-30m",
       "enabled": true,
       "schedule": {
@@ -357,7 +331,20 @@
       "name": "data-news-morning",
       "enabled": true,
       "schedule": {
-        "expr": "0 7 * * *",
+        "expr": "0 7 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-news-weekend-hourly",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 * * * 0,6",
         "tz": "Asia/Seoul"
       },
       "payload": {

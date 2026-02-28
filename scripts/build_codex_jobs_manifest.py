@@ -56,7 +56,17 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-news-morning",
             "enabled": True,
-            "schedule": {"expr": "0 7 * * *", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "0 7 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/collect_news.py morning >> {logs}/news-collector.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "data-news-weekend-hourly",
+            "enabled": True,
+            "schedule": {"expr": "0 * * * 0,6", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/collect_news.py morning >> {logs}/news-collector.log 2>&1',
