@@ -140,6 +140,10 @@ python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py
 - 샘플 환경 파일: `.env.example`
 - 키 교체/점검 절차: `docs/SECURITY_ROTATION_CHECKLIST.md`
 
+## 9-1) 운영 개선 백로그
+- 다음 단계 개선 로드맵(Replay/Outcome/리스크/체결/관측성):
+- `docs/TRADING_OS_UPGRADE_BACKLOG.md`
+
 ## 10) ClickHouse 실사용 테이블 총정리
 아래 목록은 현재 주식 런타임 코드(`scripts/trading/*`)에서 실제 참조되는 `trading` DB 테이블만 정리한 것이다.
 
