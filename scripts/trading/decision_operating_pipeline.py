@@ -661,8 +661,13 @@ class Stage2MarketResult:
     flags: list[str]
     source: str
     universe_n: int
+    coverage_ratio: float
+    flow_conf: float
     shock_level: str
     shock_abs_ratio_pct: float
+    raw_shock_abs_ratio_pct: float
+    foreign_adj_pct: float
+    inst_adj_pct: float
     foreign_net_krw: float
     foreign_traded_krw: float
     foreign_pct: float
@@ -683,19 +688,11 @@ def _sanity_check_market_flow(
         return False, 0.0, flags
 
     ratio = (net_buy_krw / traded_krw) * 100.0
-    if universe_n > 0 and universe_n < 200:
-        flags.append(f"DENOM_SAMPLE_UNIVERSE_N={universe_n}")
     if abs(ratio) > 20.0:
         flags.append(f"DENOM_SANITY_RATIO_OOB={ratio:.2f}%")
     if source != "MARKET_TOTAL":
         flags.append(f"DENOM_SOURCE={source or 'UNKNOWN'}")
-
-    ok = (
-        "DENOM_ZERO_OR_NULL" not in flags
-        and not any(f.startswith("DENOM_SAMPLE_UNIVERSE_N=") for f in flags)
-        and not any(f.startswith("DENOM_SANITY_RATIO_OOB=") for f in flags)
-        and not any(f.startswith("DENOM_SOURCE=") for f in flags)
-    )
+    ok = ("DENOM_ZERO_OR_NULL" not in flags) and not any(f.startswith("DENOM_SANITY_RATIO_OOB=") for f in flags)
     return ok, ratio, flags
 
 
@@ -707,8 +704,13 @@ def compute_stage2_market_score() -> Stage2MarketResult:
             flags=["FLOW_TABLE_MISSING", "FLOW_DENOM_INVALID"],
             source="MISSING",
             universe_n=0,
+            coverage_ratio=0.0,
+            flow_conf=0.0,
             shock_level="UNKNOWN",
             shock_abs_ratio_pct=0.0,
+            raw_shock_abs_ratio_pct=0.0,
+            foreign_adj_pct=0.0,
+            inst_adj_pct=0.0,
             foreign_net_krw=0.0,
             foreign_traded_krw=0.0,
             foreign_pct=0.0,
@@ -762,8 +764,13 @@ GROUP BY investor_type
             flags=["FLOW_EMPTY", "FLOW_DENOM_INVALID"],
             source="UNKNOWN",
             universe_n=0,
+            coverage_ratio=0.0,
+            flow_conf=0.0,
             shock_level="UNKNOWN",
             shock_abs_ratio_pct=0.0,
+            raw_shock_abs_ratio_pct=0.0,
+            foreign_adj_pct=0.0,
+            inst_adj_pct=0.0,
             foreign_net_krw=0.0,
             foreign_traded_krw=0.0,
             foreign_pct=0.0,
@@ -775,12 +782,24 @@ GROUP BY investor_type
     source_values = {str(r.get("denom_source", "") or "UNKNOWN").upper() for r in rows}
     source = source_values.pop() if len(source_values) == 1 else "MIXED"
     universe_n = max(_to_int(r.get("universe_n"), 0) for r in rows)
+    expected_universe_n = max(1, _to_int(os.getenv("STAGE2_EXPECTED_UNIVERSE_N", "2000"), 2000))
+    if source == "MARKET_TOTAL" and universe_n <= 0:
+        coverage_ratio = 1.0
+    else:
+        coverage_ratio = _clamp(universe_n / float(expected_universe_n), 0.0, 1.0)
+    flow_conf = coverage_ratio
+    if source != "MARKET_TOTAL":
+        # 소스가 시장 전체가 아니면 신뢰도를 낮춰 쇼크 과대판정을 완화.
+        flow_conf *= 0.5
+
     foreign_net = 0.0
     foreign_traded = 0.0
     foreign_pct = 0.0
+    foreign_adj_pct = 0.0
     inst_net = 0.0
     inst_traded = 0.0
     inst_pct = 0.0
+    inst_adj_pct = 0.0
     flags: list[str] = []
     valid = True
 
@@ -789,34 +808,45 @@ GROUP BY investor_type
         net = _to_float(r.get("net_buy_value_krw"), 0.0)
         traded = _to_float(r.get("market_traded_value_krw"), 0.0)
         pct = (net / traded * 100.0) if traded > 0 else 0.0
+        adj_pct = pct * flow_conf
         if inv in {"FOREIGN", "INST"}:
             ok, pct, sanity_flags = _sanity_check_market_flow(net, traded, universe_n, source)
             if not ok:
                 valid = False
                 flags.extend(sanity_flags)
+            else:
+                flags.extend([f for f in sanity_flags if f.startswith("DENOM_SOURCE=")])
         if inv == "FOREIGN":
             foreign_net = net
             foreign_traded = traded
             foreign_pct = pct
+            foreign_adj_pct = adj_pct
         if inv == "INST":
             inst_net = net
             inst_traded = traded
             inst_pct = pct
+            inst_adj_pct = adj_pct
 
     score = 0.0
-    shock_abs = max(abs(foreign_pct), abs(inst_pct))
+    raw_shock_abs = max(abs(foreign_pct), abs(inst_pct))
+    shock_abs = max(abs(foreign_adj_pct), abs(inst_adj_pct))
     shock_level = "PASS"
-    if shock_abs > 8.0:
+    if shock_abs > 12.0:
+        shock_level = "EXTREME"
+    elif shock_abs > 8.0:
         shock_level = "ALERT"
     elif shock_abs > 3.0:
         shock_level = "WARN"
     if valid:
-        score = _score_market_flow_ratio(foreign_pct, "foreign") + _score_market_flow_ratio(inst_pct, "inst")
+        score = _score_market_flow_ratio(foreign_adj_pct, "foreign") + _score_market_flow_ratio(inst_adj_pct, "inst")
         if shock_level == "WARN":
             flags.append("FLOW_SHOCK_WARN")
         elif shock_level == "ALERT":
             flags.append("FLOW_SHOCK_ALERT")
             score *= 0.6
+        elif shock_level == "EXTREME":
+            flags.append("FLOW_SHOCK_EXTREME")
+            score *= 0.35
     else:
         flags.append("FLOW_DENOM_INVALID")
         shock_level = "UNKNOWN"
@@ -827,8 +857,13 @@ GROUP BY investor_type
         flags=sorted(set(flags)),
         source=source,
         universe_n=universe_n,
+        coverage_ratio=round(coverage_ratio, 4),
+        flow_conf=round(flow_conf, 4),
         shock_level=shock_level,
         shock_abs_ratio_pct=round(shock_abs, 4),
+        raw_shock_abs_ratio_pct=round(raw_shock_abs, 4),
+        foreign_adj_pct=round(foreign_adj_pct, 4),
+        inst_adj_pct=round(inst_adj_pct, 4),
         foreign_net_krw=foreign_net,
         foreign_traded_krw=foreign_traded,
         foreign_pct=foreign_pct,
@@ -841,7 +876,9 @@ GROUP BY investor_type
 def load_stage_maps() -> dict[str, dict[str, Any]]:
     maps: dict[str, dict[str, Any]] = {
         "flow": {},
+        "flow_fallback": {},
         "event": {},
+        "event_market": {},
         "cluster": {},
         "dart": {},
         "tech": {},
@@ -868,6 +905,21 @@ HAVING match(ticker, '^[0-9]{6}$')
 """
         )
         maps["flow"] = {str(r.get("ticker")): r for r in rows}
+        fallback_rows = ch_select(
+            """
+SELECT
+    ticker,
+    toString(max(trade_date)) AS last_flow_date,
+    argMaxIf(net_buy_value_krw, trade_date, investor_type = 'FOREIGN') AS foreign_net_last,
+    argMaxIf(net_buy_value_krw, trade_date, investor_type = 'INST') AS inst_net_last,
+    argMax(traded_value_krw, trade_date) AS traded_last
+FROM trading.stock_flow_daily
+WHERE trade_date >= today() - 12
+GROUP BY ticker
+HAVING match(ticker, '^[0-9]{6}$')
+"""
+        )
+        maps["flow_fallback"] = {str(r.get("ticker")): r for r in fallback_rows}
 
     if table_exists("news_event_frames"):
         try:
@@ -927,6 +979,19 @@ GROUP BY ticker
 """
             )
         maps["event"] = {str(r.get("ticker")): r for r in rows}
+        market_rows = ch_select(
+            """
+SELECT
+    avg(toFloat64(importance)) AS importance_avg,
+    max(toFloat64(importance)) AS importance_max,
+    count() AS event_cnt,
+    countIf(thesis_path != '' AND evidence_json != '[]') AS explain_ready_cnt
+FROM trading.news_event_frames
+WHERE published_at >= now() - INTERVAL 3 DAY
+  AND relevant = 1
+"""
+        )
+        maps["event_market"] = {"ALL": market_rows[0]} if market_rows else {}
 
     if table_exists("news_cluster_state"):
         rows = ch_select(
@@ -1096,15 +1161,71 @@ def _cluster_state_score(state: str) -> float:
     return 5.0
 
 
+def _mode_state_path() -> str:
+    return os.getenv(
+        "DECISION_MODE_STATE_FILE",
+        os.path.expanduser("~/.openclaw/data/decision_mode_state.json"),
+    )
+
+
+def _load_mode_state() -> dict[str, Any]:
+    path = _mode_state_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+            if isinstance(obj, dict):
+                return obj
+    except Exception:
+        pass
+    return {}
+
+
+def _save_mode_state(state: dict[str, Any]) -> None:
+    path = _mode_state_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        _log(f"mode state save failed: {exc}")
+
+
+def _resolve_mode(base_mode: str, state: dict[str, Any], today: dt.date) -> tuple[str, bool]:
+    base = (base_mode or "strict").lower().strip()
+    if base not in {"strict", "balanced", "neutral"}:
+        base = "strict"
+    override_mode = str(state.get("override_mode", "") or "").lower().strip()
+    override_until = str(state.get("override_until", "") or "").strip()
+    if override_mode in {"strict", "balanced", "neutral"} and override_until:
+        try:
+            until_d = dt.date.fromisoformat(override_until)
+            if today <= until_d:
+                return override_mode, True
+        except Exception:
+            pass
+    return base, False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--horizon", default="INTRADAY", choices=["INTRADAY", "D1_3", "W1_2"])
     ap.add_argument("--universe", default="watchlist", choices=["watchlist", "all"])
     ap.add_argument("--limit", type=int, default=30)
+    ap.add_argument("--mode", default=os.getenv("DECISION_MODE", "strict"), choices=["strict", "balanced", "neutral"])
     ap.add_argument("--model-version", default="decision-operating-spec-p0")
     args = ap.parse_args()
 
     ensure_decision_tables()
+    today = dt.date.today()
+    mode_state = _load_mode_state()
+    mode, mode_overridden = _resolve_mode(args.mode, mode_state, today)
+
+    mode_cfg = {
+        "strict": {"buy_threshold": 70.0, "stage2_min": 50.0, "s2_unknown_s3": 70.0, "s2_unknown_s4": 65.0},
+        "balanced": {"buy_threshold": 65.0, "stage2_min": 45.0, "s2_unknown_s3": 65.0, "s2_unknown_s4": 60.0},
+        "neutral": {"buy_threshold": 60.0, "stage2_min": 40.0, "s2_unknown_s3": 60.0, "s2_unknown_s4": 58.0},
+    }[mode]
+
     stage0 = compute_stage0()
     stage1 = compute_stage1()
     market_stage2 = compute_stage2_market_score()
@@ -1148,8 +1269,8 @@ def main() -> int:
         run_abs_blocks.append("HARD_RISK_OFF")
     if not market_stage2.valid:
         run_abs_blocks.append("FLOW_DENOM_INVALID")
-    if market_stage2.shock_level == "ALERT":
-        run_abs_blocks.append("FLOW_SHOCK_ALERT")
+    if market_stage2.shock_level == "EXTREME":
+        run_abs_blocks.append("FLOW_SHOCK_EXTREME")
 
     candidates: list[dict[str, Any]] = []
     s2_scores: list[float] = []
@@ -1159,6 +1280,7 @@ def main() -> int:
     total_scores: list[float] = []
     stage5_fail_counter: Counter[str] = Counter()
     stage5_exec_zero_counter: Counter[str] = Counter()
+    flow_unknown_count = 0
 
     for item in tickers:
         ticker = item["ticker"]
@@ -1167,6 +1289,7 @@ def main() -> int:
         explain_codes: list[str] = []
 
         flow = maps["flow"].get(ticker, {})
+        flow_fb = maps["flow_fallback"].get(ticker, {})
         foreign_net = _to_float(flow.get("foreign_net_value_3d"), 0.0)
         inst_net = _to_float(flow.get("inst_net_value_3d"), 0.0)
         traded = _to_float(flow.get("traded_value_3d"), 0.0)
@@ -1175,9 +1298,49 @@ def main() -> int:
         foreign_pos_days = _to_int(flow.get("foreign_pos_days"), 0)
         inst_pos_days = _to_int(flow.get("inst_pos_days"), 0)
         flow_persistence = max(foreign_pos_days, inst_pos_days)
+        flow_unknown = False
+        s2_penalty = 0.0
         s2_stock = 0.0
         if traded <= 0:
-            explain_codes.append("STOCK_FLOW_MISSING")
+            last_flow_date = str(flow_fb.get("last_flow_date", "") or "")
+            fb_foreign = _to_float(flow_fb.get("foreign_net_last"), 0.0)
+            fb_inst = _to_float(flow_fb.get("inst_net_last"), 0.0)
+            fb_traded = _to_float(flow_fb.get("traded_last"), 0.0)
+            stale_days = 999
+            if last_flow_date:
+                try:
+                    stale_days = max(0, (today - dt.date.fromisoformat(last_flow_date)).days)
+                except Exception:
+                    stale_days = 999
+            if fb_traded > 0 and stale_days <= 2:
+                decay = 1.0
+                foreign_net = fb_foreign * decay
+                inst_net = fb_inst * decay
+                traded = fb_traded
+                explain_codes.append("FLOW_STALE_OK")
+            elif fb_traded > 0 and stale_days <= 5:
+                decay = 0.7
+                foreign_net = fb_foreign * decay
+                inst_net = fb_inst * decay
+                traded = fb_traded
+                s2_penalty += 5.0
+                explain_codes.append("FLOW_STALE_DECAY")
+            elif fb_traded > 0 and stale_days <= 10:
+                flow_unknown = True
+                s2_penalty += 12.0
+                explain_codes.append("FLOW_STALE_TOO_OLD")
+            else:
+                flow_unknown = True
+                s2_penalty += 15.0
+                explain_codes.append("FLOW_MISSING")
+            if flow_unknown:
+                flow_unknown_count += 1
+                s2_stock = 15.0
+                foreign_pct = 0.0
+                inst_pct = 0.0
+            else:
+                foreign_pct = (foreign_net / traded * 100.0) if traded > 0 else 0.0
+                inst_pct = (inst_net / traded * 100.0) if traded > 0 else 0.0
         else:
             net_ratio_3d = (foreign_net + inst_net) / traded
             norm_ratio = _to_float(flow_norm.get(ticker), 0.0)
@@ -1185,20 +1348,17 @@ def main() -> int:
             # 0~40: net_ratio + persistence + cross-sectional normalization
             s2_stock = _clamp(50.0 * net_ratio_3d + 10.0 * persistence + 20.0 * norm_ratio, 0.0, 40.0)
 
-        stage2_score = _clamp(market_stage2_score + s2_stock, 0, 100)
+        stage2_score = _clamp(market_stage2_score + s2_stock - s2_penalty, 0, 100)
         distribution_block = foreign_pct <= -6.0 and inst_pct <= -3.0
-        stage2_pass = (
-            market_stage2.valid
-            and market_stage2.shock_level != "ALERT"
-            and stage2_score >= 55
-            and not distribution_block
-        )
+        stage2_pass = market_stage2.valid and market_stage2.shock_level != "EXTREME" and stage2_score >= mode_cfg["stage2_min"] and not distribution_block
         if not market_stage2.valid:
             explain_codes.append("FLOW_DENOM_INVALID")
         if market_stage2.shock_level == "WARN":
             explain_codes.append("FLOW_SHOCK_WARN")
         if market_stage2.shock_level == "ALERT":
             explain_codes.append("FLOW_SHOCK_ALERT")
+        if market_stage2.shock_level == "EXTREME":
+            explain_codes.append("FLOW_SHOCK_EXTREME")
         if distribution_block:
             abs_blocks.append("FLOW_DISTRIBUTION_BLOCK")
         if foreign_pct >= 2.0:
@@ -1207,6 +1367,7 @@ def main() -> int:
             explain_codes.append("INST_ACCUM_3D")
 
         event = maps["event"].get(ticker, {})
+        event_market = maps["event_market"].get("ALL", {})
         cluster = maps["cluster"].get(ticker, {})
         dart = maps["dart"].get(ticker, {})
         event_imp_avg = _to_float(event.get("importance_avg"), 0.0)
@@ -1215,21 +1376,35 @@ def main() -> int:
         explain_ready_cnt = _to_int(event.get("explain_ready_cnt"), 0)
         event_type = str(event.get("event_type", "") or "")
         cluster_state = str(cluster.get("state_label", "") or "")
-        cluster_score = _cluster_state_score(cluster_state)
-        event_score = _clamp((event_imp_avg / 5.0) * 30.0, 0, 30)
-        relevance_score = 20.0
-        if event_cnt <= 2:
-            novelty_score = 15.0
-        elif event_cnt <= 5:
-            novelty_score = 10.0
+        cluster_imp_max = _to_float(cluster.get("importance_max"), 0.0)
+        # TE: ticker evidence (0~60)
+        te_score = _clamp(10.0 * min(explain_ready_cnt, 3) + 10.0 * min(event_imp_max, 5.0), 0.0, 60.0)
+        # CE: cluster evidence (0~30)
+        state_label = cluster_state.lower()
+        if state_label == "reinforcing":
+            ce_state = 30.0
+        elif state_label == "emerging":
+            ce_state = 18.0
+        elif state_label == "stable":
+            ce_state = 10.0
+        elif state_label == "decaying":
+            ce_state = 5.0
+        elif state_label == "reversing":
+            ce_state = -10.0
         else:
-            novelty_score = 5.0
-        stage3_score = _clamp(cluster_score + event_score + relevance_score + novelty_score, 0, 100)
+            ce_state = 0.0
+        ce_score = _clamp(ce_state + (5.0 if cluster_imp_max >= 4.0 else 0.0), 0.0, 30.0)
+        # ME: market-wide evidence (0~20)
+        m_imp_max = _to_float(event_market.get("importance_max"), 0.0)
+        m_explain = _to_int(event_market.get("explain_ready_cnt"), 0)
+        if m_imp_max >= 4.0 and m_explain >= 10:
+            me_score = 20.0 if (cluster_state or event_cnt > 0) else 10.0
+        elif m_imp_max >= 3.0 and m_explain >= 5:
+            me_score = 10.0 if (cluster_state or event_cnt > 0) else 5.0
+        else:
+            me_score = 0.0
+        stage3_score = _clamp(te_score + ce_score + me_score, 0, 100)
         stage3_score_capped = False
-        if explain_ready_cnt <= 0:
-            stage3_score = min(stage3_score, 35.0)
-            stage3_score_capped = True
-            explain_codes.append("NO_EVIDENCE_CAP")
         redflag = False
         if _is_event_redflag(event_type, event_imp_max):
             redflag = True
@@ -1239,9 +1414,30 @@ def main() -> int:
         if _is_dart_redflag(dart_nm, dart_imp):
             redflag = True
             abs_blocks.append("DART_REDFLAG")
-        stage3_pass = stage3_score >= 50 and not redflag
+        stage3_size_multiplier = 1.0
+        if mode == "strict":
+            # strict: TE 우선, TE 부재시 CE 고강도 + 타이밍 강도 필요
+            stage3_pass = (not redflag) and (
+                (te_score >= 20.0 and stage3_score >= 50.0)
+                or (te_score <= 0.0 and ce_score >= 23.0 and cluster_imp_max >= 4.0)
+            )
+            if te_score <= 0.0 and stage3_pass:
+                stage3_size_multiplier = 0.5
+                explain_codes.append("STAGE3_HYBRID_CE")
+        elif mode == "balanced":
+            stage3_pass = (not redflag) and (stage3_score >= 50.0 or (te_score <= 0.0 and ce_score >= 18.0 and stage3_score >= 45.0))
+            if te_score <= 0.0 and stage3_pass:
+                stage3_size_multiplier = 0.4
+                explain_codes.append("STAGE3_HYBRID_CE")
+        else:
+            stage3_pass = (not redflag) and stage3_score >= 45.0
+            if te_score <= 0.0 and stage3_pass:
+                stage3_size_multiplier = 0.5
         if stage3_score >= 60:
             explain_codes.append("NEWS_CLUSTER_SUPPORT")
+        if te_score <= 0:
+            stage3_score_capped = True
+            explain_codes.append("NO_TICKER_EVIDENCE")
 
         tech = maps["tech"].get(ticker, {})
         if not ticker_name:
@@ -1285,13 +1481,39 @@ def main() -> int:
             vol_conf_score = 8.0
 
         stage4_score = _clamp(trend_score + mom_score + vol_score + vol_conf_score, 0, 100)
-        mode_a = close > ma20 > ma60 > 0 and vol_ratio >= 1.0 and rsi <= 70
-        mode_b = ma20 > ma60 > 0 and (ma20 * 0.975 <= close <= ma20 * 0.995) and (35 <= rsi <= 65) and vol_ratio >= 0.0
-        stage4_pass = stage4_score >= 55 and rsi <= 70 and (mode_a or mode_b)
-        if rsi > 70:
+        regime = "RISK_OFF" if stage1.hard_riskoff else ("RISK_ON" if stage1.score >= 70 else "NEUTRAL")
+        p1 = close > ma20 > ma60 > 0 and vol_ratio >= 1.0 and rsi <= 72
+        p1_riskoff = close > ma20 > ma60 > 0 and vol_ratio >= 1.2 and rsi <= 68
+        p2 = ma20 > ma60 > 0 and (ma20 * 0.975 <= close <= ma20 * 1.005) and (35 <= rsi <= 65)
+        p3 = signal_score >= 3 and vol_ratio >= 1.3 and rsi <= 75 and close >= ma20 > 0
+        if mode == "strict":
+            if regime == "RISK_ON":
+                stage4_pass = stage4_score >= 55 and (p1 or p2 or p3)
+            elif regime == "NEUTRAL":
+                stage4_pass = stage4_score >= 58 and (p1 or p2)
+            else:
+                stage4_pass = stage4_score >= 65 and p1_riskoff
+        elif mode == "balanced":
+            if regime == "RISK_ON":
+                stage4_pass = stage4_score >= 52 and (p1 or p2 or p3)
+            elif regime == "NEUTRAL":
+                stage4_pass = stage4_score >= 55 and (p1 or p2)
+            else:
+                stage4_pass = stage4_score >= 62 and p1_riskoff
+        else:
+            if regime == "RISK_ON":
+                stage4_pass = stage4_score >= 50 and (p1 or p2 or p3)
+            elif regime == "NEUTRAL":
+                stage4_pass = stage4_score >= 53 and (p1 or p2)
+            else:
+                stage4_pass = stage4_score >= 60 and p1_riskoff
+        if rsi > 75:
             abs_blocks.append("TECH_OVERHEAT_RSI")
         if close > ma20 > ma60 > 0:
             explain_codes.append("TREND_STRUCTURE_UP")
+        if flow_unknown and not (stage3_score >= mode_cfg["s2_unknown_s3"] and stage4_score >= mode_cfg["s2_unknown_s4"]):
+            stage2_pass = False
+            explain_codes.append("FLOW_UNKNOWN_NEEDS_S3S4")
 
         risk = maps["risk"].get(ticker, {})
         liquidity = _to_float(risk.get("liquidity_krw"), 0.0)
@@ -1300,21 +1522,38 @@ def main() -> int:
         stage5_exec_multiplier = 1.0
         if liquidity >= 5_000_000_000:
             stage5_score = 100.0
+            stage5_exec_multiplier = 1.0
         elif liquidity >= 1_000_000_000:
             stage5_score = 80.0
+            stage5_exec_multiplier = 0.7
         elif liquidity >= 500_000_000:
             stage5_score = 60.0
+            stage5_exec_multiplier = 0.4
+        elif liquidity >= 300_000_000:
+            stage5_score = 40.0
+            stage5_exec_multiplier = 0.2
         else:
             stage5_score = 20.0
-        if spread_bp > 50:
-            stage5_score = max(0.0, stage5_score - 10.0)
+            stage5_exec_multiplier = 0.0
+            stage5_fail_codes.append("LOW_LIQUIDITY")
+            abs_blocks.append("LOW_LIQUIDITY")
+        if spread_bp > 80:
+            stage5_score = 0.0
+            stage5_fail_codes.append("SPREAD_TOO_WIDE")
+            stage5_exec_multiplier = 0.0
+            abs_blocks.append("SPREAD_TOO_WIDE")
+        elif spread_bp > 50:
+            stage5_score = max(0.0, stage5_score - 15.0)
             stage5_fail_codes.append("SPREAD_WIDE")
             stage5_exec_multiplier = min(stage5_exec_multiplier, 0.6)
-        stage5_pass = liquidity >= 1_000_000_000
-        if not stage5_pass:
-            abs_blocks.append("LOW_LIQUIDITY")
-            stage5_fail_codes.append("LOW_LIQUIDITY")
+        if 300_000_000 <= liquidity < 500_000_000 and not (stage3_score >= 70 and stage4_score >= 65 and not stage1.hard_riskoff):
+            stage5_fail_codes.append("LOW_LIQUIDITY_CONDITIONAL")
             stage5_exec_multiplier = 0.0
+            abs_blocks.append("LOW_LIQUIDITY_CONDITIONAL")
+        stage5_pass = stage5_exec_multiplier > 0.0
+        if not stage5_pass:
+            if "LOW_LIQUIDITY" not in stage5_fail_codes and "LOW_LIQUIDITY_CONDITIONAL" not in stage5_fail_codes:
+                stage5_fail_codes.append("EXEC_BLOCKED")
         else:
             explain_codes.append("LIQUIDITY_OK")
         if stage5_fail_codes:
@@ -1329,7 +1568,9 @@ def main() -> int:
             penalty += 15.0
         if market_stage2.shock_level == "ALERT":
             penalty += 10.0
-        if rsi > 70:
+        if market_stage2.shock_level == "EXTREME":
+            penalty += 20.0
+        if rsi > 75:
             penalty += 10.0
 
         total = (
@@ -1344,7 +1585,7 @@ def main() -> int:
         all_pass = stage0.passed and stage1.passed_for_buy and stage2_pass and stage3_pass and stage4_pass and stage5_pass
         has_block = len(abs_blocks) > 0
         action = "HOLD"
-        if not has_block and all_pass and total >= 70:
+        if not has_block and all_pass and total >= mode_cfg["buy_threshold"]:
             action = "BUY"
         elif total <= 35:
             action = "REDUCE"
@@ -1352,7 +1593,16 @@ def main() -> int:
         target_weight = 0.0
         if action == "BUY":
             buy_mult = _clamp((stage1.score - 45.0) / 25.0, 0.0, 1.0)
-            target_weight = _clamp((0.03 + max(0.0, total - 70.0) / 200.0) * buy_mult, 0.0, 0.10)
+            if market_stage2.shock_level == "EXTREME":
+                m_shock = 0.0
+            elif market_stage2.shock_level == "ALERT":
+                m_shock = 0.35
+            elif market_stage2.shock_level == "WARN":
+                m_shock = 0.70
+            else:
+                m_shock = 1.0
+            base = 0.03 + max(0.0, total - mode_cfg["buy_threshold"]) / 200.0
+            target_weight = _clamp(base * buy_mult * m_shock * stage5_exec_multiplier * stage3_size_multiplier, 0.0, 0.10)
 
         if not explain_codes:
             explain_codes.append("WAIT_SIGNAL")
@@ -1393,27 +1643,82 @@ def main() -> int:
     stage4_run = round(sum(s4_scores) / len(s4_scores), 2) if s4_scores else 0.0
     stage5_run = round(sum(s5_scores) / len(s5_scores), 2) if s5_scores else 0.0
     total_run = round(sum(total_scores) / len(total_scores), 2) if total_scores else 0.0
+    buy_cnt = sum(1 for c in candidates if c.get("action") == "BUY")
+    hold_cnt = sum(1 for c in candidates if c.get("action") == "HOLD")
+    reduce_cnt = sum(1 for c in candidates if c.get("action") == "REDUCE")
+
+    # no-trade watchdog: strict에서 무매수 연속 시 balanced 단기 전환
+    no_buy_streak = _to_int(mode_state.get("no_buy_streak"), 0)
+    no_buy_streak = (no_buy_streak + 1) if buy_cnt == 0 else 0
+    flow_unknown_ratio = (flow_unknown_count / len(candidates)) if candidates else 0.0
+    watchdog_triggered = False
+    rollback_triggered = False
+    mode_change_reason = ""
+    if mode == "strict":
+        if (
+            no_buy_streak >= _to_int(os.getenv("WATCHDOG_NO_BUY_SESSIONS", "10"), 10)
+            and not stage1.hard_riskoff
+            and market_stage2.shock_level not in {"ALERT", "EXTREME"}
+            and (flow_unknown_ratio >= 0.40 or market_stage2.coverage_ratio < 0.50)
+        ):
+            override_days = max(1, _to_int(os.getenv("WATCHDOG_OVERRIDE_DAYS", "5"), 5))
+            mode_state["override_mode"] = "balanced"
+            mode_state["override_until"] = (today + dt.timedelta(days=override_days)).isoformat()
+            watchdog_triggered = True
+            mode_change_reason = "NO_TRADE_WATCHDOG"
+    elif mode == "balanced" and mode_overridden:
+        if stage1.hard_riskoff or market_stage2.shock_level in {"ALERT", "EXTREME"}:
+            mode_state["override_mode"] = "strict"
+            mode_state["override_until"] = today.isoformat()
+            rollback_triggered = True
+            mode_change_reason = "WATCHDOG_ROLLBACK_RISK"
+
+    mode_state["no_buy_streak"] = no_buy_streak
+    mode_state["last_run_date"] = today.isoformat()
+    mode_state["last_effective_mode"] = mode
+    _save_mode_state(mode_state)
 
     stage_debug = {
+        "mode": {
+            "requested": args.mode,
+            "effective": mode,
+            "overridden": mode_overridden,
+            "buy_threshold": mode_cfg["buy_threshold"],
+            "stage2_min": mode_cfg["stage2_min"],
+        },
         "stage2": {
             "market_score": round(market_stage2.score, 2),
             "valid": market_stage2.valid,
             "flags": market_stage2.flags,
             "source": market_stage2.source,
             "universe_n": market_stage2.universe_n,
+            "coverage_ratio": market_stage2.coverage_ratio,
+            "flow_conf": market_stage2.flow_conf,
             "shock_level": market_stage2.shock_level,
             "shock_abs_ratio_pct": market_stage2.shock_abs_ratio_pct,
-            "shock_threshold_pct": {"pass_max": 3.0, "warn_max": 8.0},
+            "raw_shock_abs_ratio_pct": market_stage2.raw_shock_abs_ratio_pct,
+            "shock_threshold_pct": {"pass_max": 3.0, "warn_max": 8.0, "alert_max": 12.0},
             "foreign_net_krw_5d": round(market_stage2.foreign_net_krw, 2),
             "foreign_traded_krw_5d": round(market_stage2.foreign_traded_krw, 2),
             "foreign_net_pct_turnover_5d": round(market_stage2.foreign_pct, 4),
+            "foreign_adj_pct_turnover_5d": round(market_stage2.foreign_adj_pct, 4),
             "inst_net_krw_5d": round(market_stage2.inst_net_krw, 2),
             "inst_traded_krw_5d": round(market_stage2.inst_traded_krw, 2),
             "inst_net_pct_turnover_5d": round(market_stage2.inst_pct, 4),
+            "inst_adj_pct_turnover_5d": round(market_stage2.inst_adj_pct, 4),
         },
         "stage5": {
             "fail_summary": dict(stage5_fail_counter),
             "exec_zero_summary": dict(stage5_exec_zero_counter),
+        },
+        "watchdog": {
+            "no_buy_streak": no_buy_streak,
+            "flow_unknown_ratio": round(flow_unknown_ratio, 4),
+            "triggered": watchdog_triggered,
+            "rollback_triggered": rollback_triggered,
+            "reason": mode_change_reason,
+            "override_mode": str(mode_state.get("override_mode", "") or ""),
+            "override_until": str(mode_state.get("override_until", "") or ""),
         },
     }
 
@@ -1426,13 +1731,13 @@ def main() -> int:
         "stage0_score": round(stage0.score, 2),
         "stage1_pass": 1 if stage1.passed_for_buy else 0,
         "stage1_score": round(stage1.score, 2),
-        "stage2_pass": 1 if (market_stage2.valid and stage2_run >= 55) else 0,
+        "stage2_pass": 1 if (market_stage2.valid and market_stage2.shock_level != "EXTREME" and stage2_run >= mode_cfg["stage2_min"]) else 0,
         "stage2_score": stage2_run,
         "stage3_pass": 1 if stage3_run >= 50 else 0,
         "stage3_score": stage3_run,
         "stage4_pass": 1 if stage4_run >= 55 else 0,
         "stage4_score": stage4_run,
-        "stage5_pass": 1 if stage5_run >= 60 else 0,
+        "stage5_pass": 1 if stage5_run >= 40 else 0,
         "stage5_score": stage5_run,
         "total_score": total_run,
         "penalty_score": 0.0,
@@ -1446,13 +1751,9 @@ def main() -> int:
 
     ch_insert_json_each_row("trading.decision_run", [run_row], timeout_sec=60)
     ch_insert_json_each_row("trading.decision_candidate", candidates, timeout_sec=120)
-
-    buy_cnt = sum(1 for c in candidates if c.get("action") == "BUY")
-    hold_cnt = sum(1 for c in candidates if c.get("action") == "HOLD")
-    reduce_cnt = sum(1 for c in candidates if c.get("action") == "REDUCE")
     _log(
         f"decision_id={decision_id} stage0={run_row['stage0_pass']} stage1={run_row['stage1_pass']} "
-        f"candidates={len(candidates)} buy={buy_cnt} hold={hold_cnt} reduce={reduce_cnt}"
+        f"mode={mode} candidates={len(candidates)} buy={buy_cnt} hold={hold_cnt} reduce={reduce_cnt}"
     )
     print(
         json.dumps(
