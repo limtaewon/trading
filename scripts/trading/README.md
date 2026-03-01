@@ -9,9 +9,13 @@
 - 뉴스/데이터 파이프라인: collect_news.py, monitor_news.py, cluster_news.py, llm_relation_reasoner.py
 - P0 의사결정 로그 파이프라인:
   enrich_data.sh -> refresh_interest_watchlist.py -> decision_operating_pipeline.py
+- Decision 운영 정책(실거래 정렬):
+  universe는 `watchlist-only`로 강제(technical/feature fallback 미사용)
+  하드게이트는 Stage0/Stage1/Stage2(EXTREME shock만)/Stage5
+  Stage3/Stage4는 총점/설명용 보조지표로 사용(하드 차단 아님)
 - Stage2 수급 분모 정책:
-  market_flow_daily 분모는 `MARKET_TOTAL`(market_index.traded_value_krw) 우선,
-  없으면 `SAMPLE_STOCK_FLOW_SUM`으로 fallback하며 이 경우 Stage2는 fail-closed 처리
+  market_flow_daily 분모는 `MARKET_TOTAL`(market_index.traded_value_krw) 우선
+  분모 품질 문제는 경고/보조 처리하며, 매수 차단은 EXTREME shock에서만 적용
 - 브리핑 파이프라인:
   send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
   (decision_run / decision_candidate 기반)

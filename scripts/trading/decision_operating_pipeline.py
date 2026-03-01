@@ -566,7 +566,9 @@ LIMIT 8
 
 def load_universe(universe: str, limit: int) -> list[dict[str, str]]:
     lim = max(1, int(limit))
-    if universe == "watchlist" and table_exists("interest_watchlist"):
+    if universe != "watchlist":
+        _log(f"universe={universe} 요청 감지: decision 유니버스는 watchlist로 강제합니다")
+    if table_exists("interest_watchlist"):
         try:
             rows = ch_select(
                 f"""
@@ -588,46 +590,7 @@ LIMIT {lim}
                 return out
         except Exception:
             pass
-
-    if table_exists("technical_signals"):
-        try:
-            rows = ch_select(
-                f"""
-SELECT
-    ticker,
-    any(ticker_name) AS ticker_name
-FROM trading.technical_signals
-WHERE date = (SELECT max(date) FROM trading.technical_signals)
-GROUP BY ticker
-HAVING match(ticker, '^[0-9]{{6}}$')
-ORDER BY max(signal_score) DESC, max(vol_ratio) DESC
-LIMIT {lim}
-"""
-            )
-            out = [{"ticker": str(r.get("ticker", "")), "ticker_name": str(r.get("ticker_name", ""))} for r in rows]
-            out = [r for r in out if _is_ticker(r["ticker"])]
-            if out:
-                return out
-        except Exception:
-            pass
-
-    if table_exists("feature_snapshot"):
-        rows = ch_select(
-            f"""
-SELECT
-    symbol AS ticker,
-    '' AS ticker_name,
-    max(ts) AS ts_max
-FROM trading.feature_snapshot
-WHERE ts >= now() - INTERVAL 2 DAY
-  AND match(symbol, '^[0-9]{{6}}$')
-GROUP BY symbol
-ORDER BY ts_max DESC
-LIMIT {lim}
-"""
-        )
-        out = [{"ticker": str(r.get("ticker", "")), "ticker_name": str(r.get("ticker_name", ""))} for r in rows]
-        return [r for r in out if _is_ticker(r["ticker"])]
+    _log("interest_watchlist 데이터가 없어 후보를 비웁니다(technical/feature fallback 비활성)")
     return []
 
 
@@ -1238,6 +1201,10 @@ def main() -> int:
         "balanced": {"buy_threshold": 65.0, "stage2_min": 45.0, "s2_unknown_s3": 65.0, "s2_unknown_s4": 60.0},
         "neutral": {"buy_threshold": 60.0, "stage2_min": 40.0, "s2_unknown_s3": 60.0, "s2_unknown_s4": 58.0},
     }[mode]
+    if args.universe != "watchlist":
+        _log(f"--universe {args.universe} 무시: watchlist로 강제")
+        args.universe = "watchlist"
+    rsi_overheat_block_enabled = os.getenv("ENABLE_RSI_OVERHEAT_BLOCK", "0").strip() in {"1", "true", "TRUE", "yes", "YES"}
     prefilter_liquidity_krw = max(0.0, _to_float(os.getenv("PREFILTER_LIQUIDITY_KRW", "1000000000"), 1_000_000_000.0))
 
     stage0 = compute_stage0()
@@ -1281,8 +1248,6 @@ def main() -> int:
         run_abs_blocks.append("STAGE0_FAIL")
     if stage1.hard_riskoff:
         run_abs_blocks.append("HARD_RISK_OFF")
-    if not market_stage2.valid:
-        run_abs_blocks.append("FLOW_DENOM_INVALID")
     if market_stage2.shock_level == "EXTREME":
         run_abs_blocks.append("FLOW_SHOCK_EXTREME")
 
@@ -1370,7 +1335,8 @@ def main() -> int:
 
         stage2_score = _clamp(market_stage2_score + s2_stock - s2_penalty, 0, 100)
         distribution_block = foreign_pct <= -6.0 and inst_pct <= -3.0
-        stage2_pass = market_stage2.valid and market_stage2.shock_level != "EXTREME" and stage2_score >= mode_cfg["stage2_min"] and not distribution_block
+        # Stage2는 보조지표. 실행 차단은 EXTREME 충격에서만 적용.
+        stage2_pass = market_stage2.shock_level != "EXTREME"
         if not market_stage2.valid:
             explain_codes.append("FLOW_DENOM_INVALID")
         if market_stage2.shock_level == "WARN":
@@ -1380,7 +1346,7 @@ def main() -> int:
         if market_stage2.shock_level == "EXTREME":
             explain_codes.append("FLOW_SHOCK_EXTREME")
         if distribution_block:
-            abs_blocks.append("FLOW_DISTRIBUTION_BLOCK")
+            explain_codes.append("FLOW_DISTRIBUTION_WARN")
         if foreign_pct >= 2.0:
             explain_codes.append("FOREIGN_ACCUM_3D")
         if inst_pct >= 1.0:
@@ -1527,13 +1493,12 @@ def main() -> int:
                 stage4_pass = stage4_score >= 53 and (p1 or p2)
             else:
                 stage4_pass = stage4_score >= 60 and p1_riskoff
-        if rsi > 75:
+        if rsi > 75 and rsi_overheat_block_enabled:
             abs_blocks.append("TECH_OVERHEAT_RSI")
         if close > ma20 > ma60 > 0:
             explain_codes.append("TREND_STRUCTURE_UP")
-        if flow_unknown and not (stage3_score >= mode_cfg["s2_unknown_s3"] and stage4_score >= mode_cfg["s2_unknown_s4"]):
-            stage2_pass = False
-            explain_codes.append("FLOW_UNKNOWN_NEEDS_S3S4")
+        if flow_unknown:
+            explain_codes.append("FLOW_UNKNOWN_REFERENCE")
 
         risk = maps["risk"].get(ticker, {})
         liquidity = _to_float(risk.get("liquidity_krw"), 0.0)
@@ -1599,7 +1564,9 @@ def main() -> int:
         ) / 100.0
         total = _clamp(total - penalty, 0, 100)
 
-        all_pass = stage0.passed and stage1.passed_for_buy and stage2_pass and stage3_pass and stage4_pass and stage5_pass
+        # BUY 하드게이트: Stage0/1/2(EXTREME only)/5
+        # Stage3/4는 점수와 설명에는 반영하되 차단 게이트로는 사용하지 않는다.
+        all_pass = stage0.passed and stage1.passed_for_buy and stage2_pass and stage5_pass
         has_block = len(abs_blocks) > 0
         action = "HOLD"
         if not has_block and all_pass and total >= mode_cfg["buy_threshold"]:
@@ -1702,6 +1669,11 @@ def main() -> int:
             "overridden": mode_overridden,
             "buy_threshold": mode_cfg["buy_threshold"],
             "stage2_min": mode_cfg["stage2_min"],
+            "universe_forced_watchlist": True,
+            "stage2_extreme_only_block": True,
+            "stage3_gate_enabled": False,
+            "stage4_gate_enabled": False,
+            "rsi_overheat_block_enabled": rsi_overheat_block_enabled,
         },
         "stage2": {
             "market_score": round(market_stage2.score, 2),
@@ -1745,12 +1717,12 @@ def main() -> int:
         "decision_id": decision_id,
         "decision_time": now_ts,
         "horizon": args.horizon,
-        "universe": args.universe,
+        "universe": "watchlist",
         "stage0_pass": 1 if stage0.passed else 0,
         "stage0_score": round(stage0.score, 2),
         "stage1_pass": 1 if stage1.passed_for_buy else 0,
         "stage1_score": round(stage1.score, 2),
-        "stage2_pass": 1 if (market_stage2.valid and market_stage2.shock_level != "EXTREME" and stage2_run >= mode_cfg["stage2_min"]) else 0,
+        "stage2_pass": 1 if (market_stage2.shock_level != "EXTREME") else 0,
         "stage2_score": stage2_run,
         "stage3_pass": 1 if stage3_run >= 50 else 0,
         "stage3_score": stage3_run,

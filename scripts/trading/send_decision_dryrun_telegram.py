@@ -560,6 +560,7 @@ def _block_reason_text(codes: list[str]) -> str:
         "HARD_RISK_OFF": "시장 하드 리스크오프",
         "FLOW_DENOM_INVALID": "수급 분모 검증 실패",
         "FLOW_DISTRIBUTION_BLOCK": "수급 분배(매도 우위) 신호",
+        "FLOW_DISTRIBUTION_WARN": "수급 분배(매도 우위) 경고",
         "TECH_OVERHEAT_RSI": "기술적 과열(RSI) 신호",
         "DART_REDFLAG": "공시 레드플래그",
         "EVENT_REDFLAG": "뉴스 이벤트 레드플래그",
@@ -674,6 +675,7 @@ LIMIT 1
         raise RuntimeError(f"decision_id not found: {decision_id}")
     run = run_rows[0]
     stage_debug = _parse_json_obj(run.get("stage_debug_json"))
+    mode_debug = stage_debug.get("mode") if isinstance(stage_debug.get("mode"), dict) else {}
     stage2_debug = stage_debug.get("stage2") if isinstance(stage_debug.get("stage2"), dict) else {}
 
     idx_rows = ch_select(
@@ -1001,7 +1003,18 @@ GROUP BY cluster_id
         f"S4 {_float(run.get('stage4_score')):.1f} / "
         f"S5 {_float(run.get('stage5_score')):.1f}"
     )
-    lines.append("- Stage 설명: S0 데이터품질 / S1 시장레짐 / S2 수급 / S3 뉴스·이벤트 / S4 기술타이밍 / S5 리스크·집행")
+    lines.append("- Stage 설명: S0 데이터품질 / S1 시장레짐 / S2 수급(보조, EXTREME만 차단) / S3 뉴스·이벤트(보조) / S4 기술타이밍(보조) / S5 리스크·집행")
+    universe_forced = bool(mode_debug.get("universe_forced_watchlist", True))
+    stage2_extreme_only = bool(mode_debug.get("stage2_extreme_only_block", True))
+    stage3_gate = bool(mode_debug.get("stage3_gate_enabled", False))
+    stage4_gate = bool(mode_debug.get("stage4_gate_enabled", False))
+    policy_parts = [
+        f"universe={'watchlist-only' if universe_forced else 'configured'}",
+        f"stage2_block={'EXTREME-only' if stage2_extreme_only else 'score+shock'}",
+        f"stage3_gate={'ON' if stage3_gate else 'OFF'}",
+        f"stage4_gate={'ON' if stage4_gate else 'OFF'}",
+    ]
+    lines.append(f"- 운영 정책: {' / '.join(policy_parts)}")
     lines.append(f"- Absolute Block: {', '.join([str(x) for x in (run.get('absolute_block_reason') or [])]) or '-'}")
     stage5_fail_summary = (
         stage_debug.get("stage5", {}).get("fail_summary")
