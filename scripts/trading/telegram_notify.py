@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env_bootstrap import bootstrap_openclaw_env
@@ -35,11 +37,30 @@ def _resolve_creds() -> tuple[str, str]:
     return token, chat_id
 
 
+def _load_shared_notify():
+    shared = Path.home() / ".openclaw" / "scripts" / "telegram_notify.py"
+    if not shared.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("openclaw_telegram_notify", shared)
+        if not spec or not spec.loader:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fn = getattr(mod, "notify", None)
+        return fn if callable(fn) else None
+    except Exception:
+        return None
+
+
 def _send(text: str, parse_mode: str | None = "HTML") -> bool:
     if not str(text or "").strip():
         return True
     token, chat_id = _resolve_creds()
     if not token or not chat_id:
+        shared_notify = _load_shared_notify()
+        if shared_notify:
+            return bool(shared_notify(str(text)))
         print("[TG] skip: TG_BOT_TOKEN/TG_CHAT_ID not configured")
         return False
 
