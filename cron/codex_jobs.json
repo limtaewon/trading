@@ -250,6 +250,19 @@
       "source": "legacy-crontab"
     },
     {
+      "name": "data-news-research-30m",
+      "enabled": true,
+      "schedule": {
+        "expr": "12,42 8-16 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/analyze_news_research.py >> $HOME/.openclaw/logs/news-research.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
       "name": "data-news-relation-reasoning-20m",
       "enabled": true,
       "schedule": {

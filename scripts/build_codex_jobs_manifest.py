@@ -104,6 +104,16 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "data-news-research-30m",
+            "enabled": True,
+            "schedule": {"expr": "12,42 8-16 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/analyze_news_research.py >> {logs}/news-research.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "data-enrich-pre-market",
             "enabled": True,
             "schedule": {"expr": "30 7 * * 1-5", "tz": "Asia/Seoul"},

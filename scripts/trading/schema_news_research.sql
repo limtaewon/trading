@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS trading.news_research
 
     model                  String,
     model_output_json      String,
+    status                 LowCardinality(String) DEFAULT 'ok', -- ok|fallback|error
+    retry_count            UInt16 DEFAULT 0,
+    next_retry_at          DateTime DEFAULT now(),
+    last_error             String DEFAULT '',
     created_at             DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(created_at)

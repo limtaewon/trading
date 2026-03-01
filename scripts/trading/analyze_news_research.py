@@ -7,6 +7,7 @@ import time
 import hashlib
 import tempfile
 import sys
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -17,9 +18,13 @@ bootstrap_openclaw_env()
 
 CH_URL = os.environ.get("CLICKHOUSE_URL", "http://localhost:8123")
 CH_DB = os.environ.get("CLICKHOUSE_DB", "trading")
+CH_USER = os.environ.get("CLICKHOUSE_USER", "").strip()
+CH_PASS = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
 WINDOW_HOURS = int(os.environ.get("NEWS_RESEARCH_WINDOW_HOURS", "6"))
 LIMIT = int(os.environ.get("NEWS_RESEARCH_LIMIT", "8"))
 BATCH = int(os.environ.get("NEWS_RESEARCH_BATCH", "4"))
+RETRY_COOLDOWN_MINUTES = max(5, int(os.environ.get("NEWS_RESEARCH_RETRY_COOLDOWN_MINUTES", "30")))
+MAX_RETRY = max(1, int(os.environ.get("NEWS_RESEARCH_MAX_RETRY", "8")))
 OPENCLAW_BRAIN_MODEL = "openai-codex/gpt-5.3-codex-spark"
 _env_model = os.environ.get("NEWS_RESEARCH_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip()
 MODEL = _env_model or OPENCLAW_BRAIN_MODEL
@@ -73,6 +78,10 @@ def ch_query(sql: str, fmt_json=True):
     req = Request(url + params, data=sql.encode("utf-8"), method="POST")
     if auth:
         req.add_header("Authorization", auth)
+    elif CH_USER:
+        import base64
+        token = base64.b64encode(f"{CH_USER}:{CH_PASS}".encode()).decode()
+        req.add_header("Authorization", f"Basic {token}")
     with urlopen(req, timeout=30) as r:
         body = r.read().decode("utf-8", errors="replace")
     if fmt_json:
@@ -147,6 +156,71 @@ def to_arr(items):
     return out[:12]
 
 
+def _parse_dt(value):
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _fmt_dt(dt):
+    if isinstance(dt, datetime):
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    parsed = _parse_dt(dt)
+    if parsed:
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def ensure_schema():
+    schema_candidates = [
+        os.path.expanduser("~/.openclaw/scripts/trading/schema_news_research.sql"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema_news_research.sql"),
+    ]
+    for schema_path in schema_candidates:
+        if not os.path.exists(schema_path):
+            continue
+        with open(schema_path, "r", encoding="utf-8") as f:
+            ch_query(f.read(), fmt_json=False)
+        break
+    # 런타임 마이그레이션: fallback 재시도/상태 관리를 위한 컬럼
+    ch_query(
+        """
+ALTER TABLE trading.news_research
+ADD COLUMN IF NOT EXISTS status LowCardinality(String) DEFAULT 'ok'
+""",
+        fmt_json=False,
+    )
+    ch_query(
+        """
+ALTER TABLE trading.news_research
+ADD COLUMN IF NOT EXISTS retry_count UInt16 DEFAULT 0
+""",
+        fmt_json=False,
+    )
+    ch_query(
+        """
+ALTER TABLE trading.news_research
+ADD COLUMN IF NOT EXISTS next_retry_at DateTime DEFAULT now()
+""",
+        fmt_json=False,
+    )
+    ch_query(
+        """
+ALTER TABLE trading.news_research
+ADD COLUMN IF NOT EXISTS last_error String DEFAULT ''
+""",
+        fmt_json=False,
+    )
+
+
 def insert_rows(rows: list[dict]):
     if not rows:
         return 0
@@ -164,7 +238,9 @@ def insert_rows(rows: list[dict]):
             f"'{esc(r.get('source_verdict','uncertain'))}', '{esc(r.get('source_notes',''))}', "
             f"'{esc(r.get('hidden_point',''))}', '{esc(r.get('followup_question',''))}', '{esc(r.get('followup_plan',''))}', "
             f"'{esc(r.get('thesis','mixed'))}', {float(r.get('confidence',0.5))}, {int(r.get('expected_horizon_days',5))}, '{esc(r.get('pnl_hypothesis',''))}', "
-            f"'{esc(normalize_codex_model(MODEL))}', '{esc(json.dumps(r.get('model_output', {}), ensure_ascii=False))}', now()"
+            f"'{esc(normalize_codex_model(MODEL))}', '{esc(json.dumps(r.get('model_output', {}), ensure_ascii=False))}', "
+            f"'{esc(r.get('status','ok'))}', {int(r.get('retry_count',0))}, toDateTime('{esc(r.get('next_retry_at', _fmt_dt(datetime.now())))}'), "
+            f"'{esc(r.get('last_error',''))}', now()"
             ")"
         )
 
@@ -173,7 +249,7 @@ def insert_rows(rows: list[dict]):
     (analyzed_at, news_id, published_at, title, source_url, source_domain, importance, sentiment, impact_type, tickers_raw,
      direct_tickers, secondary_tickers, tertiary_tickers, source_verdict, source_notes,
      hidden_point, followup_question, followup_plan, thesis, confidence, expected_horizon_days, pnl_hypothesis,
-     model, model_output_json, created_at)
+     model, model_output_json, status, retry_count, next_retry_at, last_error, created_at)
     VALUES
     """ + ",".join(vals)
     ch_query(sql, fmt_json=False)
@@ -181,11 +257,7 @@ def insert_rows(rows: list[dict]):
 
 
 def main():
-    # ensure table exists
-    schema_path = os.path.expanduser("~/.openclaw/scripts/trading/schema_news_research.sql")
-    if os.path.exists(schema_path):
-        with open(schema_path, "r", encoding="utf-8") as f:
-            ch_query(f.read(), fmt_json=False)
+    ensure_schema()
 
     rows = ch_query(f"""
         SELECT published_at, title, summary, source_url, importance, sentiment, impact_type, tickers
@@ -201,21 +273,48 @@ def main():
         return
 
     existing = ch_query(f"""
-        SELECT news_id FROM trading.news_research
-        WHERE published_at > now() - INTERVAL {WINDOW_HOURS + 24} HOUR
+        SELECT
+            news_id,
+            argMax(status, created_at) AS status,
+            argMax(retry_count, created_at) AS retry_count,
+            argMax(next_retry_at, created_at) AS next_retry_at
+        FROM trading.news_research
+        WHERE published_at > now() - INTERVAL {WINDOW_HOURS + 72} HOUR
+        GROUP BY news_id
     """)
-    existing_ids = {x.get("news_id") for x in existing}
+    existing_map = {}
+    for x in existing:
+        nid = str(x.get("news_id", "")).strip()
+        if not nid:
+            continue
+        existing_map[nid] = {
+            "status": str(x.get("status", "")).strip() or "ok",
+            "retry_count": int(x.get("retry_count", 0) or 0),
+            "next_retry_at": _parse_dt(x.get("next_retry_at")),
+        }
 
     candidates = []
+    now_dt = datetime.now()
     for r in rows:
         nid = hash_news(r)
-        if nid in existing_ids:
+        info = existing_map.get(nid)
+        if info and info.get("status") == "ok":
             continue
+        if info:
+            rc = int(info.get("retry_count", 0) or 0)
+            nra = info.get("next_retry_at")
+            if rc >= MAX_RETRY:
+                continue
+            if isinstance(nra, datetime) and now_dt < nra:
+                continue
+            r["retry_count"] = rc + 1
+        else:
+            r["retry_count"] = 0
         r["news_id"] = nid
         candidates.append(r)
 
     if not candidates:
-        print("[news-research] all already analyzed")
+        print("[news-research] no retryable candidates")
         return
 
     schema = {
@@ -301,6 +400,10 @@ def main():
                     "expected_horizon_days": m.get("expected_horizon_days", 5),
                     "pnl_hypothesis": m.get("pnl_hypothesis", ""),
                     "model_output": m,
+                    "status": "ok",
+                    "retry_count": int(n.get("retry_count", 0) or 0),
+                    "next_retry_at": _fmt_dt(datetime.now()),
+                    "last_error": "",
                 })
 
             inserted += insert_rows(out_rows)
@@ -311,6 +414,8 @@ def main():
             fallback_rows = []
             for n in batch:
                 domain = urlparse(n.get("source_url", "")).netloc
+                retry_count = int(n.get("retry_count", 0) or 0)
+                next_retry = datetime.now() + timedelta(minutes=RETRY_COOLDOWN_MINUTES * max(1, min(6, retry_count + 1)))
                 fallback_rows.append({
                     "news_id": n["news_id"],
                     "published_at": n.get("published_at"),
@@ -325,19 +430,23 @@ def main():
                     "secondary_tickers": [],
                     "tertiary_tickers": [],
                     "source_verdict": "uncertain",
-                    "source_notes": "codex_failed_auto_fallback",
+                    "source_notes": f"codex_failed_auto_fallback(retry={retry_count + 1})",
                     "hidden_point": "코덱스 실패로 심층해석 보류",
                     "followup_question": "후속 재분석 시 공급망 2차 수혜/피해를 확인할 것",
-                    "followup_plan": "다음 주기에서 재분석",
+                    "followup_plan": "다음 주기에서 재분석(백오프 적용)",
                     "thesis": "mixed",
                     "confidence": 0.3,
                     "expected_horizon_days": 5,
                     "pnl_hypothesis": "데이터 축적용 임시 레코드",
                     "model_output": {"error": str(e)[:500]},
+                    "status": "fallback",
+                    "retry_count": retry_count + 1,
+                    "next_retry_at": _fmt_dt(next_retry),
+                    "last_error": str(e)[:500],
                 })
             inserted += insert_rows(fallback_rows)
 
-    print(f"[news-research] inserted={inserted} model={MODEL}")
+    print(f"[news-research] inserted={inserted} model={MODEL} max_retry={MAX_RETRY} retry_cooldown_min={RETRY_COOLDOWN_MINUTES}")
 
 
 if __name__ == "__main__":

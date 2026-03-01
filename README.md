@@ -68,6 +68,8 @@
 - `cluster_news.py`: 뉴스 클러스터링
 - `llm_relation_reasoner.py`: 연관 종목/관계 추론
 - `analyze_news_research.py`: 중요 뉴스 심층 연구 및 구조화 저장
+- `analyze_news_research.py`는 비동기 강화 레이어로 운영하며, `status/retry_count/next_retry_at` 기반 재시도(backoff) 정책을 사용한다.
+- `status='ok'`인 레코드만 완료로 간주하고, `fallback/error`는 다음 주기 재분석 대상으로 유지한다.
 
 ## 4) 보조 데이터 강화 파이프라인
 
@@ -92,6 +94,7 @@
 - 생성기:
 - `scripts/build_codex_jobs_manifest.py`
 - 보유 포지션 동적 관리는 `position-manager-20m` command 잡(평일 09:00~15:59, 20분 주기)으로 실행한다.
+- `data-news-research-30m` command 잡(평일 08:12~16:42, 30분 간격)으로 심층 뉴스 연구 워커를 비동기 실행한다.
 - 주식 파이프라인 경로는 `~/.openclaw/scripts/trading/...`로 통일되어 있다.
 - 코인/바이빗 작업은 별도 스크립트 경로를 유지한다.
 
@@ -224,7 +227,7 @@ python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45
 | `news_clusters` | 임베딩 기반 뉴스 클러스터 집계 | `cluster_news.py` | `prepare_gpt_prompt.py` |
 | `news_cluster_state` | 클러스터 상태(emerging/reinforcing 등) | `cluster_news.py` | `prepare_gpt_prompt.py`, `llm_relation_reasoner.py`, `stock_rag_report_api.py` |
 | `news_cluster_map` | 뉴스-클러스터 매핑 상세 | `cluster_news.py` | `stock_rag_report_api.py` |
-| `news_research` | 중요 뉴스 심층 연구 결과 저장 | `analyze_news_research.py` | 운영 분석/확장 로직 |
+| `news_research` | 중요 뉴스 심층 연구 결과 저장(`status/retry/backoff` 포함) | `analyze_news_research.py` | 운영 분석/확장 로직 |
 
 ### 10-3. 연관성/관심종목 레이어
 | 테이블 | 역할 | 주 생성/갱신 스크립트 | 주 사용 스크립트 |
