@@ -63,6 +63,7 @@ if MCPORTER_PATH and os.path.isfile(MCPORTER_PATH) and os.access(MCPORTER_PATH, 
 else:
     MCPORTER = shutil.which("mcporter")
 FLOW_SYMBOL_LIMIT = int(os.getenv("INVESTOR_FLOW_SYMBOL_LIMIT", "30"))
+FLOW_WATCHLIST_MULTIPLIER = max(1, int(os.getenv("INVESTOR_FLOW_WATCHLIST_MULTIPLIER", "3")))
 
 NAVER_RT_URL = "https://polling.finance.naver.com/api/realtime"
 NAVER_INDEX_PAGE_URL = "https://finance.naver.com/sise/sise_index.naver?code={code}"
@@ -415,31 +416,67 @@ def _extract_stock_quote(payload):
 
 
 def _query_top_tickers_for_flow(limit: int = 30) -> list[str]:
-    """v_trading_dashboard 기준 상위 종목만 수집해 과도한 KIS 호출 방지."""
+    """watchlist 우선 + dashboard 보강으로 종목 수급 스냅샷 대상 결정."""
     if limit <= 0:
         return []
-    q = (
+    out: list[str] = []
+
+    def _dedup_extend(items: list[str]) -> None:
+        seen = set(out)
+        for tk in items:
+            if tk and tk not in seen:
+                out.append(tk)
+                seen.add(tk)
+
+    # 1) watchlist 우선 (최신 스냅샷)
+    active_source_raw = os.getenv("WATCHLIST_ACTIVE_SOURCE", "enrich_data").strip()
+    active_sources = [s.strip() for s in active_source_raw.split(",") if s.strip()]
+    source_filter = ""
+    if active_sources:
+        quoted = ", ".join("'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'" for s in active_sources)
+        source_filter = f" AND source IN ({quoted})"
+    watch_limit = max(int(limit), int(limit) * FLOW_WATCHLIST_MULTIPLIER)
+    q_watch = (
+        "WITH latest_ts AS ("
+        "  SELECT ts FROM trading.interest_watchlist "
+        f"  WHERE toDate(ts) >= today() - 3 {source_filter}"
+        "  ORDER BY ts DESC LIMIT 1"
+        ") "
+        "SELECT ticker FROM trading.interest_watchlist "
+        "WHERE ts = (SELECT ts FROM latest_ts) "
+        f"{source_filter} "
+        "GROUP BY ticker "
+        "HAVING match(ticker, '^[0-9]{6}$') "
+        f"ORDER BY min(rank) ASC, max(context_score) DESC LIMIT {watch_limit} FORMAT JSONEachRow"
+    )
+
+    # 2) dashboard 보강 (watchlist 부족 시)
+    q_dash = (
         "SELECT ticker FROM trading.v_trading_dashboard "
         f"ORDER BY score DESC LIMIT {int(limit)} FORMAT JSONEachRow"
     )
     try:
-        resp = requests.post(CLICKHOUSE_URL, data=q.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
-        resp.raise_for_status()
-        rows = []
-        for line in resp.text.strip().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            ticker = str(rec.get("ticker", "")).strip()
-            if len(ticker) == 6 and ticker.isdigit():
-                rows.append(ticker)
-        # 중복 제거 (주문/표시 순서 보존)
-        uniq = OrderedDict((t, True) for t in rows if t)
-        return list(uniq.keys())
+        for q in (q_watch, q_dash):
+            resp = requests.post(CLICKHOUSE_URL, data=q.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
+            resp.raise_for_status()
+            rows: list[str] = []
+            for line in resp.text.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                ticker = str(rec.get("ticker", "")).strip()
+                if len(ticker) == 6 and ticker.isdigit():
+                    rows.append(ticker)
+            _dedup_extend(rows)
+            if len(out) >= int(limit):
+                break
+        uniq = OrderedDict((t, True) for t in out if t)
+        return list(uniq.keys())[: int(limit)]
     except Exception as e:
         log.warning(f"  투자자 동향 ticker 조회 실패: {e}")
-        return []
+        uniq = OrderedDict((t, True) for t in out if t)
+        return list(uniq.keys())[: int(limit)]
 
 
 def _market_session_label(now_ts=None):
@@ -781,6 +818,11 @@ def collect_investor_flow(days=7):
     for symbol in symbols:
         payload = _run_kis_stock_quote(symbol)
         quote = _extract_stock_quote(payload)
+        if not isinstance(quote, dict):
+            # 일시 실패 대비 1회 재시도
+            time.sleep(0.08)
+            payload = _run_kis_stock_quote(symbol)
+            quote = _extract_stock_quote(payload)
         if not isinstance(quote, dict):
             continue
 

@@ -42,6 +42,7 @@ LLM_RULE_WEIGHT_DEFAULT = float(os.environ.get("WATCHLIST_RULE_WEIGHT", "0.7"))
 LLM_WEIGHT_DEFAULT = float(os.environ.get("WATCHLIST_LLM_WEIGHT", "0.3"))
 LLM_MODEL_DEFAULT = os.environ.get("WATCHLIST_LLM_MODEL", os.environ.get("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark")).strip()
 LLM_MAX_ITEMS_DEFAULT = max(5, int(os.environ.get("WATCHLIST_LLM_MAX_ITEMS", "30")))
+CANDIDATE_POOL_DEFAULT = max(30, int(os.environ.get("WATCHLIST_CANDIDATE_POOL", "200")))
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -541,6 +542,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=30)
     ap.add_argument("--source", default="rule_snapshot")
+    ap.add_argument("--candidate-pool", type=int, default=CANDIDATE_POOL_DEFAULT)
     ap.add_argument("--llm", choices=["on", "off"], default="on" if LLM_ENABLED_DEFAULT else "off")
     ap.add_argument("--llm-timeout", type=int, default=LLM_TIMEOUT_SEC_DEFAULT)
     ap.add_argument("--llm-cache-ttl", type=int, default=LLM_CACHE_TTL_SEC_DEFAULT)
@@ -565,7 +567,8 @@ def main() -> int:
     else:
         rule_w, llm_w = rule_w / w_sum, llm_w / w_sum
 
-    rows = load_candidates(limit)
+    candidate_pool = max(limit, int(args.candidate_pool))
+    rows = load_candidates(candidate_pool)
     if not rows:
         print("candidate 0, skip")
         return 0
@@ -641,9 +644,10 @@ def main() -> int:
         c["final_score"] = final_score
 
     prepared.sort(key=lambda x: (float(x.get("final_score", 0.0)), float(x.get("rule_score_100", 0.0))), reverse=True)
+    selected = prepared[:limit]
 
     out = []
-    for i, c in enumerate(prepared, 1):
+    for i, c in enumerate(selected, 1):
         rr = {
             "score": c["technical_score"],
             "rsi": c["rsi"],
@@ -751,7 +755,11 @@ def main() -> int:
         )
 
     n = ch_insert_sql("trading.interest_watchlist", out)
-    print(f"inserted_interest_watchlist={n} llm_enabled={llm_enabled} llm_rows={len(llm_scores)} llm_error={llm_error or '-'}")
+    print(
+        "inserted_interest_watchlist="
+        f"{n} llm_enabled={llm_enabled} llm_rows={len(llm_scores)} "
+        f"candidate_pool={candidate_pool} final_limit={limit} llm_error={llm_error or '-'}"
+    )
     return 0
 
 

@@ -9,6 +9,8 @@
 - 뉴스/데이터 파이프라인: collect_news.py, monitor_news.py, cluster_news.py, llm_relation_reasoner.py
 - P0 의사결정 로그 파이프라인:
   enrich_data.sh -> refresh_interest_watchlist.py -> decision_operating_pipeline.py
+- watchlist 산출 정책:
+  candidate_pool(기본 200)에서 후보를 산출한 뒤 최종 limit(기본 30)만 저장
 - Decision 운영 정책(실거래 정렬):
   universe는 `watchlist-only`로 강제(technical/feature fallback 미사용)
   watchlist 조회 source는 `WATCHLIST_ACTIVE_SOURCE`로 강제(기본: `enrich_data`)
@@ -17,6 +19,11 @@
 - Stage2 수급 분모 정책:
   market_flow_daily 분모는 `MARKET_TOTAL`(market_index.traded_value_krw) 우선
   분모 품질 문제는 경고/보조 처리하며, 매수 차단은 EXTREME shock에서만 적용
+- 브레인 후보 정책:
+  prepare_gpt_prompt.py는 watchlist 최신 스냅샷(활성 source 필터) 기반으로 후보를 구성
+  `PROMPT_WATCHLIST_STRICT=1` 기본값에서 dashboard fallback 비활성
+- 수급 스냅샷 대상 정책:
+  collect_market_data.py는 watchlist 우선 + dashboard 보강 방식으로 feature_snapshot 종목을 선택
 - 브리핑 파이프라인:
   send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
   (decision_run / decision_candidate 기반)

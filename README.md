@@ -32,7 +32,9 @@
 
 ### 2-3. `prepare_gpt_prompt.py`
 - ClickHouse, KIS(mcporter), 워크스페이스 메모리 파일을 합쳐 판단 프롬프트를 만든다.
-- 시장 레짐, 대시보드, 최근 뉴스, 공시, 잔고/미체결, 정책 파일을 프롬프트에 포함한다.
+- 시장 레짐, watchlist 후보, 최근 뉴스, 공시, 잔고/미체결, 정책 파일을 프롬프트에 포함한다.
+- 매수/매도 후보는 `trading.interest_watchlist` 최신 스냅샷(`WATCHLIST_ACTIVE_SOURCE`)을 우선 사용한다.
+- `PROMPT_WATCHLIST_STRICT=1`(기본)일 때 watchlist가 비어도 dashboard fallback 없이 엄격 모드로 동작한다.
 
 ### 2-4. `execute_gpt_orders.py`
 - 주문 JSON을 파싱 후 규칙 검증(신뢰도/리스크/데이터 신선도/계좌 상태)을 수행한다.
@@ -73,6 +75,7 @@
 - `collect_market_data.py`, `technical_indicators.py`, `market_regime.py`, `collect_dart.py`를 오케스트레이션한다.
 - `sync_normalized_flow_daily.py`로 `stock_flow_daily`/`market_flow_daily`를 정규화 갱신한다.
 - `refresh_interest_watchlist.py`로 동적 watchlist를 재산출한다(룰 + LLM 리랭크).
+- watchlist 산출은 `candidate_pool`(기본 200)에서 후보를 먼저 수집하고, 최종 `limit`(기본 30)만 저장한다.
 - `decision_operating_pipeline.py`로 Stage 기반 판단 로그(`decision_run`, `decision_candidate`)를 생성한다.
 - 장전/장중 빠른 갱신 모드(`--quick`)를 지원한다.
 
@@ -122,6 +125,7 @@ bash scripts/ops/deploy_to_runtime.sh
 - 두레이/파이프라인 브리핑의 유망주는 `trading.decision_candidate`를 기준으로 표시한다.
 - `decision_candidate`는 `decision_operating_pipeline.py`가 생성하며, 기본 universe는 `watchlist`다.
 - `watchlist` 소스는 `trading.interest_watchlist`이고, `refresh_interest_watchlist.py`가 아래 신호를 합성해 갱신한다.
+- watchlist는 후보풀(`WATCHLIST_CANDIDATE_POOL`, 기본 200)에서 점수 계산 후 최종 저장(`--limit`, 기본 30)으로 확정한다.
 - 기술: `technical_signals` (signal_score, RSI, BB, 거래량)
 - 뉴스: `news`, `news_event_frames` (pos/neg, 뉴스건수, explain_ready)
 - 연관: `hidden_relation_signals` (relation_score, bias, source_tickers/channels)
@@ -129,9 +133,14 @@ bash scripts/ops/deploy_to_runtime.sh
 
 ### 11-2. LLM 반영 방식
 - 후보군은 룰 기반 `composite_score`로 1차 정렬한다.
-- 같은 후보를 LLM에 전달해 `llm_score/verdict/reason/risk_flags/catalysts`를 얻는다.
+- 후보풀 상위 종목을 LLM에 전달해 `llm_score/verdict/reason/risk_flags/catalysts`를 얻는다.
 - 최종 점수는 `rule_weight` + `llm_weight` 가중합으로 산출한다.
 - LLM 호출 실패 시 자동으로 룰 기반 점수만 사용한다.
+
+### 11-2-1. 수급 스냅샷 보강 정책
+- `collect_market_data.py`의 종목 수급 스냅샷(`feature_snapshot`) 대상은 watchlist 최신 종목을 우선 사용한다.
+- 부족분만 `v_trading_dashboard` 상위로 보강한다.
+- 관련 파라미터: `INVESTOR_FLOW_SYMBOL_LIMIT`(기본 30), `INVESTOR_FLOW_WATCHLIST_MULTIPLIER`(기본 3)
 
 ### 11-3. 두레이 보고 흐름
 - 기본값(`DOORAY_USE_PIPELINE_BRIEFING=1`)에서 `send_dooray_briefing.py`는 파이프라인 모드를 사용한다.

@@ -58,6 +58,7 @@ CH_MAX_EXECUTION_TIME = max(5, int(os.getenv("CH_MAX_EXECUTION_TIME", "12")))
 CH_MAX_THREADS = max(1, int(os.getenv("CH_MAX_THREADS", "2")))
 OUTPUT_PATH = "/tmp/gpt_prompt.txt"
 HOME = Path.home()
+PROMPT_WATCHLIST_STRICT = os.getenv("PROMPT_WATCHLIST_STRICT", "1") == "1"
 ADAPTIVE_POLICY_FILE = HOME / ".openclaw" / "state" / "adaptive_policy.json"
 DYNAMIC_EXIT_STATE_FILE = HOME / ".openclaw" / "state" / "stock_dynamic_exits.json"
 DEFAULT_MIN_CONFIDENCE = float(os.getenv("DEFAULT_MIN_CONFIDENCE", "0.70"))
@@ -346,6 +347,165 @@ def get_dashboard_bottom(limit: int = 10) -> list[dict]:
         ORDER BY score ASC
         LIMIT {limit}
     """)
+
+
+def _sql_quote(v: str) -> str:
+    return "'" + str(v or "").replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _active_watchlist_sources() -> list[str]:
+    raw = os.getenv("WATCHLIST_ACTIVE_SOURCE", "enrich_data").strip()
+    out = [s.strip() for s in raw.split(",") if s.strip()]
+    return out or ["enrich_data"]
+
+
+def _watchlist_filter(alias: str = "") -> str:
+    sources = _active_watchlist_sources()
+    if not sources:
+        return ""
+    col = f"{alias}.source" if alias else "source"
+    return f" AND {col} IN ({', '.join(_sql_quote(s) for s in sources)})"
+
+
+def _safe_json_dict(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        obj = json.loads(str(raw))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _get_watchlist_rows(limit: int = 20, asc: bool = False) -> list[dict]:
+    order = "ASC" if asc else "DESC"
+    base_filter = _watchlist_filter("")
+    row_filter = _watchlist_filter("w")
+    rows = ch_query(
+        f"""
+        SELECT
+            w.ticker AS ticker,
+            argMax(w.ticker_name, w.ts) AS ticker_name,
+            argMax(w.action, w.ts) AS wl_action,
+            argMax(w.context_score, w.ts) AS wl_score,
+            argMax(w.confidence, w.ts) AS wl_confidence,
+            argMax(w.request_json, w.ts) AS request_json
+        FROM trading.interest_watchlist w
+        INNER JOIN
+        (
+            SELECT ts
+            FROM trading.interest_watchlist
+            WHERE toDate(ts) >= today() - 3
+            {base_filter}
+            ORDER BY ts DESC
+            LIMIT 1
+        ) latest ON w.ts = latest.ts
+        WHERE 1=1
+          {row_filter}
+        GROUP BY w.ticker
+        HAVING match(w.ticker, '^[0-9]{{6}}$')
+        ORDER BY wl_score {order}, wl_confidence DESC
+        LIMIT {max(1, int(limit))}
+        """
+    )
+    return rows
+
+
+def _get_latest_technical_map(tickers: list[str]) -> dict[str, dict[str, Any]]:
+    clean = []
+    for t in tickers:
+        t = str(t or "").strip()
+        if len(t) == 6 and t.isdigit() and t not in clean:
+            clean.append(t)
+    if not clean:
+        return {}
+    tickers_sql = ", ".join(_sql_quote(t) for t in clean)
+    rows = ch_query(
+        f"""
+        SELECT
+            ticker,
+            ticker_name,
+            close_price,
+            change_pct AS pct,
+            rsi14 AS rsi,
+            macd_hist AS macd_h,
+            bb_pct AS bb,
+            vol_ratio AS vol_r,
+            signal,
+            signal_score AS score
+        FROM trading.technical_signals
+        WHERE date = (SELECT max(date) FROM trading.technical_signals)
+          AND ticker IN ({tickers_sql})
+        """
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        tk = str(r.get("ticker", "")).strip()
+        if tk:
+            out[tk] = r
+    return out
+
+
+def get_watchlist_top(limit: int = 15) -> list[dict]:
+    raw = _get_watchlist_rows(limit=limit, asc=False)
+    tech_map = _get_latest_technical_map([str(r.get("ticker", "")) for r in raw])
+    out: list[dict] = []
+    for r in raw:
+        tk = str(r.get("ticker", "")).strip()
+        context = _safe_json_dict(r.get("request_json", "")).get("context", {})
+        if not isinstance(context, dict):
+            context = {}
+        ts = tech_map.get(tk, {})
+        out.append(
+            {
+                "ticker": tk,
+                "ticker_name": str(ts.get("ticker_name", r.get("ticker_name", "")) or r.get("ticker_name", "")),
+                "close_price": safe_float(ts.get("close_price", 0), 0.0),
+                "pct": safe_float(ts.get("pct", context.get("pct", 0)), 0.0),
+                "rsi": safe_float(ts.get("rsi", context.get("rsi", 0)), 0.0),
+                "macd_h": safe_float(ts.get("macd_h", 0), 0.0),
+                "bb": safe_float(ts.get("bb", context.get("bb", 0)), 0.0),
+                "vol_r": safe_float(ts.get("vol_r", context.get("vol_r", 0)), 0.0),
+                "signal": str(ts.get("signal", context.get("llm_verdict", r.get("wl_action", ""))) or ""),
+                "score": safe_float(ts.get("score", context.get("technical_score", r.get("wl_score", 0))), 0.0),
+                "wl_score": safe_float(r.get("wl_score", 0), 0.0),
+                "wl_action": str(r.get("wl_action", "") or ""),
+            }
+        )
+    return out
+
+
+def get_watchlist_bottom(limit: int = 10) -> list[dict]:
+    return _get_watchlist_bottom_impl(limit)
+
+
+def _get_watchlist_bottom_impl(limit: int = 10) -> list[dict]:
+    raw = _get_watchlist_rows(limit=limit, asc=True)
+    tech_map = _get_latest_technical_map([str(r.get("ticker", "")) for r in raw])
+    out: list[dict] = []
+    for r in raw:
+        tk = str(r.get("ticker", "")).strip()
+        context = _safe_json_dict(r.get("request_json", "")).get("context", {})
+        if not isinstance(context, dict):
+            context = {}
+        ts = tech_map.get(tk, {})
+        out.append(
+            {
+                "ticker": tk,
+                "ticker_name": str(ts.get("ticker_name", r.get("ticker_name", "")) or r.get("ticker_name", "")),
+                "close_price": safe_float(ts.get("close_price", 0), 0.0),
+                "pct": safe_float(ts.get("pct", context.get("pct", 0)), 0.0),
+                "rsi": safe_float(ts.get("rsi", context.get("rsi", 0)), 0.0),
+                "macd_h": safe_float(ts.get("macd_h", 0), 0.0),
+                "bb": safe_float(ts.get("bb", context.get("bb", 0)), 0.0),
+                "vol_r": safe_float(ts.get("vol_r", context.get("vol_r", 0)), 0.0),
+                "signal": str(ts.get("signal", context.get("llm_verdict", r.get("wl_action", ""))) or ""),
+                "score": safe_float(ts.get("score", context.get("technical_score", r.get("wl_score", 0))), 0.0),
+                "wl_score": safe_float(r.get("wl_score", 0), 0.0),
+                "wl_action": str(r.get("wl_action", "") or ""),
+            }
+        )
+    return out
 
 
 def get_symbol_investor_snapshot(tickers: list[str]) -> dict[str, dict]:
@@ -1141,10 +1301,14 @@ def build_prompt() -> str:
     pending = get_pending_orders()
     pending_table = format_pending_orders(pending)
 
-    # 4. 대시보드 (상위/하위)
-    log.info("[4/9] 대시보드 종목 조회...")
-    top_candidates = get_dashboard_top(15)
-    bottom_warnings = get_dashboard_bottom(10)
+    # 4. watchlist 기반 후보 (상위/하위)
+    log.info("[4/9] watchlist 후보 조회...")
+    top_candidates = get_watchlist_top(15)
+    bottom_warnings = get_watchlist_bottom(10)
+    if (not top_candidates and not bottom_warnings) and not PROMPT_WATCHLIST_STRICT:
+        log.warning("watchlist 후보가 비어 dashboard fallback 사용")
+        top_candidates = get_dashboard_top(15)
+        bottom_warnings = get_dashboard_bottom(10)
     snapshot_tickers = []
     for item in (top_candidates + bottom_warnings):
         ticker = str(item.get("ticker", "")).strip()
@@ -1248,10 +1412,10 @@ def build_prompt() -> str:
 ## 미체결 주문
 {pending_table}
 
-## 매수 후보 (기술적 점수 상위 15종목)
+## 매수 후보 (watchList 상위 15종목)
 {format_candidates(top_candidates, "매수 후보")}
 
-## 매도 경고 (기술적 점수 하위 10종목)
+## 매도 경고 (watchList 하위 10종목)
 {format_candidates(bottom_warnings, "매도 경고")}
 
 ## 투자자 수급 보조 지표 (최근 수집 기준)
