@@ -36,21 +36,46 @@ do
 done
 
 # 하위 python 스크립트들이 공통 모듈(telegram_notify 등)을 찾을 수 있게 경로 고정
-export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/..:${PYTHONPATH:-}"
+export PYTHONPATH="$SCRIPT_DIR:$SCRIPT_DIR/..:$HOME/.openclaw/scripts:${PYTHONPATH:-}"
 
-# 기본 ClickHouse URL (auth header 방식 스크립트용)
-CH_HOST="${CLICKHOUSE_URL:-${CLICKHOUSE_HOST:-http://localhost:8123}}"
-CH_USER="${CLICKHOUSE_USER:-default}"
-CH_PASS="${CLICKHOUSE_PASS:-${CLICKHOUSE_PASSWORD:-}}"
+# ClickHouse 연결정보 정규화 (userinfo/query 내 user/password 제거 후 auth env로 전달)
+CH_RAW="${CLICKHOUSE_URL:-${CLICKHOUSE_HOST:-http://localhost:8123}}"
+CH_USER_RAW="${CLICKHOUSE_USER:-}"
+CH_PASS_RAW="${CLICKHOUSE_PASS:-${CLICKHOUSE_PASSWORD:-}}"
+_CH_META_RAW="$(CH_RAW="$CH_RAW" CH_USER_RAW="$CH_USER_RAW" CH_PASS_RAW="$CH_PASS_RAW" python3 - <<'PY'
+import os
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+raw = (os.environ.get("CH_RAW", "") or "http://localhost:8123").strip()
+user = (os.environ.get("CH_USER_RAW", "") or "").strip()
+pwd = (os.environ.get("CH_PASS_RAW", "") or "").strip()
+p = urlparse(raw)
+q = dict(parse_qsl(p.query, keep_blank_values=True))
+if not user:
+    user = (p.username or q.get("user") or "").strip()
+if not pwd:
+    pwd = (p.password or q.get("password") or "").strip()
+safe_query = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k.lower() not in ("user", "password")]
+netloc = p.hostname or "localhost"
+if p.port:
+    netloc = f"{netloc}:{p.port}"
+safe_url = urlunparse((p.scheme or "http", netloc, p.path or "", p.params, urlencode(safe_query), p.fragment))
+print(safe_url)
+print(user)
+print(pwd)
+PY
+)"
+CH_HOST="$(printf '%s\n' "$_CH_META_RAW" | sed -n '1p')"
+CH_USER="$(printf '%s\n' "$_CH_META_RAW" | sed -n '2p')"
+CH_PASS="$(printf '%s\n' "$_CH_META_RAW" | sed -n '3p')"
+[[ -n "$CH_HOST" ]] || CH_HOST="http://localhost:8123"
 export CLICKHOUSE_URL="$CH_HOST"
-
-# URL query auth 방식만 지원하는 레거시 스크립트용 URL
-if [[ "$CH_HOST" == *"user="* ]]; then
-    CLICKHOUSE_URL_AUTH="$CH_HOST"
-elif [[ "$CH_HOST" == *"?"* ]]; then
-    CLICKHOUSE_URL_AUTH="${CH_HOST}&user=${CH_USER}&password=${CH_PASS}"
-else
-    CLICKHOUSE_URL_AUTH="${CH_HOST}?user=${CH_USER}&password=${CH_PASS}"
+if [[ -n "$CH_USER" ]]; then
+    export CLICKHOUSE_USER="$CH_USER"
+fi
+if [[ -n "$CH_PASS" ]]; then
+    export CLICKHOUSE_PASS="$CH_PASS"
+    export CLICKHOUSE_PASSWORD="$CH_PASS"
 fi
 
 echo "============================================================"
@@ -82,7 +107,8 @@ fi
 if [[ "$MODE" == "all" || "$MODE" == "--tech" ]]; then
     echo ""
     echo "▸ 기술적 지표 계산 (핵심+뉴스/공시 전종목)..."
-    CLICKHOUSE_URL="$CLICKHOUSE_URL_AUTH" python3 "$SCRIPT_DIR/technical_indicators.py" --dynamic 2>&1 | tail -15
+    CLICKHOUSE_URL="$CH_HOST" CLICKHOUSE_USER="$CH_USER" CLICKHOUSE_PASS="$CH_PASS" CLICKHOUSE_PASSWORD="$CH_PASS" \
+      python3 "$SCRIPT_DIR/technical_indicators.py" --dynamic 2>&1 | tail -15
     echo "  완료"
 fi
 
@@ -99,7 +125,8 @@ if [[ "$MODE" == "all" || "$MODE" == "--dart" ]]; then
     if [[ -n "${DART_API_KEY:-}" ]]; then
         echo ""
         echo "▸ DART 공시 수집..."
-        CLICKHOUSE_URL="$CLICKHOUSE_URL_AUTH" python3 "$SCRIPT_DIR/collect_dart.py" --days 3 2>&1 | tail -10
+        CLICKHOUSE_URL="$CH_HOST" CLICKHOUSE_USER="$CH_USER" CLICKHOUSE_PASS="$CH_PASS" CLICKHOUSE_PASSWORD="$CH_PASS" \
+          python3 "$SCRIPT_DIR/collect_dart.py" --days 3 2>&1 | tail -10
         echo "  완료"
     else
         echo ""

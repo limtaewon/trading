@@ -32,6 +32,7 @@ import math
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -45,6 +46,13 @@ try:
 except ImportError:
     def tg_notify(text): pass
 
+try:
+    from env_bootstrap import bootstrap_openclaw_env
+
+    bootstrap_openclaw_env(override=False)
+except Exception:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -52,7 +60,32 @@ logging.basicConfig(
 )
 log = logging.getLogger("tech-indicator")
 
-CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "http://localhost:8123")
+def _resolve_clickhouse_conn() -> tuple[str, tuple[str, str] | None]:
+    raw = (
+        os.environ.get("CLICKHOUSE_URL", "").strip()
+        or os.environ.get("CLICKHOUSE_HOST", "").strip()
+        or "http://localhost:8123"
+    )
+    user = os.environ.get("CLICKHOUSE_USER", "").strip()
+    password = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
+
+    p = urlparse(raw)
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    if not user:
+        user = (p.username or q.get("user") or "").strip()
+    if not password:
+        password = (p.password or q.get("password") or "").strip()
+
+    safe_query = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k.lower() not in ("user", "password")]
+    netloc = p.hostname or "localhost"
+    if p.port:
+        netloc = f"{netloc}:{p.port}"
+    safe_url = urlunparse((p.scheme or "http", netloc, p.path or "", p.params, urlencode(safe_query), p.fragment))
+    auth = (user, password) if user else None
+    return safe_url, auth
+
+
+CLICKHOUSE_URL, CLICKHOUSE_AUTH = _resolve_clickhouse_conn()
 STOCKS_CSV = Path.home() / ".openclaw" / "workspace" / "STOCKS.csv"
 
 
@@ -345,7 +378,7 @@ def get_dynamic_tickers(stocks_db: dict[str, tuple[str, str]] | None = None) -> 
     )
     extra = {}
     try:
-        resp = requests.get(CLICKHOUSE_URL, params={"query": query_news}, timeout=10)
+        resp = requests.get(CLICKHOUSE_URL, params={"query": query_news}, timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         for line in resp.text.strip().splitlines():
             parts = line.split("\t")
@@ -369,7 +402,7 @@ def get_dynamic_tickers(stocks_db: dict[str, tuple[str, str]] | None = None) -> 
         "GROUP BY tk"
     )
     try:
-        resp = requests.get(CLICKHOUSE_URL, params={"query": query_dart}, timeout=10)
+        resp = requests.get(CLICKHOUSE_URL, params={"query": query_dart}, timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         for line in resp.text.strip().splitlines():
             tk = line.strip()
@@ -440,7 +473,7 @@ def save_to_clickhouse(rows: list[dict]) -> int:
     )
 
     try:
-        resp = requests.post(CLICKHOUSE_URL, data=insert_sql.encode("utf-8"), timeout=15)
+        resp = requests.post(CLICKHOUSE_URL, data=insert_sql.encode("utf-8"), timeout=15, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         return len(rows)
     except Exception as e:
@@ -556,7 +589,7 @@ def main():
     today_str = datetime.now().strftime("%Y-%m-%d")
     try:
         del_sql = f"DELETE FROM trading.technical_signals WHERE date = '{today_str}'"
-        resp = requests.post(CLICKHOUSE_URL, data=del_sql.encode("utf-8"), timeout=10)
+        resp = requests.post(CLICKHOUSE_URL, data=del_sql.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         log.info(f"  기존 기술지표 삭제 완료 (date={today_str})")
     except Exception as e:

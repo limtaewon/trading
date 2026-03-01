@@ -22,6 +22,7 @@ import json
 import time
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -37,7 +38,40 @@ logging.basicConfig(
 )
 log = logging.getLogger("dart-collector")
 
-CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "http://localhost:8123")
+try:
+    from env_bootstrap import bootstrap_openclaw_env
+
+    bootstrap_openclaw_env(override=False)
+except Exception:
+    pass
+
+
+def _resolve_clickhouse_conn() -> tuple[str, tuple[str, str] | None]:
+    raw = (
+        os.environ.get("CLICKHOUSE_URL", "").strip()
+        or os.environ.get("CLICKHOUSE_HOST", "").strip()
+        or "http://localhost:8123"
+    )
+    user = os.environ.get("CLICKHOUSE_USER", "").strip()
+    password = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
+
+    p = urlparse(raw)
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    if not user:
+        user = (p.username or q.get("user") or "").strip()
+    if not password:
+        password = (p.password or q.get("password") or "").strip()
+
+    safe_query = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k.lower() not in ("user", "password")]
+    netloc = p.hostname or "localhost"
+    if p.port:
+        netloc = f"{netloc}:{p.port}"
+    safe_url = urlunparse((p.scheme or "http", netloc, p.path or "", p.params, urlencode(safe_query), p.fragment))
+    auth = (user, password) if user else None
+    return safe_url, auth
+
+
+CLICKHOUSE_URL, CLICKHOUSE_AUTH = _resolve_clickhouse_conn()
 DART_API_KEY = os.environ.get("DART_API_KEY", "")
 DART_API_URL = "https://opendart.fss.or.kr/api/list.json"
 
@@ -146,7 +180,7 @@ def save_to_clickhouse(disclosures: list[dict]) -> int:
     )
 
     try:
-        resp = requests.post(CLICKHOUSE_URL, data=sql.encode("utf-8"), timeout=15)
+        resp = requests.post(CLICKHOUSE_URL, data=sql.encode("utf-8"), timeout=15, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         return len(disclosures)
     except Exception as e:
@@ -158,7 +192,7 @@ def get_existing_rcept_nos(bgn_de: str) -> set:
     """이미 저장된 접수번호 조회 (중복 방지)"""
     q = f"SELECT rcept_no FROM trading.dart_disclosure WHERE rcept_dt >= '{bgn_de}'"
     try:
-        resp = requests.get(CLICKHOUSE_URL, params={"query": q}, timeout=10)
+        resp = requests.get(CLICKHOUSE_URL, params={"query": q}, timeout=10, auth=CLICKHOUSE_AUTH)
         resp.raise_for_status()
         return set(line.strip() for line in resp.text.strip().splitlines() if line.strip())
     except Exception:
