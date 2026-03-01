@@ -223,6 +223,32 @@ def _ensure_market_index_schema() -> None:
         ch_query(None, data="ALTER TABLE trading.market_index ADD COLUMN IF NOT EXISTS traded_value_krw Float64 DEFAULT 0")
 
 
+def _ensure_feature_snapshot_view() -> None:
+    sql = """
+CREATE VIEW IF NOT EXISTS trading.v_feature_snapshot AS
+SELECT
+    ts,
+    symbol,
+    session,
+    toFloat64(price) AS price,
+    toFloat64(vwap) AS vwap,
+    toFloat64(atr14) AS atr14,
+    toFloat64(rsi14) AS rsi14,
+    toFloat64(spread_bp) AS spread_bp,
+    toFloat64(liquidity_krw) AS liquidity_krw,
+    toFloat64(foreign_flow) AS foreign_flow,
+    toFloat64(inst_flow) AS inst_flow,
+    toFloat64(news_event_score) AS news_event_score,
+    toFloat64(dart_event_score) AS dart_event_score,
+    regime_label,
+    toFloat64(foreign_flow) AS foreign_ownership_pct,
+    toFloat64(news_event_score) AS foreign_net_flow,
+    toFloat64(inst_flow) AS inst_net_flow
+FROM trading.feature_snapshot
+"""
+    _ = ch_query(None, data=sql)
+
+
 def _safe_float(val, default=0.0):
     """숫자 문자열/None을 안전하게 float로 변환."""
     if val is None:
@@ -892,6 +918,8 @@ def main():
     log.info("=" * 60)
     log.info(f"시장 데이터 수집 (최근 {days}일)")
     log.info("=" * 60)
+
+    _ensure_feature_snapshot_view()
 
     total = 0
 

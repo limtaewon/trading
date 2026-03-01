@@ -245,6 +245,8 @@ python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45
 ### 10-5. 참고: 조회용 뷰(테이블 아님)
 - `v_regime`: 최신 시장 레짐 뷰
 - `v_trading_dashboard`: 종목 종합 대시보드 뷰
+- `v_feature_snapshot`: `feature_snapshot` 수급 컬럼 표준화 뷰
+  (`foreign_ownership_pct`, `foreign_net_flow`, `inst_net_flow`)
 - `v_stock_signals`: 종목 신호 뷰
 - `v_recent_disclosures`: 최근 공시 요약 뷰
 - `v_hidden_relation_signals`: 연관성 시그널 뷰

@@ -101,6 +101,33 @@ def column_exists(table: str, column: str) -> bool:
         return False
 
 
+def ensure_feature_snapshot_view() -> None:
+    ch_execute(
+        """
+CREATE VIEW IF NOT EXISTS trading.v_feature_snapshot AS
+SELECT
+    ts,
+    symbol,
+    session,
+    toFloat64(price) AS price,
+    toFloat64(vwap) AS vwap,
+    toFloat64(atr14) AS atr14,
+    toFloat64(rsi14) AS rsi14,
+    toFloat64(spread_bp) AS spread_bp,
+    toFloat64(liquidity_krw) AS liquidity_krw,
+    toFloat64(foreign_flow) AS foreign_flow,
+    toFloat64(inst_flow) AS inst_flow,
+    toFloat64(news_event_score) AS news_event_score,
+    toFloat64(dart_event_score) AS dart_event_score,
+    regime_label,
+    toFloat64(foreign_flow) AS foreign_ownership_pct,
+    toFloat64(news_event_score) AS foreign_net_flow,
+    toFloat64(inst_flow) AS inst_net_flow
+FROM trading.feature_snapshot
+"""
+    )
+
+
 def ensure_tables() -> None:
     ch_execute(
         """
@@ -178,14 +205,14 @@ base AS (
         argMax(price, ts) AS close_price,
         greatest(
             max(toFloat64(liquidity_krw)),
-            abs(sum(toFloat64(news_event_score))) * argMax(price, ts) * 5,
-            abs(sum(toFloat64(inst_flow))) * argMax(price, ts) * 5
+            abs(sum(toFloat64(foreign_net_flow))) * argMax(price, ts) * 5,
+            abs(sum(toFloat64(inst_net_flow))) * argMax(price, ts) * 5
         ) AS traded_value_krw,
         argMax(session, ts) AS source_session,
-        avg(toFloat64(foreign_flow)) AS foreign_ownership_pct,
-        sum(toFloat64(news_event_score)) AS foreign_net_shares,
-        sum(toFloat64(inst_flow)) AS inst_net_shares
-    FROM trading.feature_snapshot
+        avg(toFloat64(foreign_ownership_pct)) AS foreign_ownership_pct,
+        sum(toFloat64(foreign_net_flow)) AS foreign_net_shares,
+        sum(toFloat64(inst_net_flow)) AS inst_net_shares
+    FROM trading.v_feature_snapshot
     WHERE ts >= now() - INTERVAL {int(days)} DAY
       AND match(symbol, '^[0-9]{{6}}$')
       {where_session}
@@ -516,6 +543,12 @@ def main() -> int:
 
     if not table_exists("feature_snapshot"):
         _log("feature_snapshot 테이블이 없어 중단")
+        return 1
+
+    try:
+        ensure_feature_snapshot_view()
+    except Exception as e:
+        _log(f"v_feature_snapshot 생성 실패: {e}")
         return 1
 
     try:

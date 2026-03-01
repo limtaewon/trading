@@ -605,6 +605,32 @@ def ch_execute(query: str) -> bool:
         return False
 
 
+def ensure_feature_snapshot_view() -> None:
+    sql = """
+CREATE VIEW IF NOT EXISTS trading.v_feature_snapshot AS
+SELECT
+    ts,
+    symbol,
+    session,
+    toFloat64(price) AS price,
+    toFloat64(vwap) AS vwap,
+    toFloat64(atr14) AS atr14,
+    toFloat64(rsi14) AS rsi14,
+    toFloat64(spread_bp) AS spread_bp,
+    toFloat64(liquidity_krw) AS liquidity_krw,
+    toFloat64(foreign_flow) AS foreign_flow,
+    toFloat64(inst_flow) AS inst_flow,
+    toFloat64(news_event_score) AS news_event_score,
+    toFloat64(dart_event_score) AS dart_event_score,
+    regime_label,
+    toFloat64(foreign_flow) AS foreign_ownership_pct,
+    toFloat64(news_event_score) AS foreign_net_flow,
+    toFloat64(inst_flow) AS inst_net_flow
+FROM trading.feature_snapshot
+"""
+    _ = ch_execute(sql)
+
+
 def get_stage2_market_flow_shock(lookback_days: int = 5) -> dict[str, Any]:
     n = max(3, int(lookback_days))
     rows = ch_select(
@@ -691,9 +717,9 @@ def get_flow_context_recent(ticker: str) -> list[dict[str, Any]]:
     rows = ch_select(
         "SELECT "
         "toDate(ts) AS flow_date, "
-        "sum(toFloat64OrNull(news_event_score)) AS frgn_ntby_qty, "
-        "sum(toFloat64OrNull(inst_flow)) AS pgtr_ntby_qty "
-        f"FROM trading.feature_snapshot "
+        "sum(toFloat64OrNull(foreign_net_flow)) AS frgn_ntby_qty, "
+        "sum(toFloat64OrNull(inst_net_flow)) AS pgtr_ntby_qty "
+        f"FROM trading.v_feature_snapshot "
         f"WHERE symbol='{ticker}' AND toDate(ts) >= today()-{FLOW_EXPLAIN_BYPASS_DAYS} "
         "GROUP BY flow_date "
         "ORDER BY flow_date DESC "
@@ -1577,6 +1603,8 @@ def main() -> int:
     parser.add_argument("--response", default="/tmp/gpt_response.json")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    ensure_feature_snapshot_view()
 
     response_path = Path(args.response)
     if not response_path.exists():

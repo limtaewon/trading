@@ -199,6 +199,46 @@ def ch_query(sql: str) -> list[dict]:
     return []
 
 
+def ch_execute(sql: str) -> bool:
+    _req = _get_requests()
+    url = _build_ch_url()
+    query = (sql or "").strip()
+    if not query:
+        return False
+    resp = _req.post(url, data=query.encode("utf-8"), timeout=CH_QUERY_TIMEOUT_SEC)
+    resp.raise_for_status()
+    return True
+
+
+def ensure_feature_snapshot_view() -> None:
+    sql = """
+CREATE VIEW IF NOT EXISTS trading.v_feature_snapshot AS
+SELECT
+    ts,
+    symbol,
+    session,
+    toFloat64(price) AS price,
+    toFloat64(vwap) AS vwap,
+    toFloat64(atr14) AS atr14,
+    toFloat64(rsi14) AS rsi14,
+    toFloat64(spread_bp) AS spread_bp,
+    toFloat64(liquidity_krw) AS liquidity_krw,
+    toFloat64(foreign_flow) AS foreign_flow,
+    toFloat64(inst_flow) AS inst_flow,
+    toFloat64(news_event_score) AS news_event_score,
+    toFloat64(dart_event_score) AS dart_event_score,
+    regime_label,
+    toFloat64(foreign_flow) AS foreign_ownership_pct,
+    toFloat64(news_event_score) AS foreign_net_flow,
+    toFloat64(inst_flow) AS inst_net_flow
+FROM trading.feature_snapshot
+"""
+    try:
+        ch_execute(sql)
+    except Exception as e:
+        log.warning(f"v_feature_snapshot ensure 실패(계속 진행): {e}")
+
+
 def mcporter_call(tool: str, args: str = "") -> dict | None:
     """mcporter CLI로 KIS MCP 도구 호출."""
     if not MCPORTER:
@@ -526,10 +566,10 @@ def get_symbol_investor_snapshot(tickers: list[str]) -> dict[str, dict]:
     rows = ch_query(f"""
         SELECT
             symbol,
-            argMax(foreign_flow, ts) AS foreign_ownership,
-            argMax(inst_flow, ts) AS inst_net_flow,
-            argMax(news_event_score, ts) AS foreign_net_flow
-        FROM trading.feature_snapshot
+            argMax(foreign_ownership_pct, ts) AS foreign_ownership,
+            argMax(inst_net_flow, ts) AS inst_net_flow,
+            argMax(foreign_net_flow, ts) AS foreign_net_flow
+        FROM trading.v_feature_snapshot
         WHERE ts >= now() - INTERVAL 12 HOUR
           AND symbol IN ({symbols_sql})
         GROUP BY symbol
@@ -1419,9 +1459,9 @@ def build_prompt() -> str:
 {format_candidates(bottom_warnings, "매도 경고")}
 
 ## 투자자 수급 보조 지표 (최근 수집 기준)
-- 종목 스냅샷 외국인 보유비중(%): feature_snapshot.foreign_flow
-- 종목 스냅샷 외국인 순매수(수량 proxy): feature_snapshot.news_event_score
-- 종목 스냅샷 기관 순매수(수량): feature_snapshot.inst_flow
+- 종목 스냅샷 외국인 보유비중(%): v_feature_snapshot.foreign_ownership_pct
+- 종목 스냅샷 외국인 순매수(수량 proxy): v_feature_snapshot.foreign_net_flow
+- 종목 스냅샷 기관 순매수(수량): v_feature_snapshot.inst_net_flow
 - 시장/종목 정규화 수급 기준 테이블: market_flow_daily, stock_flow_daily (단위: KRW)
 
 ## 주요 뉴스 (최근 3시간, 중요도 3+)
@@ -1552,6 +1592,7 @@ def main():
                         help="표준출력에 출력")
     args = parser.parse_args()
 
+    ensure_feature_snapshot_view()
     prompt = build_prompt()
 
     # 파일 저장

@@ -463,6 +463,36 @@ def ch_execute(sql: str):
     return True
 
 
+def ensure_feature_snapshot_view() -> None:
+    sql = """
+CREATE VIEW IF NOT EXISTS trading.v_feature_snapshot AS
+SELECT
+    ts,
+    symbol,
+    session,
+    toFloat64(price) AS price,
+    toFloat64(vwap) AS vwap,
+    toFloat64(atr14) AS atr14,
+    toFloat64(rsi14) AS rsi14,
+    toFloat64(spread_bp) AS spread_bp,
+    toFloat64(liquidity_krw) AS liquidity_krw,
+    toFloat64(foreign_flow) AS foreign_flow,
+    toFloat64(inst_flow) AS inst_flow,
+    toFloat64(news_event_score) AS news_event_score,
+    toFloat64(dart_event_score) AS dart_event_score,
+    regime_label,
+    toFloat64(foreign_flow) AS foreign_ownership_pct,
+    toFloat64(news_event_score) AS foreign_net_flow,
+    toFloat64(inst_flow) AS inst_net_flow
+FROM trading.feature_snapshot
+"""
+    try:
+        ch_execute(sql)
+    except Exception:
+        # 뷰 생성 실패 시에도 레거시 테이블 조회로 동작 가능
+        pass
+
+
 def ch_insert_sql(table: str, rows: list[dict[str, Any]]):
     if not rows:
         return 0
@@ -697,10 +727,10 @@ def load_candidates(limit: int):
       latest_flow AS (
         SELECT
           symbol AS ticker,
-          argMax(foreign_flow, ts) AS foreign_ownership,
-          argMax(inst_flow, ts) AS inst_flow,
-          argMax(news_event_score, ts) AS foreign_net_flow
-        FROM trading.feature_snapshot
+          argMax(foreign_ownership_pct, ts) AS foreign_ownership,
+          argMax(inst_net_flow, ts) AS inst_flow,
+          argMax(foreign_net_flow, ts) AS foreign_net_flow
+        FROM trading.v_feature_snapshot
         WHERE ts >= now() - INTERVAL 1 DAY
         GROUP BY symbol
       )
@@ -795,6 +825,7 @@ def main() -> int:
         rule_w, llm_w = rule_w / w_sum, llm_w / w_sum
 
     candidate_pool = max(limit, int(args.candidate_pool))
+    ensure_feature_snapshot_view()
     rows = load_candidates(candidate_pool)
     if not rows:
         print("candidate 0, skip")

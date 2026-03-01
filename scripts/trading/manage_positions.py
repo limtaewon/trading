@@ -284,6 +284,32 @@ def ch_execute(sql: str) -> bool:
         return False
 
 
+def ensure_feature_snapshot_view() -> None:
+    sql = """
+CREATE VIEW IF NOT EXISTS trading.v_feature_snapshot AS
+SELECT
+    ts,
+    symbol,
+    session,
+    toFloat64(price) AS price,
+    toFloat64(vwap) AS vwap,
+    toFloat64(atr14) AS atr14,
+    toFloat64(rsi14) AS rsi14,
+    toFloat64(spread_bp) AS spread_bp,
+    toFloat64(liquidity_krw) AS liquidity_krw,
+    toFloat64(foreign_flow) AS foreign_flow,
+    toFloat64(inst_flow) AS inst_flow,
+    toFloat64(news_event_score) AS news_event_score,
+    toFloat64(dart_event_score) AS dart_event_score,
+    regime_label,
+    toFloat64(foreign_flow) AS foreign_ownership_pct,
+    toFloat64(news_event_score) AS foreign_net_flow,
+    toFloat64(inst_flow) AS inst_net_flow
+FROM trading.feature_snapshot
+"""
+    _ = ch_execute(sql)
+
+
 def ch_insert_json_rows(table: str, rows: list[dict[str, Any]]) -> bool:
     if not rows:
         return True
@@ -475,11 +501,11 @@ def load_flow_snapshot(tickers: list[str]) -> dict[str, dict[str, Any]]:
       symbol AS ticker,
       argMax(price, ts) AS price,
       argMax(liquidity_krw, ts) AS liquidity_krw,
-      argMax(foreign_flow, ts) AS foreign_ownership,
-      argMax(news_event_score, ts) AS foreign_net_flow,
-      argMax(inst_flow, ts) AS inst_net_flow,
+      argMax(foreign_ownership_pct, ts) AS foreign_ownership,
+      argMax(foreign_net_flow, ts) AS foreign_net_flow,
+      argMax(inst_net_flow, ts) AS inst_net_flow,
       max(ts) AS asof_ts
-    FROM trading.feature_snapshot
+    FROM trading.v_feature_snapshot
     WHERE ts >= now() - INTERVAL 2 DAY
       AND symbol IN {ticker_in_clause(tickers)}
     GROUP BY symbol
@@ -1471,6 +1497,8 @@ def main() -> int:
     if not POSITION_MANAGER_ENABLED:
         print(json.dumps({"status": "skipped", "reason": "position_manager_disabled"}, ensure_ascii=False))
         return 0
+
+    ensure_feature_snapshot_view()
 
     do_execute = bool(args.execute)
     dry_run = bool(args.dry_run)
