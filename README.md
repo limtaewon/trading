@@ -67,6 +67,7 @@
 
 ### 3-3. 후속 해석/연관 분석
 - `cluster_news.py`: 뉴스 클러스터링
+- `hidden_relation_scorer.py`: 이벤트/클러스터 기반 정량 연관 점수(`hidden_relation_signals`) 스냅샷 생성
 - `llm_relation_reasoner.py`: 연관 종목/관계 추론
 - `analyze_news_research.py`: 중요 뉴스 심층 연구 및 구조화 저장
 - `collect_news.py`가 중요 뉴스(`importance>=3`)를 `news_research_queue`에 enqueue한다.
@@ -79,6 +80,7 @@
 ### 4-1. `enrich_data.sh`
 - `collect_market_data.py`, `technical_indicators.py`, `market_regime.py`, `collect_dart.py`를 오케스트레이션한다.
 - `sync_normalized_flow_daily.py`로 `stock_flow_daily`/`market_flow_daily`를 정규화 갱신한다.
+- `hidden_relation_scorer.py`로 최신 연관 점수 스냅샷(`hidden_relation_signals`)을 watchlist 산출 직전에 갱신한다.
 - `refresh_interest_watchlist.py`로 동적 watchlist를 재산출한다(룰 + LLM 리랭크).
 - watchlist 산출은 `candidate_pool`(기본 200)에서 후보를 먼저 수집하고, 최종 `limit`(기본 30)만 저장한다.
 - `decision_operating_pipeline.py`로 Stage 기반 판단 로그(`decision_run`, `decision_candidate`)를 생성한다.
@@ -98,6 +100,10 @@
 - `scripts/build_codex_jobs_manifest.py`
 - 보유 포지션 동적 관리는 `position-manager-20m` command 잡(평일 09:00~15:59, 20분 주기)으로 실행한다.
 - `data-news-research-30m` command 잡(평일 08:12~16:42, 30분 간격)으로 심층 뉴스 연구 워커를 비동기 실행한다.
+- 연관 파이프라인은 장중 오프셋 순서로 실행한다:
+  - `data-news-cluster-hourly` (`*/20`)
+  - `data-news-relation-score-20m` (`3,23,43`)
+  - `data-news-relation-reasoning-20m` (`7,27,47`)
 - 주식 파이프라인 경로는 `~/.openclaw/scripts/trading/...`로 통일되어 있다.
 - 코인/바이빗 작업은 별도 스크립트 경로를 유지한다.
 

@@ -104,12 +104,44 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "data-news-relation-score-20m",
+            "enabled": True,
+            "schedule": {"expr": "3,23,43 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && {py} {trading_scripts}/hidden_relation_scorer.py '
+                    '--lookback-hours "${RELATION_LOOKBACK_HOURS:-168}" '
+                    '--limit "${RELATION_FRAME_LIMIT:-6000}" '
+                    '--max-tickers "${RELATION_MAX_TICKERS:-500}" '
+                    '--min-abs-score "${RELATION_MIN_ABS_SCORE:-0.0}" '
+                    f'>> {logs}/relation-score.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "data-news-research-30m",
             "enabled": True,
             "schedule": {"expr": "12,42 8-16 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/analyze_news_research.py >> {logs}/news-research.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "data-news-relation-reasoning-20m",
+            "enabled": True,
+            "schedule": {"expr": "7,27,47 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && {py} {trading_scripts}/llm_relation_reasoner.py '
+                    '--lookback-hours 72 --min-score 0.10 --top-tickers 30 '
+                    '--events-per-ticker 5 --states-per-ticker 3 --cache-ttl-sec 300 --timeout-sec 180 '
+                    f'>> {logs}/relation-reasoning.log 2>&1'
+                ),
             },
             "source": "legacy-crontab",
         },

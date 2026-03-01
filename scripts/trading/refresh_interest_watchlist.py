@@ -48,6 +48,7 @@ LLM_MODEL_DEFAULT = os.environ.get("WATCHLIST_LLM_MODEL", os.environ.get("CODEX_
 LLM_MAX_ITEMS_DEFAULT = max(5, int(os.environ.get("WATCHLIST_LLM_MAX_ITEMS", "30")))
 CANDIDATE_POOL_DEFAULT = max(30, int(os.environ.get("WATCHLIST_CANDIDATE_POOL", "200")))
 WATCHLIST_ADAPTIVE_WEIGHTING_DEFAULT = os.environ.get("WATCHLIST_ADAPTIVE_WEIGHTING", "1").strip() == "1"
+WATCHLIST_RELATION_STALE_HOURS_DEFAULT = max(1, int(os.environ.get("WATCHLIST_RELATION_STALE_HOURS", "6")))
 try:
     WATCHLIST_EVENT_RULE_FLOOR_DEFAULT = float(os.environ.get("WATCHLIST_EVENT_RULE_FLOOR", "40"))
 except Exception:
@@ -691,10 +692,14 @@ def apply_llm_overlay(
 
 def load_candidates(limit: int):
     raw_limit = max(int(limit) * 6, 300)
+    relation_stale_hours = WATCHLIST_RELATION_STALE_HOURS_DEFAULT
     q = f"""
     WITH
       latest_date AS (SELECT max(date) AS d FROM trading.technical_signals),
-      latest_rel AS (SELECT max(asof_ts) AS ts FROM trading.hidden_relation_signals),
+      latest_rel AS (
+        SELECT maxIf(asof_ts, asof_ts >= now() - INTERVAL {relation_stale_hours} HOUR) AS ts
+        FROM trading.hidden_relation_signals
+      ),
       tech_latest AS (
         SELECT
           ticker,
@@ -709,6 +714,7 @@ def load_candidates(limit: int):
         WHERE date = (SELECT d FROM latest_date)
           AND length(ticker) = 6
           AND match(ticker, '^[0-9]{6}$')
+          AND ticker != '000000'
       ),
       news_tickers AS (
         SELECT DISTINCT ticker
@@ -717,7 +723,7 @@ def load_candidates(limit: int):
           FROM trading.news
           WHERE published_at >= now() - INTERVAL 3 DAY
         )
-        WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$')
+        WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$') AND ticker != '000000'
       ),
       frame_tickers AS (
         SELECT DISTINCT ticker
@@ -726,7 +732,7 @@ def load_candidates(limit: int):
           FROM trading.news_event_frames
           WHERE published_at >= now() - INTERVAL 3 DAY
         )
-        WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$')
+        WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$') AND ticker != '000000'
       ),
       relation_tickers AS (
         SELECT DISTINCT ticker
@@ -734,6 +740,7 @@ def load_candidates(limit: int):
         WHERE asof_ts = (SELECT ts FROM latest_rel)
           AND length(ticker) = 6
           AND match(ticker, '^[0-9]{{6}}$')
+          AND ticker != '000000'
       ),
       universe AS (
         SELECT ticker FROM tech_latest
@@ -843,7 +850,9 @@ def load_candidates(limit: int):
       ON hrs.ticker = u.ticker AND hrs.asof_ts = (SELECT ts FROM latest_rel)
     LEFT JOIN latest_flow lf
       ON lf.ticker = u.ticker
-    WHERE (
+    WHERE
+          u.ticker != '000000'
+      AND (
             ifNull(ts.signal_score, 0) >= 1
             OR ifNull(fa.explain_ready_3d, 0) > 0
             OR (ifNull(na.pos,0) - ifNull(na.neg,0)) >= 2

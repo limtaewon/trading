@@ -147,6 +147,15 @@ fi
 # ─── 7. Decision Operating(P0) 로그 생성 ─────────────────────
 if [[ "$MODE" == "all" || "$MODE" == "--quick" ]]; then
     echo ""
+    echo "▸ 연관관계 정량 스코어 갱신..."
+    python3 "$SCRIPT_DIR/hidden_relation_scorer.py" \
+      --lookback-hours "${RELATION_LOOKBACK_HOURS:-168}" \
+      --limit "${RELATION_FRAME_LIMIT:-6000}" \
+      --max-tickers "${RELATION_MAX_TICKERS:-500}" \
+      --min-abs-score "${RELATION_MIN_ABS_SCORE:-0.0}" 2>&1 | tail -10
+    echo "  완료"
+
+    echo ""
     echo "▸ 동적 watchlist 재산출..."
     python3 "$SCRIPT_DIR/refresh_interest_watchlist.py" --limit 30 --source enrich_data 2>&1 | tail -8
     echo "  완료"

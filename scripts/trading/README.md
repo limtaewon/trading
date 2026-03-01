@@ -7,8 +7,9 @@
 - codex_cron_router.sh -> codex_brain.sh -> prepare_gpt_prompt.py -> execute_gpt_orders.py
 - 보유 포지션 동적 관리: manage_positions.py -> execute_gpt_orders.py
 - 뉴스/데이터 파이프라인: collect_news.py, monitor_news.py, cluster_news.py, llm_relation_reasoner.py
+- 연관 정량 스코어 파이프라인: hidden_relation_scorer.py (cluster 직후, watchlist 직전)
 - P0 의사결정 로그 파이프라인:
-  enrich_data.sh -> refresh_interest_watchlist.py -> decision_operating_pipeline.py
+  enrich_data.sh -> hidden_relation_scorer.py -> refresh_interest_watchlist.py -> decision_operating_pipeline.py
 - Watchlist 운영 보조:
   monitor_watchlist_runs.py (run 메타 헬스체크/알림)
   prune_interest_watchlist.py (append snapshot retention prune)
