@@ -495,6 +495,32 @@
         "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/bybit_futures_cron.sh decision >> $HOME/.openclaw/logs/bybit-futures-decision.log 2>&1"
       },
       "source": "bybit-futures-template"
+    },
+    {
+      "name": "data-watchlist-run-health-20m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/20 7-16 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_watchlist_runs.py --source \"${WATCHLIST_ACTIVE_SOURCE:-enrich_data}\" >> $HOME/.openclaw/logs/watchlist-health.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-watchlist-retention-daily",
+      "enabled": true,
+      "schedule": {
+        "expr": "20 6 * * *",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/prune_interest_watchlist.py --retention-days \"${WATCHLIST_RETENTION_DAYS:-21}\" --run-retention-days \"${WATCHLIST_RUN_RETENTION_DAYS:-45}\" >> $HOME/.openclaw/logs/watchlist-retention.log 2>&1"
+      },
+      "source": "legacy-crontab"
     }
   ]
 }

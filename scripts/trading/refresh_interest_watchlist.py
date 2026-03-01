@@ -44,8 +44,6 @@ LLM_WEIGHT_DEFAULT = float(os.environ.get("WATCHLIST_LLM_WEIGHT", "0.3"))
 LLM_MODEL_DEFAULT = os.environ.get("WATCHLIST_LLM_MODEL", os.environ.get("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark")).strip()
 LLM_MAX_ITEMS_DEFAULT = max(5, int(os.environ.get("WATCHLIST_LLM_MAX_ITEMS", "30")))
 CANDIDATE_POOL_DEFAULT = max(30, int(os.environ.get("WATCHLIST_CANDIDATE_POOL", "200")))
-WATCHLIST_RETENTION_DAYS_DEFAULT = max(7, int(os.environ.get("WATCHLIST_RETENTION_DAYS", "21")))
-WATCHLIST_RETENTION_PRUNE_MODE_DEFAULT = os.environ.get("WATCHLIST_RETENTION_PRUNE_MODE", "daily").strip().lower()
 WATCHLIST_ADAPTIVE_WEIGHTING_DEFAULT = os.environ.get("WATCHLIST_ADAPTIVE_WEIGHTING", "1").strip() == "1"
 try:
     WATCHLIST_EVENT_RULE_FLOOR_DEFAULT = float(os.environ.get("WATCHLIST_EVENT_RULE_FLOOR", "40"))
@@ -866,8 +864,6 @@ def main() -> int:
     ap.add_argument("--rule-weight", type=float, default=LLM_RULE_WEIGHT_DEFAULT)
     ap.add_argument("--llm-weight", type=float, default=LLM_WEIGHT_DEFAULT)
     ap.add_argument("--llm-max-items", type=int, default=LLM_MAX_ITEMS_DEFAULT)
-    ap.add_argument("--retention-days", type=int, default=WATCHLIST_RETENTION_DAYS_DEFAULT)
-    ap.add_argument("--retention-prune-mode", default=WATCHLIST_RETENTION_PRUNE_MODE_DEFAULT, choices=["daily", "always", "off"])
     ap.add_argument("--adaptive-weighting", choices=["on", "off"], default="on" if WATCHLIST_ADAPTIVE_WEIGHTING_DEFAULT else "off")
     ap.add_argument("--event-rule-floor", type=float, default=WATCHLIST_EVENT_RULE_FLOOR_DEFAULT)
     ap.add_argument("--min-health-ratio", type=float, default=WATCHLIST_MIN_HEALTH_RATIO_DEFAULT)
@@ -880,8 +876,6 @@ def main() -> int:
     llm_cache_ttl = max(0, int(args.llm_cache_ttl))
     llm_model = str(args.llm_model or LLM_MODEL_DEFAULT).strip() or LLM_MODEL_DEFAULT
     llm_max_items = max(5, int(args.llm_max_items))
-    retention_days = max(7, int(args.retention_days))
-    retention_prune_mode = str(args.retention_prune_mode or "daily").strip().lower()
     adaptive_weighting = str(args.adaptive_weighting).lower() == "on"
     event_rule_floor = _clamp(float(args.event_rule_floor), 0.0, 100.0)
     min_health_ratio = _clamp(float(args.min_health_ratio), 0.1, 1.0)
@@ -1126,49 +1120,13 @@ def main() -> int:
     except Exception as e:
         run_error = f"{run_error}|run_meta_failed:{type(e).__name__}"
 
-    prune_info = "-"
-    do_prune = False
-    if retention_prune_mode == "always":
-        do_prune = True
-    elif retention_prune_mode == "daily":
-        marker = os.path.join(tempfile.gettempdir(), "watchlist_retention_prune.marker")
-        today = datetime.now().strftime("%Y-%m-%d")
-        last = ""
-        try:
-            if os.path.exists(marker):
-                with open(marker, "r", encoding="utf-8") as f:
-                    last = (f.read() or "").strip()
-        except Exception:
-            last = ""
-        if last != today:
-            do_prune = True
-            try:
-                with open(marker, "w", encoding="utf-8") as f:
-                    f.write(today)
-            except Exception:
-                pass
-
-    if retention_prune_mode == "off":
-        prune_info = "retention=off"
-    elif do_prune:
-        try:
-            ch_execute(
-                "ALTER TABLE trading.interest_watchlist "
-                f"DELETE WHERE ts < now() - INTERVAL {retention_days} DAY"
-            )
-            prune_info = f"retention={retention_days}d"
-        except Exception as e:
-            prune_info = f"retention_failed:{type(e).__name__}"
-    else:
-        prune_info = "retention=skip(daily)"
-
     print(
         "inserted_interest_watchlist="
         f"{n} llm_enabled={llm_enabled} llm_rows={len(llm_scores)} "
         f"candidate_pool={candidate_pool} pool_selected={len(pool_rows)} "
         f"status={run_status} min_expected={min_expected_rows} "
         f"final_limit={limit} snapshot_mode=append adaptive={adaptive_weighting} "
-        f"event_floor={event_rule_floor:.1f} prune_mode={retention_prune_mode} {prune_info} "
+        f"event_floor={event_rule_floor:.1f} retention=external_job "
         f"llm_error={run_error}"
     )
     return 0

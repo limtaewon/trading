@@ -654,6 +654,50 @@
         "lastStatus": "new",
         "consecutiveErrors": 0
       }
+    },
+    {
+      "id": "58bf135c-f994-4feb-bf2f-0bdc737a6d74",
+      "name": "data-watchlist-run-health-20m",
+      "enabled": true,
+      "createdAtMs": 1772350512318,
+      "updatedAtMs": 1772350512318,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/20 7-16 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_watchlist_runs.py --source \"${WATCHLIST_ACTIVE_SOURCE:-enrich_data}\" >> $HOME/.openclaw/logs/watchlist-health.log 2>&1"
+      },
+      "state": {
+        "lastStatus": "new",
+        "consecutiveErrors": 0
+      }
+    },
+    {
+      "id": "c743682a-78e0-4257-b493-ac3542917d87",
+      "name": "data-watchlist-retention-daily",
+      "enabled": true,
+      "createdAtMs": 1772350512318,
+      "updatedAtMs": 1772350512318,
+      "schedule": {
+        "kind": "cron",
+        "expr": "20 6 * * *",
+        "tz": "Asia/Seoul"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/prune_interest_watchlist.py --retention-days \"${WATCHLIST_RETENTION_DAYS:-21}\" --run-retention-days \"${WATCHLIST_RUN_RETENTION_DAYS:-45}\" >> $HOME/.openclaw/logs/watchlist-retention.log 2>&1"
+      },
+      "state": {
+        "lastStatus": "new",
+        "consecutiveErrors": 0
+      }
     }
   ]
 }

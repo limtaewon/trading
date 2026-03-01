@@ -128,8 +128,11 @@ bash scripts/ops/deploy_to_runtime.sh
 - `watchlist` 소스는 `trading.interest_watchlist`이고, `refresh_interest_watchlist.py`가 아래 신호를 합성해 갱신한다.
 - watchlist 후보 유니버스는 `technical_signals ∪ news_tickers ∪ news_event_frame_tickers ∪ hidden_relation_tickers` 합집합으로 구성한다.
 - watchlist는 후보풀(`WATCHLIST_CANDIDATE_POOL`, 기본 200)에서 다중 버킷 합집합 선별 후 최종 저장(`--limit`, 기본 30)으로 확정한다.
-- 저장 방식은 `append snapshot`이며, 조회 시 최신 `ts`를 사용한다. 오래된 스냅샷은 `WATCHLIST_RETENTION_DAYS`(기본 21일) 기준으로 정리한다.
+- 저장 방식은 `append snapshot`이며, 조회 시 최신 `ts`를 사용한다.
+- 스냅샷/런 메타 retention 정리는 `prune_interest_watchlist.py` 전용 잡에서 수행한다.
+  (`WATCHLIST_RETENTION_DAYS`, `WATCHLIST_RUN_RETENTION_DAYS`)
 - `interest_watchlist_runs` 메타 테이블에 run 상태(삽입행수/기준행수/오류)를 기록하고, decision은 최신 정상 run 기준으로 universe를 선택한다.
+- `monitor_watchlist_runs.py`가 `interest_watchlist_runs`를 주기 점검해 stale/partial/행수미달 상태를 경고한다.
 - 기술: `technical_signals` (signal_score, RSI, BB, 거래량)
 - 뉴스: `news`, `news_event_frames` (pos/neg, 뉴스건수, explain_ready)
 - 연관: `hidden_relation_signals` (relation_score, bias, source_tickers/channels)
@@ -165,16 +168,22 @@ python3 ~/.openclaw/scripts/trading/prompt_sanity_check.py
 set -a; source ~/.openclaw/.env.trading; set +a
 bash ~/.openclaw/scripts/trading/enrich_data.sh all
 
-# 2) 최신 decision_id 기준 두레이 보고
+# 2) watchlist run 헬스 점검(수동)
+python3 ~/.openclaw/scripts/trading/monitor_watchlist_runs.py --source "${WATCHLIST_ACTIVE_SOURCE:-enrich_data}"
+
+# 3) watchlist retention prune(수동)
+python3 ~/.openclaw/scripts/trading/prune_interest_watchlist.py --retention-days 21 --run-retention-days 45
+
+# 4) 최신 decision_id 기준 두레이 보고
 python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py
 
-# 3) 보유 포지션 동적 관리 실행(실주문)
+# 5) 보유 포지션 동적 관리 실행(실주문)
 python3 ~/.openclaw/scripts/trading/manage_positions.py --execute
 
-# 4) Replay 검증(최근 20개 decision 재집계 일치성 점검)
+# 6) Replay 검증(최근 20개 decision 재집계 일치성 점검)
 python3 ~/.openclaw/scripts/trading/replay_decision.py --lookback-days 14 --limit 20
 
-# 5) Outcome 집계(최근 decision 후보의 1/3/5일 성과 연결)
+# 7) Outcome 집계(최근 decision 후보의 1/3/5일 성과 연결)
 python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45 --limit-decisions 150 --horizons 1,3,5
 ```
 

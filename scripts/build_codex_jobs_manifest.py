@@ -124,6 +124,26 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "data-watchlist-run-health-20m",
+            "enabled": True,
+            "schedule": {"expr": "*/20 7-16 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/monitor_watchlist_runs.py --source "${{WATCHLIST_ACTIVE_SOURCE:-enrich_data}}" >> {logs}/watchlist-health.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "data-watchlist-retention-daily",
+            "enabled": True,
+            "schedule": {"expr": "20 6 * * *", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/prune_interest_watchlist.py --retention-days "${{WATCHLIST_RETENTION_DAYS:-21}}" --run-retention-days "${{WATCHLIST_RUN_RETENTION_DAYS:-45}}" >> {logs}/watchlist-retention.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "position-manager-20m",
             "enabled": True,
             "schedule": {"expr": "*/20 9-15 * * 1-5", "tz": "Asia/Seoul"},
