@@ -108,6 +108,18 @@ def _query_latest_runs(sources: list[str], limit: int = 1) -> list[dict[str, Any
     )
 
 
+def _parse_sources(raw: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in str(raw or "").split(","):
+        src = token.strip()
+        if not src or src in seen:
+            continue
+        seen.add(src)
+        out.append(src)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default=os.environ.get("WATCHLIST_ACTIVE_SOURCE", "enrich_data"))
@@ -117,7 +129,10 @@ def main() -> int:
     ap.add_argument("--fail-on-alert", action="store_true")
     args = ap.parse_args()
 
-    source = str(args.source or "enrich_data").strip() or "enrich_data"
+    sources = _parse_sources(args.source)
+    if not sources:
+        sources = ["enrich_data"]
+    source_label = ",".join(sources)
     stale_minutes = max(30, int(args.stale_minutes))
     min_health_ratio = max(0.1, min(1.0, float(args.min_health_ratio)))
     cooldown_minutes = max(5, int(args.cooldown_minutes))
@@ -126,7 +141,7 @@ def main() -> int:
         print("watchlist_run_health status=skip reason=table_missing")
         return 0
 
-    rows = _query_latest_runs([source], limit=1)
+    rows = _query_latest_runs(sources, limit=1)
     now = _now_local()
 
     status = "ok"
@@ -136,7 +151,7 @@ def main() -> int:
     if not rows:
         status = "alert"
         reason = "no_run"
-        detail = f"source={source}"
+        detail = f"source={source_label}"
     else:
         r = rows[0]
         run_ts = _parse_ts(str(r.get("ts", "")))
@@ -149,27 +164,27 @@ def main() -> int:
         llm_rows = int(r.get("llm_rows", 0) or 0)
         llm_error = str(r.get("llm_error", "") or "").strip()
 
-        floor = max(1, min_expected, int(round(max(1, limit_n) * min_health_ratio)))
+        floor = max(1, min_expected if min_expected > 0 else int(round(max(1, limit_n) * min_health_ratio)))
 
         if age_minutes > stale_minutes:
             status = "alert"
             reason = "stale"
-            detail = f"age={age_minutes}m>{stale_minutes}m source={source}"
+            detail = f"age={age_minutes}m>{stale_minutes}m source={source_label}"
         elif run_status != "ok":
             status = "alert"
             reason = "partial"
-            detail = f"run_status={run_status} inserted={inserted} min_expected={floor} source={source}"
+            detail = f"run_status={run_status} inserted={inserted} min_expected={floor} source={source_label}"
         elif inserted < floor:
             status = "alert"
             reason = "insufficient_rows"
-            detail = f"inserted={inserted} min_expected={floor} source={source}"
+            detail = f"inserted={inserted} min_expected={floor} source={source_label}"
         elif llm_enabled and llm_rows <= 0:
             status = "warn"
             reason = "llm_empty"
-            detail = f"llm_rows=0 llm_error={llm_error or '-'} source={source}"
+            detail = f"llm_rows=0 llm_error={llm_error or '-'} source={source_label}"
         else:
             detail = (
-                f"source={source} run_status={run_status} inserted={inserted} "
+                f"source={source_label} run_status={run_status} inserted={inserted} "
                 f"min_expected={floor} age={age_minutes}m"
             )
 

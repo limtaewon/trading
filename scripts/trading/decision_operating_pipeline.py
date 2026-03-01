@@ -580,8 +580,6 @@ def load_universe(universe: str, limit: int) -> list[dict[str, str]]:
         for src in active_sources:
             safe_sources.append("'" + src.replace("\\", "\\\\").replace("'", "\\'") + "'")
         source_filter = f" AND source IN ({', '.join(safe_sources)})"
-    min_health_ratio = _clamp(_to_float(os.getenv("WATCHLIST_MIN_HEALTH_RATIO", "0.8"), 0.8), 0.1, 1.0)
-    min_health_pct = int(round(min_health_ratio * 100))
     if table_exists("interest_watchlist"):
         try:
             # run 메타가 있으면 최신 "정상" 스냅샷(run_id)을 우선 채택
@@ -594,7 +592,7 @@ WITH latest_run AS (
     WHERE toDate(ts) >= today() - 3
       {source_filter}
       AND status = 'ok'
-      AND inserted_rows >= greatest(1, intDiv(greatest(limit_n, 1) * {min_health_pct}, 100))
+      AND inserted_rows >= greatest(1, toUInt32(ifNull(min_expected_rows, 1)))
     ORDER BY ts DESC
     LIMIT 1
 )

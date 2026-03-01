@@ -663,7 +663,7 @@
       "updatedAtMs": 1772350512318,
       "schedule": {
         "kind": "cron",
-        "expr": "*/20 7-16 * * 1-5",
+        "expr": "*/20 8-16 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "sessionTarget": "main",

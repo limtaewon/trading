@@ -500,7 +500,7 @@
       "name": "data-watchlist-run-health-20m",
       "enabled": true,
       "schedule": {
-        "expr": "*/20 7-16 * * 1-5",
+        "expr": "*/20 8-16 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {

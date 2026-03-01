@@ -126,7 +126,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-watchlist-run-health-20m",
             "enabled": True,
-            "schedule": {"expr": "*/20 7-16 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "*/20 8-16 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/monitor_watchlist_runs.py --source "${{WATCHLIST_ACTIVE_SOURCE:-enrich_data}}" >> {logs}/watchlist-health.log 2>&1',
