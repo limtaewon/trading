@@ -475,8 +475,9 @@ def load_flow_snapshot(tickers: list[str]) -> dict[str, dict[str, Any]]:
       symbol AS ticker,
       argMax(price, ts) AS price,
       argMax(liquidity_krw, ts) AS liquidity_krw,
-      argMax(foreign_flow, ts) AS foreign_flow,
-      argMax(inst_flow, ts) AS inst_flow,
+      argMax(foreign_flow, ts) AS foreign_ownership,
+      argMax(news_event_score, ts) AS foreign_net_flow,
+      argMax(inst_flow, ts) AS inst_net_flow,
       max(ts) AS asof_ts
     FROM trading.feature_snapshot
     WHERE ts >= now() - INTERVAL 2 DAY
@@ -748,8 +749,12 @@ def build_llm_prompt(
                     "bb_pct": round(to_float(c.tech.get("bb_pct", 0), 0.0), 3),
                 },
                 "flow": {
-                    "foreign_flow": round(to_float(c.flow.get("foreign_flow", 0), 0.0), 3),
-                    "inst_flow": round(to_float(c.flow.get("inst_flow", 0), 0.0), 3),
+                    "foreign_ownership_pct": round(to_float(c.flow.get("foreign_ownership", 0), 0.0), 3),
+                    "foreign_net_flow": round(to_float(c.flow.get("foreign_net_flow", 0), 0.0), 3),
+                    "inst_net_flow": round(to_float(c.flow.get("inst_net_flow", 0), 0.0), 3),
+                    # Legacy aliases for older prompt parsers
+                    "foreign_flow": round(to_float(c.flow.get("foreign_ownership", 0), 0.0), 3),
+                    "inst_flow": round(to_float(c.flow.get("inst_net_flow", 0), 0.0), 3),
                     "liquidity_krw": int(to_float(c.flow.get("liquidity_krw", 0), 0.0)),
                 },
                 "news": {

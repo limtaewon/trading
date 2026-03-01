@@ -100,6 +100,61 @@ def _normalize_news_pairs(titles: Any, urls: Any, max_items: int = 3) -> list[di
     return out
 
 
+def _select_candidate_pool(prepared: list[dict[str, Any]], candidate_pool: int) -> list[dict[str, Any]]:
+    """단일 합성점수 편향을 줄이기 위해 다중 버킷 합집합으로 후보풀 구성."""
+    if not prepared:
+        return []
+    pool = max(1, int(candidate_pool))
+    if len(prepared) <= pool:
+        return list(prepared)
+
+    bucket_n = max(10, pool // 4)
+
+    def _top(rows: list[dict[str, Any]], key_fn, n: int, reverse: bool = True) -> list[dict[str, Any]]:
+        return sorted(rows, key=key_fn, reverse=reverse)[: max(1, int(n))]
+
+    by_rule = _top(prepared, lambda x: float(x.get("rule_score_raw", 0.0) or 0.0), bucket_n, True)
+    by_news_explain = _top(
+        prepared,
+        lambda x: (
+            int(x.get("explain_ready", 0) or 0) * 100
+            + (int(x.get("news_pos", 0) or 0) - int(x.get("news_neg", 0) or 0)) * 5
+            + int(x.get("news_cnt", 0) or 0)
+        ),
+        bucket_n,
+        True,
+    )
+    by_relation = _top(prepared, lambda x: abs(float(x.get("relation_score", 0.0) or 0.0)), bucket_n, True)
+    by_reaction = _top(
+        prepared,
+        lambda x: abs(float(x.get("pct", 0.0) or 0.0)) + float(x.get("vol_r", 0.0) or 0.0),
+        bucket_n,
+        True,
+    )
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in (by_rule + by_news_explain + by_relation + by_reaction):
+        tk = str(row.get("ticker", "")).strip()
+        if not tk or tk in seen:
+            continue
+        seen.add(tk)
+        merged.append(row)
+        if len(merged) >= pool:
+            break
+
+    if len(merged) < pool:
+        for row in _top(prepared, lambda x: float(x.get("rule_score_raw", 0.0) or 0.0), len(prepared), True):
+            tk = str(row.get("ticker", "")).strip()
+            if not tk or tk in seen:
+                continue
+            seen.add(tk)
+            merged.append(row)
+            if len(merged) >= pool:
+                break
+    return merged
+
+
 def _extract_json_obj(raw: str) -> dict[str, Any] | None:
     txt = str(raw or "").strip()
     if not txt:
@@ -188,7 +243,8 @@ def _build_llm_prompt(candidates: list[dict[str, Any]]) -> str:
                     "roles": str(c.get("rel_roles", "") or "")[:120],
                     "channels": str(c.get("rel_channels", "") or "")[:120],
                 },
-                "foreign_flow": float(c.get("foreign_flow", 0.0) or 0.0),
+                "foreign_ownership": float(c.get("foreign_ownership", 0.0) or 0.0),
+                "foreign_net_flow": float(c.get("foreign_net_flow", 0.0) or 0.0),
                 "inst_flow": float(c.get("inst_flow", 0.0) or 0.0),
             }
         )
@@ -428,6 +484,7 @@ def apply_llm_overlay(
 
 
 def load_candidates(limit: int):
+    raw_limit = max(int(limit) * 6, 300)
     q = f"""
     WITH
       latest_date AS (SELECT max(date) AS d FROM trading.technical_signals),
@@ -483,8 +540,9 @@ def load_candidates(limit: int):
       latest_flow AS (
         SELECT
           symbol AS ticker,
-          argMax(foreign_flow, ts) AS foreign_flow,
-          argMax(inst_flow, ts) AS inst_flow
+          argMax(foreign_flow, ts) AS foreign_ownership,
+          argMax(inst_flow, ts) AS inst_flow,
+          argMax(news_event_score, ts) AS foreign_net_flow
         FROM trading.feature_snapshot
         WHERE ts >= now() - INTERVAL 1 DAY
         GROUP BY symbol
@@ -511,8 +569,9 @@ def load_candidates(limit: int):
       ifNull(arrayStringConcat(hrs.source_tickers, ', '), '') AS rel_source_tickers,
       ifNull(arrayStringConcat(hrs.top_roles, ', '), '') AS rel_roles,
       ifNull(arrayStringConcat(hrs.top_channels, ', '), '') AS rel_channels,
-      ifNull(lf.foreign_flow, 0) AS foreign_flow,
+      ifNull(lf.foreign_ownership, 0) AS foreign_ownership,
       ifNull(lf.inst_flow, 0) AS inst_flow,
+      ifNull(lf.foreign_net_flow, 0) AS foreign_net_flow,
       round(
         (ts.signal_score * 1.6)
         + (ifNull(na.pos,0)-ifNull(na.neg,0)) * 0.25
@@ -530,10 +589,13 @@ def load_candidates(limit: int):
       ON lf.ticker = ts.ticker
     WHERE ts.date = (SELECT d FROM latest_date)
       AND ts.ticker_name != ''
-      AND ts.signal_score >= 1
-      AND ts.rsi14 <= 70
+      AND (
+            ts.signal_score >= 1
+            OR ifNull(fa.explain_ready_3d, 0) > 0
+            OR (ifNull(na.pos,0) - ifNull(na.neg,0)) >= 2
+          )
     ORDER BY composite_score DESC, score DESC, vol_r DESC
-    LIMIT {int(limit)}
+    LIMIT {raw_limit}
     """
     return ch_query(q)
 
@@ -589,8 +651,9 @@ def main() -> int:
                 "technical_score": technical_score,
                 "relation_score": relation_score,
                 "news_score": news_score,
-                "foreign_flow": float(rr.get("foreign_flow", 0) or 0),
+                "foreign_ownership": float(rr.get("foreign_ownership", 0) or 0),
                 "inst_flow": float(rr.get("inst_flow", 0) or 0),
+                "foreign_net_flow": float(rr.get("foreign_net_flow", 0) or 0),
                 "rule_score_raw": rule_raw,
                 "rule_score_100": rule_score_100,
                 "signal": str(rr.get("signal", "")).strip(),
@@ -613,10 +676,12 @@ def main() -> int:
             }
         )
 
+    pool_rows = _select_candidate_pool(prepared, candidate_pool)
+
     llm_scores: dict[str, dict[str, Any]] = {}
     llm_error = ""
     if llm_enabled:
-        llm_input = [c for c in prepared if _is_ticker(c["ticker"])][: min(llm_max_items, len(prepared))]
+        llm_input = [c for c in pool_rows if _is_ticker(c["ticker"])][: min(llm_max_items, len(pool_rows))]
         llm_scores, llm_error = _run_llm_rerank(
             llm_input,
             timeout_sec=llm_timeout,
@@ -635,7 +700,7 @@ def main() -> int:
         f"DELETE FROM trading.interest_watchlist WHERE toDate(ts) = toDate('{ts[:10]}') AND source = {_sql_quote(source)}"
     )
 
-    for c in prepared:
+    for c in pool_rows:
         llm_item = llm_scores.get(c["ticker"])
         llm_score = _clamp(float((llm_item or {}).get("llm_score", 50.0)), 0.0, 100.0)
         final_score = round(rule_w * c["rule_score_100"] + llm_w * llm_score, 4)
@@ -643,8 +708,8 @@ def main() -> int:
         c["llm_score"] = llm_score
         c["final_score"] = final_score
 
-    prepared.sort(key=lambda x: (float(x.get("final_score", 0.0)), float(x.get("rule_score_100", 0.0))), reverse=True)
-    selected = prepared[:limit]
+    pool_rows.sort(key=lambda x: (float(x.get("final_score", 0.0)), float(x.get("rule_score_100", 0.0))), reverse=True)
+    selected = pool_rows[:limit]
 
     out = []
     for i, c in enumerate(selected, 1):
@@ -700,8 +765,10 @@ def main() -> int:
                 "relation_source_tickers": str(c.get("rel_source_tickers", "") or ""),
                 "relation_roles": str(c.get("rel_roles", "") or ""),
                 "relation_channels": str(c.get("rel_channels", "") or ""),
-                "foreign_flow": float(c.get("foreign_flow", 0) or 0),
+                "foreign_ownership": float(c.get("foreign_ownership", 0) or 0),
                 "inst_flow": float(c.get("inst_flow", 0) or 0),
+                "foreign_net_flow": float(c.get("foreign_net_flow", 0) or 0),
+                "foreign_flow": float(c.get("foreign_ownership", 0) or 0),
                 "technical": technical_score,
                 "rule_score_raw": float(c.get("rule_score_raw", 0.0) or 0.0),
                 "rule_score_100": float(c.get("rule_score_100", 0.0) or 0.0),
@@ -717,7 +784,7 @@ def main() -> int:
                 "technical_score": technical_score,
                 "news_score": int(news_score),
                 "relation_score": rel_score,
-                "flow_signal": float(c.get("foreign_flow", 0) or 0),
+                "flow_signal": float(c.get("foreign_net_flow", 0) or 0),
                 "tech_norm": min(1.0, max(0.0, technical_score / 6.0)),
                 "news_norm": min(1.0, (int(c.get("news_cnt", 0) or 0) / 10.0)),
                 "rel_norm": min(1.0, abs(rel_score) / 5.0),
@@ -746,7 +813,7 @@ def main() -> int:
                 "technical_score": technical_score,
                 "relation_score": rel_score,
                 "news_score": news_score,
-                "foreign_flow": float(c.get("foreign_flow", 0) or 0),
+                "foreign_flow": float(c.get("foreign_ownership", 0) or 0),
                 "inst_flow": float(c.get("inst_flow", 0) or 0),
                 "context_score": context_score,
                 "confidence": confidence,
@@ -758,7 +825,7 @@ def main() -> int:
     print(
         "inserted_interest_watchlist="
         f"{n} llm_enabled={llm_enabled} llm_rows={len(llm_scores)} "
-        f"candidate_pool={candidate_pool} final_limit={limit} llm_error={llm_error or '-'}"
+        f"candidate_pool={candidate_pool} pool_selected={len(pool_rows)} final_limit={limit} llm_error={llm_error or '-'}"
     )
     return 0
 

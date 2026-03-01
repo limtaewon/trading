@@ -24,6 +24,7 @@
   `PROMPT_WATCHLIST_STRICT=1` 기본값에서 dashboard fallback 비활성
 - 수급 스냅샷 대상 정책:
   collect_market_data.py는 watchlist 우선 + dashboard 보강 방식으로 feature_snapshot 종목을 선택
+  feature_snapshot 의미: foreign_flow=외국인 보유비중(%), news_event_score=외국인 순매수 수량 proxy, inst_flow=기관 순매수 수량
 - 브리핑 파이프라인:
   send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
   (decision_run / decision_candidate 기반)

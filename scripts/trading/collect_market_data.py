@@ -826,6 +826,10 @@ def collect_investor_flow(days=7):
         if not isinstance(quote, dict):
             continue
 
+        # feature_snapshot 컬럼 의미(하위 호환):
+        # - foreign_flow      : 외국인 보유비중(%)
+        # - inst_flow         : 기관 순매수 수량
+        # - news_event_score  : 외국인 순매수 수량(proxy)
         foreign_ownership = _safe_float(quote.get("hts_frgn_ehrt"), 0.0)
         inst_flow = _safe_int(quote.get("pgtr_ntby_qty"), 0)
         price = _safe_float(quote.get("stck_prpr"), 0.0)
@@ -844,9 +848,9 @@ def collect_investor_flow(days=7):
             0.0,      # rsi14
             0.0,      # spread_bp
             0.0,      # liquidity_krw
-            foreign_ownership,
-            inst_flow,
-            foreign_net_flow,
+            foreign_ownership,   # foreign_flow(ownership %)
+            inst_flow,           # inst_flow(net qty)
+            foreign_net_flow,    # news_event_score(foreign net qty proxy)
             0.0,      # dart_event_score
             ""
         ))

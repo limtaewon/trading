@@ -129,7 +129,8 @@ bash scripts/ops/deploy_to_runtime.sh
 - 기술: `technical_signals` (signal_score, RSI, BB, 거래량)
 - 뉴스: `news`, `news_event_frames` (pos/neg, 뉴스건수, explain_ready)
 - 연관: `hidden_relation_signals` (relation_score, bias, source_tickers/channels)
-- 수급: `feature_snapshot` (foreign_flow, inst_flow)
+- 수급: `feature_snapshot`
+  `foreign_flow`(외국인 보유비중%), `news_event_score`(외국인 순매수 수량 proxy), `inst_flow`(기관 순매수 수량)
 
 ### 11-2. LLM 반영 방식
 - 후보군은 룰 기반 `composite_score`로 1차 정렬한다.
@@ -230,6 +231,11 @@ python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45
 | `market_flow_daily` | 시장 일별 정규화 수급(시장/전체 집계) | `sync_normalized_flow_daily.py` | `decision_operating_pipeline.py` |
 | `investor_flow` | 레거시 투자주체 수급(브리핑 호환) | 외부 수집 또는 `sync_normalized_flow_daily.py --sync-legacy-investor-flow` | `market_briefing.py` |
 | `dart_disclosure` | DART 공시 원천/정규화 저장 | `collect_dart.py` | `prepare_gpt_prompt.py`, `technical_indicators.py` |
+
+`feature_snapshot` 컬럼 의미(운영 기준):
+- `foreign_flow`: 외국인 보유비중(%)
+- `news_event_score`: 외국인 순매수 수량 proxy
+- `inst_flow`: 기관 순매수 수량
 
 ### 10-5. 참고: 조회용 뷰(테이블 아님)
 - `v_regime`: 최신 시장 레짐 뷰

@@ -509,7 +509,7 @@ def _get_watchlist_bottom_impl(limit: int = 10) -> list[dict]:
 
 
 def get_symbol_investor_snapshot(tickers: list[str]) -> dict[str, dict]:
-    """feature_snapshot에서 종목별 외국인 보유비중/기관 수급을 조회."""
+    """feature_snapshot에서 종목별 외국인 보유비중/순매수/기관 순매수를 조회."""
     symbols = [str(t).replace("'", "").strip() for t in tickers]
     symbols = [t for t in symbols if len(t) == 6 and t.isdigit()]
     if not symbols:
@@ -526,8 +526,8 @@ def get_symbol_investor_snapshot(tickers: list[str]) -> dict[str, dict]:
     rows = ch_query(f"""
         SELECT
             symbol,
-            argMax(foreign_flow, ts) AS foreign_flow,
-            argMax(inst_flow, ts) AS inst_flow,
+            argMax(foreign_flow, ts) AS foreign_ownership,
+            argMax(inst_flow, ts) AS inst_net_flow,
             argMax(news_event_score, ts) AS foreign_net_flow
         FROM trading.feature_snapshot
         WHERE ts >= now() - INTERVAL 12 HOUR
@@ -541,8 +541,8 @@ def get_symbol_investor_snapshot(tickers: list[str]) -> dict[str, dict]:
         if not symbol:
             continue
         out[symbol] = {
-            "foreign_ownership": safe_float(r.get("foreign_flow", 0), 0.0),
-            "inst_net_flow": safe_float(r.get("inst_flow", 0), 0.0),
+            "foreign_ownership": safe_float(r.get("foreign_ownership", 0), 0.0),
+            "inst_net_flow": safe_float(r.get("inst_net_flow", 0), 0.0),
             "foreign_net_flow": safe_float(r.get("foreign_net_flow", 0), 0.0),
         }
     return out
@@ -1419,8 +1419,9 @@ def build_prompt() -> str:
 {format_candidates(bottom_warnings, "매도 경고")}
 
 ## 투자자 수급 보조 지표 (최근 수집 기준)
-- 종목 스냅샷 외국인 수급 보조치: feature_snapshot.foreign_flow
-- 종목 스냅샷 기관 수급 보조치: feature_snapshot.inst_flow
+- 종목 스냅샷 외국인 보유비중(%): feature_snapshot.foreign_flow
+- 종목 스냅샷 외국인 순매수(수량 proxy): feature_snapshot.news_event_score
+- 종목 스냅샷 기관 순매수(수량): feature_snapshot.inst_flow
 - 시장/종목 정규화 수급 기준 테이블: market_flow_daily, stock_flow_daily (단위: KRW)
 
 ## 주요 뉴스 (최근 3시간, 중요도 3+)
