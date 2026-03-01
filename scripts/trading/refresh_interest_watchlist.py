@@ -20,6 +20,7 @@ import json
 import os
 import re
 import tempfile
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -626,6 +627,37 @@ def ch_insert_sql(table: str, rows: list[dict[str, Any]]):
     return len(rows)
 
 
+def watchlist_run_exists(run_id: str, source: str) -> int:
+    rid = str(run_id or "").replace("\\", "\\\\").replace("'", "\\'")
+    src = str(source or "").replace("\\", "\\\\").replace("'", "\\'")
+    rows = ch_query(
+        f"""
+SELECT count() AS c
+FROM trading.interest_watchlist
+WHERE decision_id = '{rid}'
+  AND source = '{src}'
+"""
+    )
+    if not rows:
+        return 0
+    try:
+        return int(rows[0].get("c", 0) or 0)
+    except Exception:
+        return 0
+
+
+def delete_watchlist_run(run_id: str, source: str) -> None:
+    rid = str(run_id or "").replace("\\", "\\\\").replace("'", "\\'")
+    src = str(source or "").replace("\\", "\\\\").replace("'", "\\'")
+    ch_execute(
+        f"""
+ALTER TABLE trading.interest_watchlist
+DELETE WHERE decision_id = '{rid}'
+  AND source = '{src}'
+"""
+    )
+
+
 def classify_action(p: dict[str, float]) -> tuple[str, str, float, float]:
     score = float(p.get("score", 0) or 0)
     rsi = float(p.get("rsi", 0) or 0)
@@ -879,6 +911,8 @@ def main() -> int:
     ap.add_argument("--adaptive-weighting", choices=["on", "off"], default="on" if WATCHLIST_ADAPTIVE_WEIGHTING_DEFAULT else "off")
     ap.add_argument("--event-rule-floor", type=float, default=WATCHLIST_EVENT_RULE_FLOOR_DEFAULT)
     ap.add_argument("--min-health-ratio", type=float, default=WATCHLIST_MIN_HEALTH_RATIO_DEFAULT)
+    ap.add_argument("--run-id", default="")
+    ap.add_argument("--replace-existing-run", action="store_true")
     args = ap.parse_args()
 
     limit = max(1, int(args.limit))
@@ -965,8 +999,24 @@ def main() -> int:
             llm_w = 0.0
             rule_w = 1.0
 
-    decision_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = str(args.run_id or "").strip()
+    if not run_id:
+        run_id = f"wl_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}"
+    decision_id = run_id
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    existing_rows = watchlist_run_exists(decision_id, source)
+    if existing_rows > 0:
+        if bool(args.replace_existing_run):
+            delete_watchlist_run(decision_id, source)
+            print(
+                f"existing_snapshot_replaced run_id={decision_id} source={source} existing_rows={existing_rows}"
+            )
+        else:
+            print(
+                f"skip_duplicate_run run_id={decision_id} source={source} existing_rows={existing_rows} "
+                "hint=use --replace-existing-run to overwrite"
+            )
+            return 0
 
     for c in pool_rows:
         llm_item = llm_scores.get(c["ticker"])
@@ -1137,6 +1187,7 @@ def main() -> int:
         f"{n} llm_enabled={llm_enabled} llm_rows={len(llm_scores)} "
         f"candidate_pool={candidate_pool} pool_selected={len(pool_rows)} "
         f"status={run_status} min_expected={min_expected_rows} "
+        f"run_id={decision_id} "
         f"final_limit={limit} snapshot_mode=append adaptive={adaptive_weighting} "
         f"event_floor={event_rule_floor:.1f} retention=external_job "
         f"llm_error={run_error}"

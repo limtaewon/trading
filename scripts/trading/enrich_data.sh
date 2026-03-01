@@ -146,13 +146,73 @@ fi
 
 # ─── 7. Decision Operating(P0) 로그 생성 ─────────────────────
 if [[ "$MODE" == "all" || "$MODE" == "--quick" ]]; then
+    RELATION_SCORER_RAN=0
+    NOW_HOUR="$(date +%H)"
+    NOW_HOUR="${NOW_HOUR#0}"
+    [[ -n "$NOW_HOUR" ]] || NOW_HOUR=0
+    PREMARKET_CHAIN_STRICT="${PREMARKET_RELATION_CHAIN_STRICT:-1}"
+    FORCE_REL_CHAIN="${FORCE_RELATION_CHAIN:-0}"
+    RUN_PREMARKET_CHAIN=0
+    RUN_PREMARKET_REASON="skip"
+    if [[ "$FORCE_REL_CHAIN" == "1" ]]; then
+        RUN_PREMARKET_CHAIN=1
+        RUN_PREMARKET_REASON="force"
+    elif [[ "$NOW_HOUR" -lt 9 ]]; then
+        RUN_PREMARKET_CHAIN=1
+        RUN_PREMARKET_REASON="premarket"
+    fi
+
+    if [[ "$RUN_PREMARKET_CHAIN" == "1" ]]; then
+        echo ""
+        echo "▸ 장전 신선도 체인 실행(${RUN_PREMARKET_REASON})..."
+        CHAIN_FAIL=0
+        if ! python3 "$SCRIPT_DIR/cluster_news.py" \
+            --window-hours "${NEWS_CLUSTER_WINDOW_HOURS:-240}" \
+            --threshold "${NEWS_CLUSTER_THRESHOLD:-0.42}" \
+            --limit "${NEWS_CLUSTER_LIMIT:-10000}" \
+            --min-size "${NEWS_CLUSTER_MIN_SIZE:-2}" 2>&1 | tail -10; then
+            CHAIN_FAIL=1
+            echo "  경고: cluster_news 실패"
+        fi
+        if ! python3 "$SCRIPT_DIR/hidden_relation_scorer.py" \
+            --lookback-hours "${RELATION_LOOKBACK_HOURS:-168}" \
+            --limit "${RELATION_FRAME_LIMIT:-6000}" \
+            --max-tickers "${RELATION_MAX_TICKERS:-500}" \
+            --min-abs-score "${RELATION_MIN_ABS_SCORE:-0.0}" 2>&1 | tail -10; then
+            CHAIN_FAIL=1
+            echo "  경고: hidden_relation_scorer 실패"
+        else
+            RELATION_SCORER_RAN=1
+        fi
+        if ! python3 "$SCRIPT_DIR/llm_relation_reasoner.py" \
+            --lookback-hours "${RELATION_REASONER_LOOKBACK_HOURS:-72}" \
+            --min-score "${RELATION_REASONER_MIN_SCORE:-0.10}" \
+            --top-tickers "${RELATION_REASONER_TOP_TICKERS:-30}" \
+            --events-per-ticker "${RELATION_REASONER_EVENTS_PER_TICKER:-5}" \
+            --states-per-ticker "${RELATION_REASONER_STATES_PER_TICKER:-3}" \
+            --cache-ttl-sec "${RELATION_REASONER_CACHE_TTL_SEC:-300}" \
+            --timeout-sec "${RELATION_REASONER_TIMEOUT_SEC:-180}" 2>&1 | tail -10; then
+            CHAIN_FAIL=1
+            echo "  경고: llm_relation_reasoner 실패"
+        fi
+        if [[ "$CHAIN_FAIL" == "1" && "$PREMARKET_CHAIN_STRICT" == "1" ]]; then
+            echo "  실패: 장전 신선도 체인 실패(PREMARKET_RELATION_CHAIN_STRICT=1) → 중단"
+            exit 1
+        fi
+        echo "  완료"
+    fi
+
     echo ""
     echo "▸ 연관관계 정량 스코어 갱신..."
-    python3 "$SCRIPT_DIR/hidden_relation_scorer.py" \
-      --lookback-hours "${RELATION_LOOKBACK_HOURS:-168}" \
-      --limit "${RELATION_FRAME_LIMIT:-6000}" \
-      --max-tickers "${RELATION_MAX_TICKERS:-500}" \
-      --min-abs-score "${RELATION_MIN_ABS_SCORE:-0.0}" 2>&1 | tail -10
+    if [[ "$RELATION_SCORER_RAN" == "1" ]]; then
+      echo "  스킵(장전 신선도 체인에서 이미 실행됨)"
+    else
+      python3 "$SCRIPT_DIR/hidden_relation_scorer.py" \
+        --lookback-hours "${RELATION_LOOKBACK_HOURS:-168}" \
+        --limit "${RELATION_FRAME_LIMIT:-6000}" \
+        --max-tickers "${RELATION_MAX_TICKERS:-500}" \
+        --min-abs-score "${RELATION_MIN_ABS_SCORE:-0.0}" 2>&1 | tail -10
+    fi
     echo "  완료"
 
     echo ""

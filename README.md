@@ -80,6 +80,8 @@
 ### 4-1. `enrich_data.sh`
 - `collect_market_data.py`, `technical_indicators.py`, `market_regime.py`, `collect_dart.py`를 오케스트레이션한다.
 - `sync_normalized_flow_daily.py`로 `stock_flow_daily`/`market_flow_daily`를 정규화 갱신한다.
+- 장전 시간대(09:00 이전)에는 뉴스 신선도 보장을 위해 `cluster_news.py -> hidden_relation_scorer.py -> llm_relation_reasoner.py` 체인을 선행 실행한다.
+- 장전 신선도 체인은 `FORCE_RELATION_CHAIN=1`로 강제 실행 가능하며, `PREMARKET_RELATION_CHAIN_STRICT=1`(기본)일 때 실패 시 파이프라인을 중단한다.
 - `hidden_relation_scorer.py`로 최신 연관 점수 스냅샷(`hidden_relation_signals`)을 watchlist 산출 직전에 갱신한다.
 - `refresh_interest_watchlist.py`로 동적 watchlist를 재산출한다(룰 + LLM 리랭크).
 - watchlist 산출은 `candidate_pool`(기본 200)에서 후보를 먼저 수집하고, 최종 `limit`(기본 30)만 저장한다.
@@ -141,6 +143,7 @@ bash scripts/ops/deploy_to_runtime.sh
 - watchlist 후보 유니버스는 `technical_signals ∪ news_tickers ∪ news_event_frame_tickers ∪ hidden_relation_tickers` 합집합으로 구성한다.
 - watchlist는 후보풀(`WATCHLIST_CANDIDATE_POOL`, 기본 200)에서 다중 버킷 합집합 선별 후 최종 저장(`--limit`, 기본 30)으로 확정한다.
 - 저장 방식은 `append snapshot`이며, 조회 시 최신 `ts`를 사용한다.
+- `refresh_interest_watchlist.py`는 `run_id` 단위 idempotency를 지원한다. 동일 `run_id` 재실행 시 기본은 중복 insert를 스킵하고, `--replace-existing-run`일 때만 해당 run 스냅샷을 교체한다.
 - 스냅샷/런 메타 retention 정리는 `prune_interest_watchlist.py` 전용 잡에서 수행한다.
   (`WATCHLIST_RETENTION_DAYS`, `WATCHLIST_RUN_RETENTION_DAYS`)
 - `interest_watchlist_runs` 메타 테이블에 run 상태(삽입행수/기준행수/오류)를 기록하고, decision은 최신 정상 run 기준으로 universe를 선택한다.
