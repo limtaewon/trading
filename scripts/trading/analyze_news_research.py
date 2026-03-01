@@ -371,17 +371,17 @@ def _load_queue_candidates() -> list[dict]:
 WITH latest AS (
     SELECT
         news_id,
-        argMax(published_at, updated_at) AS q_published_at,
-        argMax(title, updated_at) AS q_title,
-        argMax(summary, updated_at) AS q_summary,
-        argMax(source_url, updated_at) AS q_source_url,
-        argMax(importance, updated_at) AS q_importance,
-        argMax(sentiment, updated_at) AS q_sentiment,
-        argMax(impact_type, updated_at) AS q_impact_type,
-        argMax(tickers, updated_at) AS q_tickers,
-        argMax(status, updated_at) AS q_status,
-        argMax(retry_count, updated_at) AS q_retry_count,
-        argMax(next_retry_at, updated_at) AS q_next_retry_at
+        argMax(published_at, tuple(updated_at, created_at)) AS q_published_at,
+        argMax(title, tuple(updated_at, created_at)) AS q_title,
+        argMax(summary, tuple(updated_at, created_at)) AS q_summary,
+        argMax(source_url, tuple(updated_at, created_at)) AS q_source_url,
+        argMax(importance, tuple(updated_at, created_at)) AS q_importance,
+        argMax(sentiment, tuple(updated_at, created_at)) AS q_sentiment,
+        argMax(impact_type, tuple(updated_at, created_at)) AS q_impact_type,
+        argMax(tickers, tuple(updated_at, created_at)) AS q_tickers,
+        argMax(status, tuple(updated_at, created_at)) AS q_status,
+        argMax(retry_count, tuple(updated_at, created_at)) AS q_retry_count,
+        argMax(next_retry_at, tuple(updated_at, created_at)) AS q_next_retry_at
     FROM trading.news_research_queue
     WHERE published_at > now() - INTERVAL {QUEUE_LOOKBACK_HOURS} HOUR
     GROUP BY news_id
