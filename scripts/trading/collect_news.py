@@ -67,6 +67,10 @@ NEWS_ANALYSIS_SCHEMA_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "news_analysis_response_schema.json",
 )
+NEWS_RESEARCH_QUEUE_SCHEMA_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "schema_news_research_queue.sql",
+)
 CODEX_BIN_CANDIDATES = [
     os.environ.get("CODEX_BIN", ""),
     os.environ.get("OPENCLAW_BIN", ""),
@@ -138,6 +142,7 @@ BACKFILL_START_DATE = os.environ.get("BACKFILL_START_DATE", "").strip()  # YYYY-
 BACKFILL_END_DATE = os.environ.get("BACKFILL_END_DATE", "").strip()      # YYYY-MM-DD (inclusive)
 SKIP_L1_DUPLICATE_CHECK = os.environ.get("SKIP_L1_DUP", "0").strip() == "1"
 SKIP_L2_DUPLICATE_CHECK = os.environ.get("SKIP_L2_DUP", "0").strip() == "1"
+_NEWS_RESEARCH_QUEUE_READY = False
 
 SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.2"))
 # Reduce O(n^2) intra-batch comparisons by limiting lookback window
@@ -1178,6 +1183,19 @@ def _escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace("'", "\\'")
 
 
+def _research_news_id(published_at, source_url: str, title: str) -> str:
+    pub_s = ""
+    if isinstance(published_at, datetime):
+        pub_s = published_at.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        try:
+            pub_s = parsedate_to_datetime(str(published_at)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pub_s = str(published_at or "").strip()
+    key = f"{pub_s}|{source_url or ''}|{title or ''}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
 def _rows_to_values(rows):
     values = []
     for r in rows:
@@ -1255,6 +1273,97 @@ def insert_event_frames(rows: list[dict]) -> int:
 
 def insert_event_memory(rows: list[dict]) -> int:
     return _insert_json_rows("trading.event_memory", rows, chunk_size=180)
+
+
+def ensure_news_research_queue_table() -> bool:
+    global _NEWS_RESEARCH_QUEUE_READY
+    if _NEWS_RESEARCH_QUEUE_READY:
+        return True
+    if not os.path.exists(NEWS_RESEARCH_QUEUE_SCHEMA_PATH):
+        log.warning(f"news_research_queue schema not found: {NEWS_RESEARCH_QUEUE_SCHEMA_PATH}")
+        return False
+    try:
+        with open(NEWS_RESEARCH_QUEUE_SCHEMA_PATH, "r", encoding="utf-8") as f:
+            sql = f.read()
+        http_post_text(CLICKHOUSE_URL, sql, timeout=60)
+        _NEWS_RESEARCH_QUEUE_READY = True
+        return True
+    except Exception as e:
+        log.warning(f"news_research_queue schema ensure failed: {e}")
+        return False
+
+
+def enqueue_news_research_queue(rows: list[dict], source: str = "collect_news") -> int:
+    if not rows:
+        return 0
+    if not ensure_news_research_queue_table():
+        return 0
+
+    prepared = []
+    for r in rows:
+        try:
+            imp = int(r.get("importance", 0) or 0)
+        except Exception:
+            imp = 0
+        if imp < 3:
+            continue
+        published_at = r.get("published_at")
+        if isinstance(published_at, datetime):
+            pub_s = published_at.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            pub_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        title = str(r.get("title", "") or "")
+        source_url = str(r.get("source_url", "") or "")
+        summary = str(r.get("summary", "") or "")
+        sentiment = str(r.get("sentiment", "neutral") or "neutral")
+        impact_type = str(r.get("impact_type", "stock") or "stock")
+        tickers = r.get("tickers") if isinstance(r.get("tickers"), list) else []
+        tickers = [str(t).strip() for t in tickers if str(t).strip()][:20]
+        prepared.append({
+            "news_id": _research_news_id(pub_s, source_url, title),
+            "published_at": pub_s,
+            "title": title,
+            "summary": summary,
+            "source_url": source_url,
+            "importance": max(1, min(5, imp)),
+            "sentiment": sentiment,
+            "impact_type": impact_type,
+            "tickers": tickers,
+            "source": source or "collect_news",
+        })
+
+    if not prepared:
+        return 0
+
+    inserted = 0
+    chunk_size = 120
+    for i in range(0, len(prepared), chunk_size):
+        chunk = prepared[i:i + chunk_size]
+        vals = []
+        for r in chunk:
+            tickers_sql = ",".join([f"'{_escape(t)}'" for t in r["tickers"]])
+            vals.append(
+                "("
+                f"now(), '{_escape(r['news_id'])}', toDateTime('{_escape(r['published_at'])}'), "
+                f"'{_escape(r['title'])}', '{_escape(r['summary'])}', '{_escape(r['source_url'])}', "
+                f"{int(r['importance'])}, '{_escape(r['sentiment'])}', '{_escape(r['impact_type'])}', "
+                f"[{tickers_sql}], 'pending', 0, now(), '', '{_escape(r['source'])}', now(), now()"
+                ")"
+            )
+        sql = (
+            "INSERT INTO trading.news_research_queue "
+            "(enqueued_at, news_id, published_at, title, summary, source_url, importance, sentiment, impact_type, tickers, "
+            "status, retry_count, next_retry_at, last_error, source, updated_at, created_at) "
+            "VALUES "
+            + ",".join(vals)
+        )
+        try:
+            http_post_text(CLICKHOUSE_URL, sql, timeout=60)
+            inserted += len(chunk)
+        except Exception as e:
+            log.warning(f"news_research_queue enqueue failed: {e}")
+            break
+    return inserted
 
 
 # ─── 6. 분석 + 삽입 ─────────────────────────────────────
@@ -1419,11 +1528,13 @@ def analyze_and_insert(news_list, embeddings, trigger_type="cron"):
     inserted = insert_to_clickhouse(rows)
     frame_inserted = insert_event_frames(frame_rows)
     memory_inserted = insert_event_memory(memory_rows)
+    queue_inserted = enqueue_news_research_queue(rows, source=f"collect_news:{trigger_type}")
     return inserted, {
         "relevant": len(rows),
         "inserted": inserted,
         "event_frames_inserted": frame_inserted,
         "event_memory_inserted": memory_inserted,
+        "news_research_queue_inserted": queue_inserted,
         "sentiment": sc,
         "importance": ic,
     }
@@ -1438,6 +1549,8 @@ def print_report(collected, after_l1, after_l2, stats, elapsed):
         f"  수집 {collected} -> L1(URL) {after_l1} -> L2(임베딩) {after_l2} "
         f"-> 관련 {stats.get('relevant', 0)} -> DB {stats.get('inserted', 0)}"
     )
+    if int(stats.get("news_research_queue_inserted", 0) or 0) > 0:
+        log.info(f"  심층연구 큐 적재: {int(stats.get('news_research_queue_inserted', 0) or 0)}")
     log.info(f"  감성: 📈{sc.get('positive', 0)} 📉{sc.get('negative', 0)} ➡️{sc.get('neutral', 0)}")
     total = (sc.get("positive", 0) + sc.get("negative", 0) + sc.get("neutral", 0)) or 1
     bull = sc.get("positive", 0) / total * 100

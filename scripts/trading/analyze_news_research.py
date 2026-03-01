@@ -25,6 +25,7 @@ LIMIT = int(os.environ.get("NEWS_RESEARCH_LIMIT", "8"))
 BATCH = int(os.environ.get("NEWS_RESEARCH_BATCH", "4"))
 RETRY_COOLDOWN_MINUTES = max(5, int(os.environ.get("NEWS_RESEARCH_RETRY_COOLDOWN_MINUTES", "30")))
 MAX_RETRY = max(1, int(os.environ.get("NEWS_RESEARCH_MAX_RETRY", "8")))
+QUEUE_LOOKBACK_HOURS = max(24, int(os.environ.get("NEWS_RESEARCH_QUEUE_LOOKBACK_HOURS", str(WINDOW_HOURS + 72))))
 OPENCLAW_BRAIN_MODEL = "openai-codex/gpt-5.3-codex-spark"
 _env_model = os.environ.get("NEWS_RESEARCH_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip()
 MODEL = _env_model or OPENCLAW_BRAIN_MODEL
@@ -141,7 +142,12 @@ def esc(s: str) -> str:
 
 
 def hash_news(row: dict) -> str:
-    key = f"{row.get('published_at','')}|{row.get('source_url','')}|{row.get('title','')}"
+    published = row.get("published_at", "")
+    if isinstance(published, datetime):
+        pub_s = published.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        pub_s = _fmt_dt(published)
+    key = f"{pub_s}|{row.get('source_url','')}|{row.get('title','')}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
@@ -219,6 +225,52 @@ ADD COLUMN IF NOT EXISTS last_error String DEFAULT ''
 """,
         fmt_json=False,
     )
+    # queue table
+    queue_schema_candidates = [
+        os.path.expanduser("~/.openclaw/scripts/trading/schema_news_research_queue.sql"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema_news_research_queue.sql"),
+    ]
+    for schema_path in queue_schema_candidates:
+        if not os.path.exists(schema_path):
+            continue
+        with open(schema_path, "r", encoding="utf-8") as f:
+            ch_query(f.read(), fmt_json=False)
+        break
+    ch_query(
+        """
+ALTER TABLE trading.news_research_queue
+ADD COLUMN IF NOT EXISTS status LowCardinality(String) DEFAULT 'pending'
+""",
+        fmt_json=False,
+    )
+    ch_query(
+        """
+ALTER TABLE trading.news_research_queue
+ADD COLUMN IF NOT EXISTS retry_count UInt16 DEFAULT 0
+""",
+        fmt_json=False,
+    )
+    ch_query(
+        """
+ALTER TABLE trading.news_research_queue
+ADD COLUMN IF NOT EXISTS next_retry_at DateTime DEFAULT now()
+""",
+        fmt_json=False,
+    )
+    ch_query(
+        """
+ALTER TABLE trading.news_research_queue
+ADD COLUMN IF NOT EXISTS last_error String DEFAULT ''
+""",
+        fmt_json=False,
+    )
+    ch_query(
+        """
+ALTER TABLE trading.news_research_queue
+ADD COLUMN IF NOT EXISTS source LowCardinality(String) DEFAULT 'collect_news'
+""",
+        fmt_json=False,
+    )
 
 
 def insert_rows(rows: list[dict]):
@@ -256,65 +308,148 @@ def insert_rows(rows: list[dict]):
     return len(rows)
 
 
-def main():
-    ensure_schema()
+def _queue_insert_rows(rows: list[dict]) -> int:
+    if not rows:
+        return 0
+    vals = []
+    for r in rows:
+        tickers_sql = ",".join([f"'{esc(x)}'" for x in to_arr(r.get("tickers", []))])
+        vals.append(
+            "("
+            f"now(), '{esc(r['news_id'])}', toDateTime('{esc(_fmt_dt(r.get('published_at')))}'), "
+            f"'{esc(r.get('title',''))}', '{esc(r.get('summary',''))}', '{esc(r.get('source_url',''))}', "
+            f"{int(r.get('importance',1))}, '{esc(r.get('sentiment','neutral'))}', '{esc(r.get('impact_type','stock'))}', "
+            f"[{tickers_sql}], '{esc(r.get('status','pending'))}', {int(r.get('retry_count',0))}, "
+            f"toDateTime('{esc(_fmt_dt(r.get('next_retry_at')))}'), '{esc(r.get('last_error',''))}', "
+            f"'{esc(r.get('source','analyze_news_research'))}', now(), now()"
+            ")"
+        )
+    sql = """
+    INSERT INTO trading.news_research_queue
+    (enqueued_at, news_id, published_at, title, summary, source_url, importance, sentiment, impact_type, tickers,
+     status, retry_count, next_retry_at, last_error, source, updated_at, created_at)
+    VALUES
+    """ + ",".join(vals)
+    ch_query(sql, fmt_json=False)
+    return len(rows)
 
+
+def _seed_queue_from_news() -> int:
     rows = ch_query(f"""
         SELECT published_at, title, summary, source_url, importance, sentiment, impact_type, tickers
         FROM trading.news
         WHERE published_at > now() - INTERVAL {WINDOW_HOURS} HOUR
           AND importance >= 3
         ORDER BY importance DESC, published_at DESC
-        LIMIT {LIMIT}
+        LIMIT {max(LIMIT * 4, 40)}
     """)
-
     if not rows:
-        print("[news-research] no recent news")
+        return 0
+    out = []
+    for r in rows:
+        out.append({
+            "news_id": hash_news(r),
+            "published_at": r.get("published_at"),
+            "title": r.get("title", ""),
+            "summary": r.get("summary", ""),
+            "source_url": r.get("source_url", ""),
+            "importance": int(r.get("importance", 1) or 1),
+            "sentiment": r.get("sentiment", "neutral"),
+            "impact_type": r.get("impact_type", "stock"),
+            "tickers": r.get("tickers", []) if isinstance(r.get("tickers"), list) else [],
+            "status": "pending",
+            "retry_count": 0,
+            "next_retry_at": datetime.now(),
+            "last_error": "",
+            "source": "seed_from_news",
+        })
+    return _queue_insert_rows(out)
+
+
+def _load_queue_candidates() -> list[dict]:
+    return ch_query(f"""
+WITH latest AS (
+    SELECT
+        news_id,
+        argMax(published_at, updated_at) AS q_published_at,
+        argMax(title, updated_at) AS q_title,
+        argMax(summary, updated_at) AS q_summary,
+        argMax(source_url, updated_at) AS q_source_url,
+        argMax(importance, updated_at) AS q_importance,
+        argMax(sentiment, updated_at) AS q_sentiment,
+        argMax(impact_type, updated_at) AS q_impact_type,
+        argMax(tickers, updated_at) AS q_tickers,
+        argMax(status, updated_at) AS q_status,
+        argMax(retry_count, updated_at) AS q_retry_count,
+        argMax(next_retry_at, updated_at) AS q_next_retry_at
+    FROM trading.news_research_queue
+    WHERE published_at > now() - INTERVAL {QUEUE_LOOKBACK_HOURS} HOUR
+    GROUP BY news_id
+)
+SELECT
+    news_id,
+    q_published_at AS published_at,
+    q_title AS title,
+    q_summary AS summary,
+    q_source_url AS source_url,
+    q_importance AS importance,
+    q_sentiment AS sentiment,
+    q_impact_type AS impact_type,
+    q_tickers AS tickers,
+    q_status AS status,
+    q_retry_count AS retry_count,
+    q_next_retry_at AS next_retry_at
+FROM latest
+WHERE q_status IN ('pending','retry')
+  AND q_retry_count < {MAX_RETRY}
+  AND q_next_retry_at <= now()
+ORDER BY q_importance DESC, q_published_at DESC
+LIMIT {LIMIT}
+""")
+
+
+def _mark_queue(rows: list[dict], status: str, error: str = "", increment_retry: bool = False):
+    if not rows:
         return
-
-    existing = ch_query(f"""
-        SELECT
-            news_id,
-            argMax(status, created_at) AS status,
-            argMax(retry_count, created_at) AS retry_count,
-            argMax(next_retry_at, created_at) AS next_retry_at
-        FROM trading.news_research
-        WHERE published_at > now() - INTERVAL {WINDOW_HOURS + 72} HOUR
-        GROUP BY news_id
-    """)
-    existing_map = {}
-    for x in existing:
-        nid = str(x.get("news_id", "")).strip()
-        if not nid:
-            continue
-        existing_map[nid] = {
-            "status": str(x.get("status", "")).strip() or "ok",
-            "retry_count": int(x.get("retry_count", 0) or 0),
-            "next_retry_at": _parse_dt(x.get("next_retry_at")),
-        }
-
-    candidates = []
+    out = []
     now_dt = datetime.now()
     for r in rows:
-        nid = hash_news(r)
-        info = existing_map.get(nid)
-        if info and info.get("status") == "ok":
-            continue
-        if info:
-            rc = int(info.get("retry_count", 0) or 0)
-            nra = info.get("next_retry_at")
+        rc = int(r.get("retry_count", 0) or 0)
+        next_status = status
+        if increment_retry:
+            rc += 1
             if rc >= MAX_RETRY:
-                continue
-            if isinstance(nra, datetime) and now_dt < nra:
-                continue
-            r["retry_count"] = rc + 1
-        else:
-            r["retry_count"] = 0
-        r["news_id"] = nid
-        candidates.append(r)
+                next_status = "dead"
+        cool = RETRY_COOLDOWN_MINUTES * max(1, min(6, rc if rc > 0 else 1))
+        next_retry = now_dt if next_status in {"done", "processing"} else now_dt + timedelta(minutes=cool)
+        out.append({
+            "news_id": r.get("news_id", ""),
+            "published_at": r.get("published_at"),
+            "title": r.get("title", ""),
+            "summary": r.get("summary", ""),
+            "source_url": r.get("source_url", ""),
+            "importance": int(r.get("importance", 1) or 1),
+            "sentiment": r.get("sentiment", "neutral"),
+            "impact_type": r.get("impact_type", "stock"),
+            "tickers": r.get("tickers", []) if isinstance(r.get("tickers"), list) else [],
+            "status": next_status,
+            "retry_count": rc,
+            "next_retry_at": next_retry,
+            "last_error": error[:500] if error else "",
+            "source": "analyze_news_research",
+        })
+    _queue_insert_rows(out)
 
+
+def main():
+    ensure_schema()
+    candidates = _load_queue_candidates()
     if not candidates:
-        print("[news-research] no retryable candidates")
+        seeded = _seed_queue_from_news()
+        if seeded > 0:
+            candidates = _load_queue_candidates()
+    if not candidates:
+        print("[news-research] no queue candidates")
         return
 
     schema = {
@@ -349,6 +484,7 @@ def main():
     inserted = 0
     for i in range(0, len(candidates), BATCH):
         batch = candidates[i:i+BATCH]
+        _mark_queue(batch, status="processing", error="", increment_retry=False)
         lines = []
         for j, n in enumerate(batch, start=1):
             lines.append(
@@ -407,6 +543,7 @@ def main():
                 })
 
             inserted += insert_rows(out_rows)
+            _mark_queue(batch, status="done", error="", increment_retry=False)
             time.sleep(0.4)
         except Exception as e:
             print(f"[news-research] batch failed: {e}")
@@ -445,6 +582,7 @@ def main():
                     "last_error": str(e)[:500],
                 })
             inserted += insert_rows(fallback_rows)
+            _mark_queue(batch, status="retry", error=str(e), increment_retry=True)
 
     print(f"[news-research] inserted={inserted} model={MODEL} max_retry={MAX_RETRY} retry_cooldown_min={RETRY_COOLDOWN_MINUTES}")
 

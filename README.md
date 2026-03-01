@@ -68,6 +68,8 @@
 - `cluster_news.py`: 뉴스 클러스터링
 - `llm_relation_reasoner.py`: 연관 종목/관계 추론
 - `analyze_news_research.py`: 중요 뉴스 심층 연구 및 구조화 저장
+- `collect_news.py`가 중요 뉴스(`importance>=3`)를 `news_research_queue`에 enqueue한다.
+- `analyze_news_research.py`는 `news_research_queue`의 `pending/retry`를 dequeue해 비동기 심층 분석을 수행한다.
 - `analyze_news_research.py`는 비동기 강화 레이어로 운영하며, `status/retry_count/next_retry_at` 기반 재시도(backoff) 정책을 사용한다.
 - `status='ok'`인 레코드만 완료로 간주하고, `fallback/error`는 다음 주기 재분석 대상으로 유지한다.
 
@@ -227,6 +229,7 @@ python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45
 | `news_clusters` | 임베딩 기반 뉴스 클러스터 집계 | `cluster_news.py` | `prepare_gpt_prompt.py` |
 | `news_cluster_state` | 클러스터 상태(emerging/reinforcing 등) | `cluster_news.py` | `prepare_gpt_prompt.py`, `llm_relation_reasoner.py`, `stock_rag_report_api.py` |
 | `news_cluster_map` | 뉴스-클러스터 매핑 상세 | `cluster_news.py` | `stock_rag_report_api.py` |
+| `news_research_queue` | 심층 연구 비동기 작업 큐(`pending/retry/done/dead`) | `collect_news.py`, `analyze_news_research.py` | `analyze_news_research.py` |
 | `news_research` | 중요 뉴스 심층 연구 결과 저장(`status/retry/backoff` 포함) | `analyze_news_research.py` | 운영 분석/확장 로직 |
 
 ### 10-3. 연관성/관심종목 레이어

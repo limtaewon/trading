@@ -45,6 +45,10 @@ RECOVERABLE_OPENCLAW_ERROR_PATTERNS = (
     "session not found",
     "invalid session",
     "stale session",
+    "429",
+    "rate limit",
+    "too many requests",
+    "quota exceeded",
 )
 
 
@@ -89,9 +93,9 @@ def _normalize_fallback_model(model: str) -> str:
         return override
     m = (model or "").strip()
     if not m:
-        return "gpt-5"
+        return "gpt-5.3-codex"
     if "codex-spark" in m or m.startswith("openai-codex/"):
-        return "gpt-5"
+        return "gpt-5.3-codex"
     return m
 
 
