@@ -25,6 +25,7 @@ import logging
 import importlib.util
 from datetime import datetime
 from pathlib import Path
+from html import escape as html_escape
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env_bootstrap import bootstrap_openclaw_env
@@ -623,13 +624,19 @@ def main():
             raise RuntimeError("telegram_notify module not found")
         emoji = {"BULL_CALM": "🟢🌤", "BULL_VOL": "🟢⚡", "BEAR_CALM": "🔴🌤",
                  "BEAR_VOL": "🔴⚡", "SIDEWAYS": "⚪🔄"}.get(regime_label, "❓")
+        flags_txt = ", ".join(posture_flags) if posture_flags else "-"
+        safe_regime = html_escape(str(regime_label))
+        safe_flow = html_escape(str(flow_summary))
+        safe_posture = html_escape(str(posture))
+        safe_flags = html_escape(flags_txt)
+        safe_posture_text = html_escape(str(posture_text))
         notify(
-            f"{emoji} <b>시장 레짐: {regime_label}</b>\n"
+            f"{emoji} <b>시장 레짐: {safe_regime}</b>\n"
             f"KOSPI {kospi_close:,.0f} | KOSDAQ {kosdaq_close:,.0f} | VIX {vix_level:.1f}\n"
             f"USD/KRW {usdkrw_level:,.0f} | DXY {dxy_level:.1f}\n"
-            f"수급(최근 {int(flow_trend.get('n_days', 0) or 0)}일): {flow_summary}\n"
-            f"행동강도: {posture} ({', '.join(posture_flags) if posture_flags else '-'})\n"
-            f"→ {posture_text}"
+            f"수급(최근 {int(flow_trend.get('n_days', 0) or 0)}일): {safe_flow}\n"
+            f"행동강도: {safe_posture} ({safe_flags})\n"
+            f"→ {safe_posture_text}"
         )
     except Exception as e:
         log.warning(f"텔레그램 전송 실패: {e}")
