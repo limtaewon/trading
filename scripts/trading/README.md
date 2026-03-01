@@ -15,6 +15,7 @@
   저장은 append snapshot 방식(최신 ts 조회), `WATCHLIST_RETENTION_DAYS`(기본 21일)로 오래된 스냅샷 정리
   retention prune은 `WATCHLIST_RETENTION_PRUNE_MODE` (`daily` 기본, `always`, `off`)로 제어
   `WATCHLIST_ADAPTIVE_WEIGHTING=1` + `WATCHLIST_EVENT_RULE_FLOOR`로 이벤트 기반 종목 결손 보정
+  run 메타(`interest_watchlist_runs`)를 기록하고 decision은 최신 정상 run 기준으로 watchlist를 로드
 - Decision 운영 정책(실거래 정렬):
   universe는 `watchlist-only`로 강제(technical/feature fallback 미사용)
   watchlist 조회 source는 `WATCHLIST_ACTIVE_SOURCE`로 강제(기본: `enrich_data`)

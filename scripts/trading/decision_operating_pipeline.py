@@ -580,8 +580,43 @@ def load_universe(universe: str, limit: int) -> list[dict[str, str]]:
         for src in active_sources:
             safe_sources.append("'" + src.replace("\\", "\\\\").replace("'", "\\'") + "'")
         source_filter = f" AND source IN ({', '.join(safe_sources)})"
+    min_health_ratio = _clamp(_to_float(os.getenv("WATCHLIST_MIN_HEALTH_RATIO", "0.8"), 0.8), 0.1, 1.0)
+    min_health_pct = int(round(min_health_ratio * 100))
     if table_exists("interest_watchlist"):
         try:
+            # run 메타가 있으면 최신 "정상" 스냅샷(run_id)을 우선 채택
+            if table_exists("interest_watchlist_runs"):
+                rows = ch_select(
+                    f"""
+WITH latest_run AS (
+    SELECT run_id
+    FROM trading.interest_watchlist_runs
+    WHERE toDate(ts) >= today() - 3
+      {source_filter}
+      AND status = 'ok'
+      AND inserted_rows >= greatest(1, intDiv(greatest(limit_n, 1) * {min_health_pct}, 100))
+    ORDER BY ts DESC
+    LIMIT 1
+)
+SELECT
+    ticker,
+    anyLast(ticker_name) AS ticker_name,
+    min(toInt32(ifNull(rank, 0))) AS rank_ord,
+    max(toFloat64(ifNull(context_score, 0))) AS context_score
+FROM trading.interest_watchlist
+WHERE decision_id = (SELECT run_id FROM latest_run)
+  {source_filter}
+GROUP BY ticker
+HAVING match(ticker, '^[0-9]{{6}}$')
+ORDER BY rank_ord ASC, context_score DESC, ticker ASC
+LIMIT {lim}
+"""
+                )
+                out = [{"ticker": str(r.get("ticker", "")), "ticker_name": str(r.get("ticker_name", ""))} for r in rows]
+                out = [r for r in out if _is_ticker(r["ticker"])]
+                if out:
+                    return out
+
             rows = ch_select(
                 f"""
 WITH latest_ts AS (
@@ -595,8 +630,8 @@ WITH latest_ts AS (
 SELECT
     ticker,
     anyLast(ticker_name) AS ticker_name,
-    min(toInt32OrZero(rank)) AS rank_ord,
-    max(toFloat64OrZero(context_score)) AS context_score
+    min(toInt32(ifNull(rank, 0))) AS rank_ord,
+    max(toFloat64(ifNull(context_score, 0))) AS context_score
 FROM trading.interest_watchlist
 WHERE ts = (SELECT ts FROM latest_ts)
   {source_filter}

@@ -52,6 +52,11 @@ try:
 except Exception:
     WATCHLIST_EVENT_RULE_FLOOR_DEFAULT = 40.0
 WATCHLIST_EVENT_RULE_FLOOR_DEFAULT = max(0.0, min(100.0, WATCHLIST_EVENT_RULE_FLOOR_DEFAULT))
+try:
+    WATCHLIST_MIN_HEALTH_RATIO_DEFAULT = float(os.environ.get("WATCHLIST_MIN_HEALTH_RATIO", "0.8"))
+except Exception:
+    WATCHLIST_MIN_HEALTH_RATIO_DEFAULT = 0.8
+WATCHLIST_MIN_HEALTH_RATIO_DEFAULT = max(0.1, min(1.0, WATCHLIST_MIN_HEALTH_RATIO_DEFAULT))
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -255,10 +260,11 @@ def _candidate_rule_score(
     explain_ready = int(c.get("explain_ready", 0) or 0)
     tech_score = float(c.get("technical_score", 0.0) or 0.0)
     signal = str(c.get("signal", "") or "").strip()
+    news_cnt = int(c.get("news_cnt", 0) or 0)
     news_edge = int(c.get("news_pos", 0) or 0) - int(c.get("news_neg", 0) or 0)
 
     # 기술 결측/약세지만 이벤트 근거가 명확하면 최소 점수 바닥 부여
-    if explain_ready > 0 and (tech_score < 1.0 or signal == "") and news_edge >= 0:
+    if explain_ready > 0 and news_cnt >= 1 and news_edge >= 1 and (tech_score < 1.0 or signal == ""):
         return max(base, _clamp(event_rule_floor, 0.0, 100.0))
     return base
 
@@ -491,6 +497,67 @@ FROM trading.feature_snapshot
     except Exception:
         # 뷰 생성 실패 시에도 레거시 테이블 조회로 동작 가능
         pass
+
+
+def _sql_quote(v: Any) -> str:
+    s = str(v if v is not None else "")
+    s = s.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{s}'"
+
+
+def ensure_watchlist_run_table() -> None:
+    ch_execute(
+        """
+CREATE TABLE IF NOT EXISTS trading.interest_watchlist_runs
+(
+    run_id                String,
+    ts                    DateTime,
+    source                LowCardinality(String),
+    limit_n               UInt32,
+    candidate_pool        UInt32,
+    pool_selected         UInt32,
+    inserted_rows         UInt32,
+    min_expected_rows     UInt32,
+    llm_enabled           UInt8,
+    llm_rows              UInt32,
+    llm_error             String,
+    adaptive_weighting    UInt8,
+    event_rule_floor      Float32,
+    status                LowCardinality(String),
+    created_at            DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (ts, source, run_id)
+"""
+    )
+
+
+def insert_watchlist_run(row: dict[str, Any]) -> None:
+    sql = f"""
+INSERT INTO trading.interest_watchlist_runs
+(
+    run_id, ts, source, limit_n, candidate_pool, pool_selected, inserted_rows, min_expected_rows,
+    llm_enabled, llm_rows, llm_error, adaptive_weighting, event_rule_floor, status
+)
+VALUES
+(
+    {_sql_quote(row.get("run_id", ""))},
+    {_sql_quote(row.get("ts", ""))},
+    {_sql_quote(row.get("source", ""))},
+    {int(row.get("limit_n", 0) or 0)},
+    {int(row.get("candidate_pool", 0) or 0)},
+    {int(row.get("pool_selected", 0) or 0)},
+    {int(row.get("inserted_rows", 0) or 0)},
+    {int(row.get("min_expected_rows", 0) or 0)},
+    {1 if bool(row.get("llm_enabled", False)) else 0},
+    {int(row.get("llm_rows", 0) or 0)},
+    {_sql_quote(row.get("llm_error", ""))},
+    {1 if bool(row.get("adaptive_weighting", False)) else 0},
+    {float(row.get("event_rule_floor", 0.0) or 0.0)},
+    {_sql_quote(row.get("status", "unknown"))}
+)
+"""
+    ch_execute(sql)
 
 
 def ch_insert_sql(table: str, rows: list[dict[str, Any]]):
@@ -765,7 +832,7 @@ def load_candidates(limit: int):
         + least(ifNull(na.news_cnt,0),10) * 0.10
         + ifNull(hrs.total_relation_score,0) * 2
         + if(ifNull(fa.explain_ready_3d,0) > 0, 1.0, -0.4)
-        + if(ifNull(ts.rsi14, 50) BETWEEN 45 AND 65, 0.4, 0.0), 4) AS composite_score
+        + if(isNull(ts.rsi14), 0.0, if(ts.rsi14 BETWEEN 45 AND 65, 0.4, 0.0)), 4) AS composite_score
     FROM universe u
     LEFT JOIN tech_latest ts ON ts.ticker = u.ticker
     LEFT JOIN news_agg na ON na.ticker = u.ticker
@@ -803,6 +870,7 @@ def main() -> int:
     ap.add_argument("--retention-prune-mode", default=WATCHLIST_RETENTION_PRUNE_MODE_DEFAULT, choices=["daily", "always", "off"])
     ap.add_argument("--adaptive-weighting", choices=["on", "off"], default="on" if WATCHLIST_ADAPTIVE_WEIGHTING_DEFAULT else "off")
     ap.add_argument("--event-rule-floor", type=float, default=WATCHLIST_EVENT_RULE_FLOOR_DEFAULT)
+    ap.add_argument("--min-health-ratio", type=float, default=WATCHLIST_MIN_HEALTH_RATIO_DEFAULT)
     args = ap.parse_args()
 
     limit = max(1, int(args.limit))
@@ -816,6 +884,7 @@ def main() -> int:
     retention_prune_mode = str(args.retention_prune_mode or "daily").strip().lower()
     adaptive_weighting = str(args.adaptive_weighting).lower() == "on"
     event_rule_floor = _clamp(float(args.event_rule_floor), 0.0, 100.0)
+    min_health_ratio = _clamp(float(args.min_health_ratio), 0.1, 1.0)
     rule_w = max(0.0, float(args.rule_weight))
     llm_w = max(0.0, float(args.llm_weight))
     w_sum = rule_w + llm_w
@@ -826,6 +895,7 @@ def main() -> int:
 
     candidate_pool = max(limit, int(args.candidate_pool))
     ensure_feature_snapshot_view()
+    ensure_watchlist_run_table()
     rows = load_candidates(candidate_pool)
     if not rows:
         print("candidate 0, skip")
@@ -894,11 +964,15 @@ def main() -> int:
 
     for c in pool_rows:
         llm_item = llm_scores.get(c["ticker"])
-        llm_score = _clamp(float((llm_item or {}).get("llm_score", 50.0)), 0.0, 100.0)
+        llm_present = isinstance(llm_item, dict)
+        llm_score = _clamp(float((llm_item or {}).get("llm_score", 50.0)), 0.0, 100.0) if llm_present else 50.0
         rule_score_eff = _candidate_rule_score(c, event_rule_floor=event_rule_floor)
         rw_eff, lw_eff = _candidate_weights(c, rule_w=rule_w, llm_w=llm_w, adaptive=adaptive_weighting)
-        final_score = round(rw_eff * rule_score_eff + lw_eff * llm_score, 4)
+        if not llm_present:
+            rw_eff, lw_eff = 1.0, 0.0
+        final_score = round(_clamp(rule_score_eff + (lw_eff * (llm_score - 50.0)), 0.0, 100.0), 4)
         c["llm_item"] = llm_item
+        c["llm_present"] = llm_present
         c["llm_score"] = llm_score
         c["rule_score_effective"] = rule_score_eff
         c["rule_weight_effective"] = rw_eff
@@ -977,6 +1051,7 @@ def main() -> int:
                     "llm_weight": round(llm_w, 4),
                     "rule_weight_effective": round(float(c.get("rule_weight_effective", rule_w) or rule_w), 4),
                     "llm_weight_effective": round(float(c.get("llm_weight_effective", llm_w) or llm_w), 4),
+                    "llm_present": bool(c.get("llm_present", False)),
                     "adaptive_weighting": adaptive_weighting,
                 },
                 "llm_verdict": str(llm_item.get("verdict", "WATCH")),
@@ -1026,6 +1101,31 @@ def main() -> int:
         )
 
     n = ch_insert_sql("trading.interest_watchlist", out)
+    min_expected_rows = max(1, int(round(limit * min_health_ratio)))
+    run_status = "ok" if n >= min_expected_rows else "partial"
+    run_error = llm_error or "-"
+    try:
+        insert_watchlist_run(
+            {
+                "run_id": decision_id,
+                "ts": ts,
+                "source": source,
+                "limit_n": limit,
+                "candidate_pool": candidate_pool,
+                "pool_selected": len(pool_rows),
+                "inserted_rows": n,
+                "min_expected_rows": min_expected_rows,
+                "llm_enabled": llm_enabled,
+                "llm_rows": len(llm_scores),
+                "llm_error": run_error,
+                "adaptive_weighting": adaptive_weighting,
+                "event_rule_floor": event_rule_floor,
+                "status": run_status,
+            }
+        )
+    except Exception as e:
+        run_error = f"{run_error}|run_meta_failed:{type(e).__name__}"
+
     prune_info = "-"
     do_prune = False
     if retention_prune_mode == "always":
@@ -1066,9 +1166,10 @@ def main() -> int:
         "inserted_interest_watchlist="
         f"{n} llm_enabled={llm_enabled} llm_rows={len(llm_scores)} "
         f"candidate_pool={candidate_pool} pool_selected={len(pool_rows)} "
+        f"status={run_status} min_expected={min_expected_rows} "
         f"final_limit={limit} snapshot_mode=append adaptive={adaptive_weighting} "
         f"event_floor={event_rule_floor:.1f} prune_mode={retention_prune_mode} {prune_info} "
-        f"llm_error={llm_error or '-'}"
+        f"llm_error={run_error}"
     )
     return 0
 

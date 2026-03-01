@@ -129,6 +129,7 @@ bash scripts/ops/deploy_to_runtime.sh
 - watchlist 후보 유니버스는 `technical_signals ∪ news_tickers ∪ news_event_frame_tickers ∪ hidden_relation_tickers` 합집합으로 구성한다.
 - watchlist는 후보풀(`WATCHLIST_CANDIDATE_POOL`, 기본 200)에서 다중 버킷 합집합 선별 후 최종 저장(`--limit`, 기본 30)으로 확정한다.
 - 저장 방식은 `append snapshot`이며, 조회 시 최신 `ts`를 사용한다. 오래된 스냅샷은 `WATCHLIST_RETENTION_DAYS`(기본 21일) 기준으로 정리한다.
+- `interest_watchlist_runs` 메타 테이블에 run 상태(삽입행수/기준행수/오류)를 기록하고, decision은 최신 정상 run 기준으로 universe를 선택한다.
 - 기술: `technical_signals` (signal_score, RSI, BB, 거래량)
 - 뉴스: `news`, `news_event_frames` (pos/neg, 뉴스건수, explain_ready)
 - 연관: `hidden_relation_signals` (relation_score, bias, source_tickers/channels)
@@ -141,6 +142,7 @@ bash scripts/ops/deploy_to_runtime.sh
 - 최종 점수는 `rule_weight` + `llm_weight` 가중합으로 산출한다.
 - `WATCHLIST_ADAPTIVE_WEIGHTING=1`이면 기술 결손 + 이벤트 근거 종목에서 LLM 비중을 자동 확대한다.
 - `WATCHLIST_EVENT_RULE_FLOOR`(기본 40)로 explain_ready 기반 이벤트 종목 최소 점수 바닥을 적용한다.
+- LLM 점수 반영은 `rule_score + llm_weight_effective * (llm_score-50)` 형태로 적용해 중립값(50) 편향을 제거한다.
 - LLM 호출 실패 시 자동으로 룰 기반 점수만 사용한다.
 
 ### 11-2-1. 수급 스냅샷 보강 정책
