@@ -350,10 +350,26 @@ def read_text_file(path: str, max_chars: int = 12000) -> str:
 def get_regime() -> dict:
     """시장 레짐 조회."""
     rows = ch_query("""
-        SELECT regime_label, trend, volatility, risk_appetite, news_mood, summary
-        FROM trading.v_regime
+        SELECT
+          regime_label,
+          trend,
+          volatility,
+          risk_appetite,
+          news_mood,
+          summary,
+          ifNull(action_posture, 'normal') AS action_posture,
+          ifNull(arrayStringConcat(stress_flags, ', '), '') AS stress_flags,
+          ifNull(guide_text, '') AS guide_text
+        FROM trading.market_regime
+        ORDER BY date DESC, updated_at DESC
         LIMIT 1
     """)
+    if not rows:
+        rows = ch_query("""
+            SELECT regime_label, trend, volatility, risk_appetite, news_mood, summary
+            FROM trading.v_regime
+            LIMIT 1
+        """)
     if rows:
         return rows[0]
     return {
@@ -362,6 +378,9 @@ def get_regime() -> dict:
         "volatility": "unknown",
         "risk_appetite": "unknown",
         "news_mood": "unknown",
+        "action_posture": "normal",
+        "stress_flags": "",
+        "guide_text": "",
         "summary": "시장 레짐 데이터 없음 — ClickHouse 확인 필요",
     }
 
@@ -1425,6 +1444,9 @@ def build_prompt() -> str:
 ## 시장 레짐
 - 레짐: {regime.get('regime_label', 'UNKNOWN')} ({regime.get('trend', '?')}, 변동성: {regime.get('volatility', '?')})
 - 리스크 선호: {regime.get('risk_appetite', '?')}
+- 권장 행동강도: {regime.get('action_posture', 'normal')}
+- 스트레스 플래그: {regime.get('stress_flags', '-') or '-'}
+- 행동 가이드: {regime.get('guide_text', '-') or '-'}
 - 뉴스 분위기: {regime.get('news_mood', '?')}
 - 요약: {regime.get('summary', '정보 없음')}
 

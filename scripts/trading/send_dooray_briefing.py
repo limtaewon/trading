@@ -601,9 +601,15 @@ def build_message(urgent_context=None):
     """)
 
     regime = ch_query("""
-        SELECT date, regime_label, summary
-        FROM v_regime
-        ORDER BY date DESC
+        SELECT
+          date,
+          regime_label,
+          summary,
+          ifNull(action_posture, 'normal') AS action_posture,
+          ifNull(arrayStringConcat(stress_flags, ', '), '') AS stress_flags,
+          ifNull(guide_text, '') AS guide_text
+        FROM market_regime
+        ORDER BY date DESC, updated_at DESC
         LIMIT 1
     """)
 
@@ -669,6 +675,13 @@ def build_message(urgent_context=None):
     if regime:
         r = regime[0]
         lines.append(f"- 레짐: {r.get('regime_label','-')}")
+        lines.append(f"- 행동강도: {r.get('action_posture','normal')}")
+        flags = str(r.get("stress_flags", "") or "").strip()
+        if flags:
+            lines.append(f"- 스트레스 플래그: {flags}")
+        guide_text = str(r.get("guide_text", "") or "").strip()
+        if guide_text:
+            lines.append(f"- 행동 가이드: {guide_text}")
 
     lines.append("")
     lines.append("🚀 유망주 요약")

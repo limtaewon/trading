@@ -453,6 +453,9 @@ def load_market_regime() -> dict[str, Any]:
       trend,
       volatility,
       risk_appetite,
+      ifNull(action_posture, 'normal') AS action_posture,
+      ifNull(arrayStringConcat(stress_flags, ', '), '') AS stress_flags,
+      ifNull(guide_text, '') AS guide_text,
       summary,
       kospi_close,
       kosdaq_close,
@@ -700,10 +703,18 @@ def format_regime_line(regime: dict[str, Any]) -> str:
         return "regime unknown"
     s = normalize_text(regime.get("summary", ""), POSITION_MANAGER_MARKET_VIEW_MAX_CHARS)
     if s:
+        posture = normalize_text(regime.get("action_posture", ""), 24)
+        flags = normalize_text(regime.get("stress_flags", ""), 120)
+        if posture:
+            if flags:
+                return f"{s} | posture={posture} | flags={flags}"
+            return f"{s} | posture={posture}"
         return s
     return (
         f"{regime.get('regime_label', 'UNKNOWN')} | trend={regime.get('trend', '?')} | "
-        f"vol={regime.get('volatility', '?')} | risk={regime.get('risk_appetite', '?')}"
+        f"vol={regime.get('volatility', '?')} | risk={regime.get('risk_appetite', '?')} | "
+        f"posture={regime.get('action_posture', 'normal')} | "
+        f"flags={regime.get('stress_flags', '-') or '-'}"
     )
 
 

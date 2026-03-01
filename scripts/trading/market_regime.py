@@ -461,18 +461,34 @@ def save_regime(data: dict) -> bool:
     except Exception as e:
         log.warning(f"기존 데이터 삭제 실패 (무시하고 진행): {e}")
 
+    # posture 확장 컬럼(호환성) 보장
+    for alter_sql in (
+        "ALTER TABLE trading.market_regime ADD COLUMN IF NOT EXISTS action_posture LowCardinality(String) DEFAULT 'normal'",
+        "ALTER TABLE trading.market_regime ADD COLUMN IF NOT EXISTS stress_flags Array(String) DEFAULT []",
+        "ALTER TABLE trading.market_regime ADD COLUMN IF NOT EXISTS guide_text String DEFAULT ''",
+    ):
+        try:
+            _r = requests.post(CLICKHOUSE_URL, data=alter_sql.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
+            _r.raise_for_status()
+        except Exception:
+            # 컬럼 생성 실패는 비치명(기존 스키마로 저장 시도)
+            pass
+
+    flags = data.get("stress_flags", []) if isinstance(data.get("stress_flags", []), list) else []
+    flags_sql = "[" + ", ".join("'" + str(x).replace("\\", "\\\\").replace("'", "\\'") + "'" for x in flags) + "]"
+
     sql = (
         f"INSERT INTO trading.market_regime "
         f"(date, kospi_close, kospi_change_pct, kospi_ma20, "
         f"kosdaq_close, kosdaq_change_pct, vix_level, dxy_level, usdkrw, "
         f"trend, volatility, risk_appetite, regime_label, "
         f"news_positive, news_negative, news_neutral, news_mood, "
-        f"summary, updated_at) VALUES "
+        f"summary, action_posture, stress_flags, guide_text, updated_at) VALUES "
         f"('{data['date']}', {data['kospi_close']}, {data['kospi_change_pct']}, {data['kospi_ma20']}, "
         f"{data['kosdaq_close']}, {data['kosdaq_change_pct']}, {data['vix']}, {data['dxy']}, {data['usdkrw']}, "
         f"'{esc(data['trend'])}', '{esc(data['volatility'])}', '{esc(data['appetite'])}', '{esc(data['regime'])}', "
         f"{data['news_pos']}, {data['news_neg']}, {data['news_neu']}, '{esc(data['news_mood'])}', "
-        f"'{esc(data['summary'])}', now())"
+        f"'{esc(data['summary'])}', '{esc(data.get('action_posture', 'normal'))}', {flags_sql}, '{esc(data.get('guide_text', ''))}', now())"
     )
     try:
         resp = requests.post(CLICKHOUSE_URL, data=sql.encode("utf-8"), timeout=10, auth=CLICKHOUSE_AUTH)
@@ -564,6 +580,25 @@ def main():
     log.info(f"  요약:     {summary}")
     log.info("-" * 60)
 
+    # 매매 가이드라인 출력 (레짐 라벨 + 행동강도 분리)
+    guide = {
+        "BULL_CALM": "추세 우호. 선별 매수 검토.",
+        "BULL_VOL": "분할 매수. 변동성 주의, 포지션 축소 고려.",
+        "BEAR_CALM": "관망 또는 방어적 포지션. 현금 비중 확대.",
+        "BEAR_VOL": "신규 매수 금지. 손절 규율 엄격 적용.",
+        "SIDEWAYS": "박스권 하단 매수, 상단 매도. 단기 트레이딩.",
+    }
+    posture_guide = {
+        "aggressive": "공격적 집행 가능(분할 진입 권장)",
+        "normal": "표준 집행(추격보다 확인매수)",
+        "cautious": "감속 집행(사이즈 축소·분할·확인 우선)",
+        "defensive": "방어 모드(신규매수 최소화/보류)",
+    }
+    guide_text = guide.get(regime_label, "중립적 접근")
+    posture_text = posture_guide.get(posture, "중립 집행")
+    if posture_flags:
+        guide_text = f"{guide_text} 단, 스트레스 신호({', '.join(posture_flags)})로 감속."
+
     # 4) 저장
     data = {
         "date": today_str,
@@ -584,6 +619,9 @@ def main():
         "news_neu": news_sentiment["neutral"],
         "news_mood": news_mood,
         "summary": summary,
+        "action_posture": posture,
+        "stress_flags": posture_flags,
+        "guide_text": posture_text,
     }
 
     if save_regime(data):
@@ -594,24 +632,6 @@ def main():
     elapsed = time.time() - start
     log.info("=" * 60)
 
-    # 매매 가이드라인 출력 (레짐 라벨 + 행동강도 분리)
-    guide = {
-        "BULL_CALM": "추세 우호. 선별 매수 검토.",
-        "BULL_VOL": "분할 매수. 변동성 주의, 포지션 축소 고려.",
-        "BEAR_CALM": "관망 또는 방어적 포지션. 현금 비중 확대.",
-        "BEAR_VOL": "신규 매수 금지. 손절 규율 엄격 적용.",
-        "SIDEWAYS": "박스권 하단 매수, 상단 매도. 단기 트레이딩.",
-    }
-    posture_guide = {
-        "aggressive": "공격적 집행 가능(분할 진입 권장)",
-        "normal": "표준 집행(추격보다 확인매수)",
-        "cautious": "감속 집행(사이즈 축소·분할·확인 우선)",
-        "defensive": "방어 모드(신규매수 최소화/보류)",
-    }
-    guide_text = guide.get(regime_label, "중립적 접근")
-    posture_text = posture_guide.get(posture, "중립 집행")
-    if posture_flags:
-        guide_text = f"{guide_text} 단, 스트레스 신호({', '.join(posture_flags)})로 감속."
     log.info(f"  가이드(레짐): {guide_text}")
     log.info(f"  가이드(행동): {posture_text}")
     log.info(f"  완료 ({elapsed:.1f}초)")

@@ -428,6 +428,8 @@ class Stage1Result:
     score: float
     passed_for_buy: bool
     hard_riskoff: bool
+    action_posture: str
+    stress_flags: str
 
 
 def _pct_change_from_rows(rows: list[dict[str, Any]], key: str, span: int) -> float:
@@ -445,12 +447,16 @@ def compute_stage1() -> Stage1Result:
     volatility = "normal"
     risk_appetite = "neutral"
     vix_level = 0.0
+    action_posture = "normal"
+    stress_flags = ""
 
     if table_exists("market_regime"):
         try:
             rows = ch_select(
                 """
-SELECT trend, volatility, risk_appetite, vix_level
+SELECT trend, volatility, risk_appetite, vix_level,
+       ifNull(action_posture, 'normal') AS action_posture,
+       ifNull(arrayStringConcat(stress_flags, ', '), '') AS stress_flags
 FROM trading.market_regime
 ORDER BY date DESC
 LIMIT 1
@@ -462,6 +468,8 @@ LIMIT 1
                 volatility = str(r.get("volatility", "normal") or "normal").lower()
                 risk_appetite = str(r.get("risk_appetite", "neutral") or "neutral").lower()
                 vix_level = _to_float(r.get("vix_level"), 0.0)
+                action_posture = str(r.get("action_posture", "normal") or "normal").lower()
+                stress_flags = str(r.get("stress_flags", "") or "").strip()
         except Exception:
             pass
 
@@ -559,13 +567,28 @@ LIMIT 8
         appetite_bonus = -5.0
 
     score = _clamp(trend_score + vol_score + fx_score + rates_score + appetite_bonus, 0, 100)
+    if action_posture == "aggressive":
+        score = _clamp(score + 3.0, 0, 100)
+    elif action_posture == "cautious":
+        score = _clamp(score - 8.0, 0, 100)
+    elif action_posture == "defensive":
+        score = _clamp(score - 15.0, 0, 100)
+
     hard_riskoff = bool(
         (vix_level > 35 and vix_level > 0)
         or (usdkrw_3d > 2.0)
         or (kospi_5d < -3.5)
     )
+    if action_posture == "defensive":
+        hard_riskoff = True
     passed = score >= 55 and not hard_riskoff
-    return Stage1Result(score=float(round(score, 2)), passed_for_buy=passed, hard_riskoff=hard_riskoff)
+    return Stage1Result(
+        score=float(round(score, 2)),
+        passed_for_buy=passed,
+        hard_riskoff=hard_riskoff,
+        action_posture=action_posture,
+        stress_flags=stress_flags,
+    )
 
 
 def load_universe(universe: str, limit: int) -> list[dict[str, str]]:
@@ -1732,6 +1755,13 @@ def main() -> int:
             "stage3_gate_enabled": False,
             "stage4_gate_enabled": False,
             "rsi_overheat_block_enabled": rsi_overheat_block_enabled,
+        },
+        "stage1": {
+            "score": round(stage1.score, 2),
+            "pass_for_buy": bool(stage1.passed_for_buy),
+            "hard_riskoff": bool(stage1.hard_riskoff),
+            "action_posture": stage1.action_posture,
+            "stress_flags": stage1.stress_flags,
         },
         "stage2": {
             "market_score": round(market_stage2.score, 2),
