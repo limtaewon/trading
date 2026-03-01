@@ -11,7 +11,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장 시작 10분 전이다. mcp-clickhouse로 오늘 수집된 뉴스를 조회해라(run_select_query: SELECT title, summary, sentiment, importance, tickers FROM trading.news WHERE published_at >= today() ORDER BY importance DESC LIMIT 20). kis-trading으로 잔고를 확인하고, 뉴스와 시장 상황을 종합해서 오늘의 매매 전략과 관심종목 리스트를 텔레그램으로 보고해라."
+        "text": "정기 장전 systemEvent 실행. watchlist 기반 데이터와 하드룰을 적용해 매매 판단을 수행하고, 조건 충족 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -24,7 +24,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장 시작 30분 경과. HEARTBEAT.md 프로토콜 전체를 수행해라. mcp-clickhouse로 최근 1시간 뉴스 확인, kis-trading으로 잔고/시세/호가 조회, 분석 후 매매 판단하고 실행까지 해라."
+        "text": "정기 장중 systemEvent 실행. watchlist 기반 데이터로 판단하고 execute_gpt_orders 하드룰을 통과한 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -37,7 +37,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행. 보유종목 수익률 점검, 뉴스 확인, 필요시 매매 실행."
+        "text": "정기 장중 systemEvent 실행. watchlist 기반 데이터로 판단하고 execute_gpt_orders 하드룰을 통과한 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -50,7 +50,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행. 보유종목 수익률 점검하고 필요시 매매 실행."
+        "text": "정기 장중 systemEvent 실행. watchlist 기반 데이터로 판단하고 execute_gpt_orders 하드룰을 통과한 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -63,7 +63,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행. mcp-clickhouse로 뉴스 변동사항 확인하고 필요시 매매 실행."
+        "text": "정기 장중 systemEvent 실행. watchlist 기반 데이터로 판단하고 execute_gpt_orders 하드룰을 통과한 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -76,7 +76,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행."
+        "text": "정기 장중 systemEvent 실행. watchlist 기반 데이터로 판단하고 execute_gpt_orders 하드룰을 통과한 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -89,7 +89,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "오후장 시작. HEARTBEAT.md 프로토콜대로 실행. 오전 매매 결과 점검, mcp-clickhouse로 오후 뉴스 확인, 오후 전략 재수립 후 필요시 매매 실행."
+        "text": "정기 장중 systemEvent 실행. watchlist 기반 데이터로 판단하고 execute_gpt_orders 하드룰을 통과한 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -102,7 +102,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행."
+        "text": "정기 장중 systemEvent 실행. watchlist 기반 데이터로 판단하고 execute_gpt_orders 하드룰을 통과한 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -115,7 +115,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장중 정기 점검. HEARTBEAT.md 프로토콜대로 실행."
+        "text": "정기 장중 systemEvent 실행. watchlist 기반 데이터로 판단하고 execute_gpt_orders 하드룰을 통과한 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -128,7 +128,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장 마감 1시간 전. HEARTBEAT.md 프로토콜대로 실행. 포지션 정리 검토."
+        "text": "장 마감 전 systemEvent 실행. 신규 진입은 보수적으로 처리하고 기존 포지션 리스크 점검/정리 우선으로 판단한다."
       },
       "source": "openclaw-jobs"
     },
@@ -141,7 +141,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장 마감 30분 전. HEARTBEAT.md 프로토콜대로 최종 점검. 신규 매수 금지. 보유종목 중 정리할 것 있으면 매도 실행."
+        "text": "장 마감 전 systemEvent 실행. 신규 진입은 보수적으로 처리하고 기존 포지션 리스크 점검/정리 우선으로 판단한다."
       },
       "source": "openclaw-jobs"
     },
@@ -154,7 +154,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "장 마감. kis-trading으로 잔고 조회하고 오늘 매매 내역, 보유종목 수익률, 총자산 변동, 실현손익을 정리해서 텔레그램으로 리포트 보내라. 내일 관심종목과 전략도 간단히 정리."
+        "text": "장 마감 systemEvent 실행. 당일 결과를 반영해 리스크 점검과 다음 세션 준비 관점으로 판단한다. 주문은 하드룰 통과 시에만 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -167,7 +167,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "주간 리뷰. kis-trading으로 잔고 조회, mcp-clickhouse로 이번 주 뉴스 분석. 주간 매매 내역, 수익률, 최고/최저 종목, 잘한 점과 개선점을 분석해서 텔레그램으로 보내라. 다음 주 전략도 제시."
+        "text": "주간 점검 systemEvent 실행. 성과/리스크 리뷰 관점으로 판단하며, 비정상 신호가 없으면 보수적으로 유지한다."
       },
       "source": "openclaw-jobs"
     },
@@ -232,7 +232,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "긴급 뉴스 트리거가 발생했다. ~/.openclaw/state/news_urgent_context.json 내용을 최우선으로 반영해 HEARTBEAT.md 프로토콜을 수행하라. 보유종목 리스크(특히 즉시 매도 필요 여부)를 우선 판단하고, 필요 시 SELL을 orders에 포함해라. 신규 매수는 과도하게 하지 말고 룰을 준수하며 확신(confidence) 높은 경우에만 제한적으로."
+        "text": "긴급 뉴스 트리거 systemEvent 실행. ~/.openclaw/state/news_urgent_context.json을 최우선 반영해 보유종목 리스크를 먼저 판단하고, 필요 시 방어적 조치를 우선 실행한다."
       },
       "source": "openclaw-jobs"
     },
@@ -284,7 +284,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "리마인더: 두레이 브리핑 전송(장중 1시간 주기). 명령: `set -a; source ~/.openclaw/.env.trading; set +a; python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py` . 브리핑에는 최신 저장 지수/환율, 유망주(종목코드/섹터/유망 이유), 관련 뉴스 요약, 최근 속보를 포함하고 매매 체결/잔고 데이터는 제외하라. 실패 시 에러 요약만 텔레그램으로 보고."
+        "text": "브리핑 전용 systemEvent 실행. 보고 목적이며 거래 실행은 보수적으로 처리한다. 확신이 낮으면 orders는 빈 배열로 반환한다."
       },
       "source": "openclaw-jobs"
     },
@@ -297,7 +297,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "리마인더: 속보 트리거용 두레이 브리핑 전송을 실행하라. 명령: `set -a; source ~/.openclaw/.env.trading; set +a; python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py` . 새 중요 속보/브리핑 내용 변화가 있을 때만 두레이로 전송(중복은 스킵). 실패 시 에러 요약만 텔레그램으로 보고."
+        "text": "브리핑 전용 systemEvent 실행. 보고 목적이며 거래 실행은 보수적으로 처리한다. 확신이 낮으면 orders는 빈 배열로 반환한다."
       },
       "source": "openclaw-jobs"
     },
@@ -310,7 +310,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "리마인더: 뉴스 수집 직후 주요뉴스 브리핑 전송. 명령: `set -a; source ~/.openclaw/.env.trading; set +a; python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py` . 주요뉴스(importance 3+)와 최근 속보를 포함해 두레이로 전송하되, 중복이면 스킵."
+        "text": "브리핑 전용 systemEvent 실행. 보고 목적이며 거래 실행은 보수적으로 처리한다. 확신이 낮으면 orders는 빈 배열로 반환한다."
       },
       "source": "openclaw-jobs"
     },
@@ -323,7 +323,7 @@
       },
       "payload": {
         "kind": "systemEvent",
-        "text": "리마인더: 장중 10분 주기 매매판단 실행. HEARTBEAT.md 프로토콜(0.5~6단계)을 엄격히 수행하라. 뉴스 감정(종목별 pos/neg) + 기술지표 + KIS 실시간(잔고/미체결/호가)을 함께 검증해 판단하고, 규칙 위반 주문은 금지한다. 실행 순서: 1) 미체결 점검(30분 초과 재평가) 2) 보유종목 리스크 점검 3) 신규 후보 선별(뉴스+기술 동시 충족만) 4) 필요시 주문 실행(SELL 우선) 5) 자기평가+뉴스 인사이트 보고. 데이터/판단/주문 결과는 사실값만 보고하고 추정 문장 금지."
+        "text": "장중 10분 주기 systemEvent 실행. watchlist 기반 데이터와 하드룰 기준으로 판단하며, 조건 충족 주문만 실행한다."
       },
       "source": "openclaw-jobs"
     },
