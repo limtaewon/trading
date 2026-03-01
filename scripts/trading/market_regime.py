@@ -22,7 +22,9 @@ import sys
 import json
 import time
 import logging
+import importlib.util
 from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env_bootstrap import bootstrap_openclaw_env
@@ -49,6 +51,26 @@ if not CLICKHOUSE_URL:
 CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "").strip()
 CLICKHOUSE_PASS = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
 CLICKHOUSE_AUTH = (CLICKHOUSE_USER, CLICKHOUSE_PASS) if CLICKHOUSE_USER else None
+
+
+def _load_notify():
+    candidates = [
+        Path(__file__).resolve().parent / "telegram_notify.py",
+        Path(__file__).resolve().parent.parent / "telegram_notify.py",
+        Path.home() / ".openclaw" / "scripts" / "telegram_notify.py",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        spec = importlib.util.spec_from_file_location("telegram_notify", path)
+        if not spec or not spec.loader:
+            continue
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        notify = getattr(mod, "notify", None)
+        if callable(notify):
+            return notify
+    return None
 
 
 def ch_query(query: str) -> str | None:
@@ -596,7 +618,9 @@ def main():
 
     # 텔레그램 알림
     try:
-        from telegram_notify import notify
+        notify = _load_notify()
+        if not notify:
+            raise RuntimeError("telegram_notify module not found")
         emoji = {"BULL_CALM": "🟢🌤", "BULL_VOL": "🟢⚡", "BEAR_CALM": "🔴🌤",
                  "BEAR_VOL": "🔴⚡", "SIDEWAYS": "⚪🔄"}.get(regime_label, "❓")
         notify(
