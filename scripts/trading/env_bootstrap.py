@@ -69,5 +69,13 @@ def bootstrap_openclaw_env(override: bool = False) -> int:
             continue
         seen.add(rp)
         total += _load_env_file(p, override=override)
-    return total
 
+    # Normalize ClickHouse auth aliases across legacy scripts.
+    ch_pass = os.environ.get("CLICKHOUSE_PASS", "")
+    ch_password = os.environ.get("CLICKHOUSE_PASSWORD", "")
+    if ch_pass and not ch_password:
+        os.environ["CLICKHOUSE_PASSWORD"] = ch_pass
+    elif ch_password and not ch_pass:
+        os.environ["CLICKHOUSE_PASS"] = ch_password
+
+    return total
