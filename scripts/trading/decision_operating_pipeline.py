@@ -572,6 +572,14 @@ def load_universe(universe: str, limit: int) -> list[dict[str, str]]:
     lim = max(1, int(limit))
     if universe != "watchlist":
         _log(f"universe={universe} 요청 감지: decision 유니버스는 watchlist로 강제합니다")
+    active_source_raw = os.getenv("WATCHLIST_ACTIVE_SOURCE", "enrich_data").strip()
+    active_sources = [s.strip() for s in active_source_raw.split(",") if s.strip()]
+    source_filter = ""
+    if active_sources:
+        safe_sources = []
+        for src in active_sources:
+            safe_sources.append("'" + src.replace("\\", "\\\\").replace("'", "\\'") + "'")
+        source_filter = f" AND source IN ({', '.join(safe_sources)})"
     if table_exists("interest_watchlist"):
         try:
             rows = ch_select(
@@ -582,6 +590,7 @@ SELECT
     max(ts) AS ts_max
 FROM trading.interest_watchlist
 WHERE toDate(ts) >= today() - 3
+  {source_filter}
 GROUP BY ticker
 HAVING match(ticker, '^[0-9]{{6}}$')
 ORDER BY ts_max DESC
@@ -592,6 +601,8 @@ LIMIT {lim}
             out = [r for r in out if _is_ticker(r["ticker"])]
             if out:
                 return out
+            if active_sources:
+                _log(f"interest_watchlist source 필터({','.join(active_sources)}) 결과가 비어있음")
         except Exception:
             pass
     _log("interest_watchlist 데이터가 없어 후보를 비웁니다(technical/feature fallback 비활성)")
@@ -1674,6 +1685,7 @@ def main() -> int:
             "buy_threshold": mode_cfg["buy_threshold"],
             "stage2_min": mode_cfg["stage2_min"],
             "universe_forced_watchlist": True,
+            "watchlist_active_source": os.getenv("WATCHLIST_ACTIVE_SOURCE", "enrich_data"),
             "stage2_extreme_only_block": True,
             "stage3_gate_enabled": False,
             "stage4_gate_enabled": False,

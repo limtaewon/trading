@@ -11,6 +11,7 @@
   enrich_data.sh -> refresh_interest_watchlist.py -> decision_operating_pipeline.py
 - Decision 운영 정책(실거래 정렬):
   universe는 `watchlist-only`로 강제(technical/feature fallback 미사용)
+  watchlist 조회 source는 `WATCHLIST_ACTIVE_SOURCE`로 강제(기본: `enrich_data`)
   하드게이트는 Stage0/Stage1/Stage2(EXTREME shock만)/Stage5
   Stage3/Stage4는 총점/설명용 보조지표로 사용(하드 차단 아님)
 - Stage2 수급 분모 정책:

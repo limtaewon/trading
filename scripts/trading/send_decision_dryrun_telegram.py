@@ -1012,8 +1012,10 @@ GROUP BY cluster_id
     stage2_extreme_only = bool(mode_debug.get("stage2_extreme_only_block", True))
     stage3_gate = bool(mode_debug.get("stage3_gate_enabled", False))
     stage4_gate = bool(mode_debug.get("stage4_gate_enabled", False))
+    watchlist_source = str(mode_debug.get("watchlist_active_source") or "enrich_data")
     policy_parts = [
         f"universe={'watchlist-only' if universe_forced else 'configured'}",
+        f"watchlist_source={watchlist_source}",
         f"stage2_block={'EXTREME-only' if stage2_extreme_only else 'score+shock'}",
         f"stage3_gate={'ON' if stage3_gate else 'OFF'}",
         f"stage4_gate={'ON' if stage4_gate else 'OFF'}",
