@@ -13,6 +13,8 @@
   후보 유니버스는 `technical_signals ∪ news ∪ news_event_frames ∪ hidden_relation_signals` 합집합
   candidate_pool(기본 200) 다중 버킷 선별 후 최종 limit(기본 30)만 저장
   저장은 append snapshot 방식(최신 ts 조회), `WATCHLIST_RETENTION_DAYS`(기본 21일)로 오래된 스냅샷 정리
+  retention prune은 `WATCHLIST_RETENTION_PRUNE_MODE` (`daily` 기본, `always`, `off`)로 제어
+  `WATCHLIST_ADAPTIVE_WEIGHTING=1` + `WATCHLIST_EVENT_RULE_FLOOR`로 이벤트 기반 종목 결손 보정
 - Decision 운영 정책(실거래 정렬):
   universe는 `watchlist-only`로 강제(technical/feature fallback 미사용)
   watchlist 조회 source는 `WATCHLIST_ACTIVE_SOURCE`로 강제(기본: `enrich_data`)

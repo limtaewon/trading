@@ -45,6 +45,13 @@ LLM_MODEL_DEFAULT = os.environ.get("WATCHLIST_LLM_MODEL", os.environ.get("CODEX_
 LLM_MAX_ITEMS_DEFAULT = max(5, int(os.environ.get("WATCHLIST_LLM_MAX_ITEMS", "30")))
 CANDIDATE_POOL_DEFAULT = max(30, int(os.environ.get("WATCHLIST_CANDIDATE_POOL", "200")))
 WATCHLIST_RETENTION_DAYS_DEFAULT = max(7, int(os.environ.get("WATCHLIST_RETENTION_DAYS", "21")))
+WATCHLIST_RETENTION_PRUNE_MODE_DEFAULT = os.environ.get("WATCHLIST_RETENTION_PRUNE_MODE", "daily").strip().lower()
+WATCHLIST_ADAPTIVE_WEIGHTING_DEFAULT = os.environ.get("WATCHLIST_ADAPTIVE_WEIGHTING", "1").strip() == "1"
+try:
+    WATCHLIST_EVENT_RULE_FLOOR_DEFAULT = float(os.environ.get("WATCHLIST_EVENT_RULE_FLOOR", "40"))
+except Exception:
+    WATCHLIST_EVENT_RULE_FLOOR_DEFAULT = 40.0
+WATCHLIST_EVENT_RULE_FLOOR_DEFAULT = max(0.0, min(100.0, WATCHLIST_EVENT_RULE_FLOOR_DEFAULT))
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -202,6 +209,58 @@ def _select_llm_input(pool_rows: list[dict[str, Any]], llm_max_items: int) -> li
         if len(selected) >= max_items:
             break
     return selected
+
+
+def _candidate_weights(
+    c: dict[str, Any],
+    rule_w: float,
+    llm_w: float,
+    adaptive: bool,
+) -> tuple[float, float]:
+    """데이터 커버리지 결손 시 LLM 비중을 자동 확대."""
+    rw = _clamp(float(rule_w), 0.0, 1.0)
+    lw = _clamp(float(llm_w), 0.0, 1.0)
+    if not adaptive or lw <= 0:
+        return rw, lw
+
+    tech_score = float(c.get("technical_score", 0.0) or 0.0)
+    signal = str(c.get("signal", "") or "").strip()
+    explain_ready = int(c.get("explain_ready", 0) or 0)
+    news_edge = int(c.get("news_pos", 0) or 0) - int(c.get("news_neg", 0) or 0)
+    rel_abs = abs(float(c.get("relation_score", 0.0) or 0.0))
+
+    tech_missing = tech_score <= 0.01 and signal == ""
+    llm_target = lw
+    if tech_missing and (explain_ready > 0 or news_edge >= 2):
+        llm_target = max(llm_target, 0.55)
+    elif tech_score < 1.0 and explain_ready > 0:
+        llm_target = max(llm_target, 0.45)
+    elif tech_score < 1.5 and explain_ready > 0 and rel_abs >= 3.0:
+        llm_target = max(llm_target, 0.40)
+
+    llm_target = _clamp(llm_target, 0.0, 0.8)
+    rule_target = _clamp(1.0 - llm_target, 0.2, 1.0)
+    s = rule_target + llm_target
+    if s <= 0:
+        return rw, lw
+    return rule_target / s, llm_target / s
+
+
+def _candidate_rule_score(
+    c: dict[str, Any],
+    event_rule_floor: float,
+) -> float:
+    """뉴스/이벤트 기반 신규 종목이 완전히 밀리지 않도록 floor 적용."""
+    base = _clamp(float(c.get("rule_score_100", 0.0) or 0.0), 0.0, 100.0)
+    explain_ready = int(c.get("explain_ready", 0) or 0)
+    tech_score = float(c.get("technical_score", 0.0) or 0.0)
+    signal = str(c.get("signal", "") or "").strip()
+    news_edge = int(c.get("news_pos", 0) or 0) - int(c.get("news_neg", 0) or 0)
+
+    # 기술 결측/약세지만 이벤트 근거가 명확하면 최소 점수 바닥 부여
+    if explain_ready > 0 and (tech_score < 1.0 or signal == "") and news_edge >= 0:
+        return max(base, _clamp(event_rule_floor, 0.0, 100.0))
+    return base
 
 
 def _extract_json_obj(raw: str) -> dict[str, Any] | None:
@@ -550,6 +609,8 @@ def load_candidates(limit: int):
           change_pct
         FROM trading.technical_signals
         WHERE date = (SELECT d FROM latest_date)
+          AND length(ticker) = 6
+          AND match(ticker, '^[0-9]{6}$')
       ),
       news_tickers AS (
         SELECT DISTINCT ticker
@@ -709,6 +770,9 @@ def main() -> int:
     ap.add_argument("--llm-weight", type=float, default=LLM_WEIGHT_DEFAULT)
     ap.add_argument("--llm-max-items", type=int, default=LLM_MAX_ITEMS_DEFAULT)
     ap.add_argument("--retention-days", type=int, default=WATCHLIST_RETENTION_DAYS_DEFAULT)
+    ap.add_argument("--retention-prune-mode", default=WATCHLIST_RETENTION_PRUNE_MODE_DEFAULT, choices=["daily", "always", "off"])
+    ap.add_argument("--adaptive-weighting", choices=["on", "off"], default="on" if WATCHLIST_ADAPTIVE_WEIGHTING_DEFAULT else "off")
+    ap.add_argument("--event-rule-floor", type=float, default=WATCHLIST_EVENT_RULE_FLOOR_DEFAULT)
     args = ap.parse_args()
 
     limit = max(1, int(args.limit))
@@ -719,6 +783,9 @@ def main() -> int:
     llm_model = str(args.llm_model or LLM_MODEL_DEFAULT).strip() or LLM_MODEL_DEFAULT
     llm_max_items = max(5, int(args.llm_max_items))
     retention_days = max(7, int(args.retention_days))
+    retention_prune_mode = str(args.retention_prune_mode or "daily").strip().lower()
+    adaptive_weighting = str(args.adaptive_weighting).lower() == "on"
+    event_rule_floor = _clamp(float(args.event_rule_floor), 0.0, 100.0)
     rule_w = max(0.0, float(args.rule_weight))
     llm_w = max(0.0, float(args.llm_weight))
     w_sum = rule_w + llm_w
@@ -797,9 +864,14 @@ def main() -> int:
     for c in pool_rows:
         llm_item = llm_scores.get(c["ticker"])
         llm_score = _clamp(float((llm_item or {}).get("llm_score", 50.0)), 0.0, 100.0)
-        final_score = round(rule_w * c["rule_score_100"] + llm_w * llm_score, 4)
+        rule_score_eff = _candidate_rule_score(c, event_rule_floor=event_rule_floor)
+        rw_eff, lw_eff = _candidate_weights(c, rule_w=rule_w, llm_w=llm_w, adaptive=adaptive_weighting)
+        final_score = round(rw_eff * rule_score_eff + lw_eff * llm_score, 4)
         c["llm_item"] = llm_item
         c["llm_score"] = llm_score
+        c["rule_score_effective"] = rule_score_eff
+        c["rule_weight_effective"] = rw_eff
+        c["llm_weight_effective"] = lw_eff
         c["final_score"] = final_score
 
     pool_rows.sort(key=lambda x: (float(x.get("final_score", 0.0)), float(x.get("rule_score_100", 0.0))), reverse=True)
@@ -866,9 +938,16 @@ def main() -> int:
                 "technical": technical_score,
                 "rule_score_raw": float(c.get("rule_score_raw", 0.0) or 0.0),
                 "rule_score_100": float(c.get("rule_score_100", 0.0) or 0.0),
+                "rule_score_effective": float(c.get("rule_score_effective", c.get("rule_score_100", 0.0)) or 0.0),
                 "llm_score": float(c.get("llm_score", 50.0) or 50.0),
                 "final_score": context_score,
-                "score_weights": {"rule_weight": round(rule_w, 4), "llm_weight": round(llm_w, 4)},
+                "score_weights": {
+                    "rule_weight": round(rule_w, 4),
+                    "llm_weight": round(llm_w, 4),
+                    "rule_weight_effective": round(float(c.get("rule_weight_effective", rule_w) or rule_w), 4),
+                    "llm_weight_effective": round(float(c.get("llm_weight_effective", llm_w) or llm_w), 4),
+                    "adaptive_weighting": adaptive_weighting,
+                },
                 "llm_verdict": str(llm_item.get("verdict", "WATCH")),
                 "llm_reason": str(llm_item.get("reason", "")),
                 "llm_risk_flags": _normalize_text_list(llm_item.get("risk_flags", []), max_items=5, max_len=80),
@@ -917,28 +996,50 @@ def main() -> int:
 
     n = ch_insert_sql("trading.interest_watchlist", out)
     prune_info = "-"
-    try:
-        ch_execute(
-            "ALTER TABLE trading.interest_watchlist "
-            f"DELETE WHERE ts < now() - INTERVAL {retention_days} DAY"
-        )
-        prune_info = f"retention={retention_days}d"
-    except Exception as e:
-        prune_info = f"retention_failed:{type(e).__name__}"
+    do_prune = False
+    if retention_prune_mode == "always":
+        do_prune = True
+    elif retention_prune_mode == "daily":
+        marker = os.path.join(tempfile.gettempdir(), "watchlist_retention_prune.marker")
+        today = datetime.now().strftime("%Y-%m-%d")
+        last = ""
+        try:
+            if os.path.exists(marker):
+                with open(marker, "r", encoding="utf-8") as f:
+                    last = (f.read() or "").strip()
+        except Exception:
+            last = ""
+        if last != today:
+            do_prune = True
+            try:
+                with open(marker, "w", encoding="utf-8") as f:
+                    f.write(today)
+            except Exception:
+                pass
+
+    if retention_prune_mode == "off":
+        prune_info = "retention=off"
+    elif do_prune:
+        try:
+            ch_execute(
+                "ALTER TABLE trading.interest_watchlist "
+                f"DELETE WHERE ts < now() - INTERVAL {retention_days} DAY"
+            )
+            prune_info = f"retention={retention_days}d"
+        except Exception as e:
+            prune_info = f"retention_failed:{type(e).__name__}"
+    else:
+        prune_info = "retention=skip(daily)"
 
     print(
         "inserted_interest_watchlist="
         f"{n} llm_enabled={llm_enabled} llm_rows={len(llm_scores)} "
         f"candidate_pool={candidate_pool} pool_selected={len(pool_rows)} "
-        f"final_limit={limit} snapshot_mode=append {prune_info} llm_error={llm_error or '-'}"
+        f"final_limit={limit} snapshot_mode=append adaptive={adaptive_weighting} "
+        f"event_floor={event_rule_floor:.1f} prune_mode={retention_prune_mode} {prune_info} "
+        f"llm_error={llm_error or '-'}"
     )
     return 0
-
-
-def _sql_quote(v: Any) -> str:
-    s = str(v or "")
-    s = s.replace("\\", "\\\\").replace("'", "\\'")
-    return f"'{s}'"
 
 
 if __name__ == "__main__":

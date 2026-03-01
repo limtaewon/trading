@@ -124,6 +124,7 @@ bash scripts/ops/deploy_to_runtime.sh
 ### 11-1. 유망주 데이터 소스
 - 두레이/파이프라인 브리핑의 유망주는 `trading.decision_candidate`를 기준으로 표시한다.
 - `decision_candidate`는 `decision_operating_pipeline.py`가 생성하며, 기본 universe는 `watchlist`다.
+- decision의 watchlist 로딩은 append 스냅샷 최신 `ts` 1개를 고정하고 `rank ASC` 우선으로 후보를 선택한다.
 - `watchlist` 소스는 `trading.interest_watchlist`이고, `refresh_interest_watchlist.py`가 아래 신호를 합성해 갱신한다.
 - watchlist 후보 유니버스는 `technical_signals ∪ news_tickers ∪ news_event_frame_tickers ∪ hidden_relation_tickers` 합집합으로 구성한다.
 - watchlist는 후보풀(`WATCHLIST_CANDIDATE_POOL`, 기본 200)에서 다중 버킷 합집합 선별 후 최종 저장(`--limit`, 기본 30)으로 확정한다.
@@ -138,6 +139,8 @@ bash scripts/ops/deploy_to_runtime.sh
 - 후보군은 룰 기반 `composite_score`로 1차 정렬한다.
 - LLM 입력은 버킷 균형 샘플링(rule/news+explain/relation/reaction)으로 편향을 줄여 `llm_score/verdict/reason/risk_flags/catalysts`를 얻는다.
 - 최종 점수는 `rule_weight` + `llm_weight` 가중합으로 산출한다.
+- `WATCHLIST_ADAPTIVE_WEIGHTING=1`이면 기술 결손 + 이벤트 근거 종목에서 LLM 비중을 자동 확대한다.
+- `WATCHLIST_EVENT_RULE_FLOOR`(기본 40)로 explain_ready 기반 이벤트 종목 최소 점수 바닥을 적용한다.
 - LLM 호출 실패 시 자동으로 룰 기반 점수만 사용한다.
 
 ### 11-2-1. 수급 스냅샷 보강 정책

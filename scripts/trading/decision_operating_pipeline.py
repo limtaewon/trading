@@ -584,16 +584,25 @@ def load_universe(universe: str, limit: int) -> list[dict[str, str]]:
         try:
             rows = ch_select(
                 f"""
+WITH latest_ts AS (
+    SELECT ts
+    FROM trading.interest_watchlist
+    WHERE toDate(ts) >= today() - 3
+      {source_filter}
+    ORDER BY ts DESC
+    LIMIT 1
+)
 SELECT
     ticker,
     anyLast(ticker_name) AS ticker_name,
-    max(ts) AS ts_max
+    min(toInt32OrZero(rank)) AS rank_ord,
+    max(toFloat64OrZero(context_score)) AS context_score
 FROM trading.interest_watchlist
-WHERE toDate(ts) >= today() - 3
+WHERE ts = (SELECT ts FROM latest_ts)
   {source_filter}
 GROUP BY ticker
 HAVING match(ticker, '^[0-9]{{6}}$')
-ORDER BY ts_max DESC
+ORDER BY rank_ord ASC, context_score DESC, ticker ASC
 LIMIT {lim}
 """
             )
