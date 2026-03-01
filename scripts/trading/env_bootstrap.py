@@ -119,4 +119,15 @@ def bootstrap_openclaw_env(override: bool = False) -> int:
     os.environ["CLICKHOUSE_URL"] = normalized_url
     os.environ["CLICKHOUSE_HOST"] = normalized_host
 
+    # Global LLM fallback policy:
+    # if primary model is spark/codex-openai family and fallback model is unset,
+    # enforce gpt-5.3-codex as the first fallback target.
+    codex_model = (os.environ.get("CODEX_MODEL", "") or "").strip()
+    fallback_model = (os.environ.get("CODEX_FALLBACK_MODEL", "") or "").strip()
+    if not fallback_model:
+        if ("codex-spark" in codex_model) or codex_model.startswith("openai-codex/"):
+            os.environ["CODEX_FALLBACK_MODEL"] = "gpt-5.3-codex"
+        elif not codex_model:
+            os.environ["CODEX_FALLBACK_MODEL"] = "gpt-5.3-codex"
+
     return total

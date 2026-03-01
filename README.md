@@ -29,6 +29,7 @@
 - 동일 프롬프트 해시 캐시(TTL)와 락을 사용해 중복 호출을 줄인다.
 - 응답 JSON 유효성을 확인하고 `/tmp/gpt_response.json`에 저장한다.
 - 기본 실행은 `openclaw agent`이며, 실패 시 `codex exec` 폴백 경로를 사용한다.
+- 공통 폴백 정책: primary가 `gpt-5.3-codex-spark`일 때 오류/레이트리밋 발생 시 `gpt-5.3-codex`를 1차 폴백 모델로 사용한다.
 
 ### 2-3. `prepare_gpt_prompt.py`
 - ClickHouse, KIS(mcporter), 워크스페이스 메모리 파일을 합쳐 판단 프롬프트를 만든다.

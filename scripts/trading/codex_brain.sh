@@ -42,7 +42,7 @@ CODEX_FALLBACK_BIN="${CODEX_FALLBACK_BIN:-codex}"
 CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-}"
 if [[ -z "$CODEX_FALLBACK_MODEL" ]]; then
     if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
-        CODEX_FALLBACK_MODEL="gpt-5"
+        CODEX_FALLBACK_MODEL="gpt-5.3-codex"
     else
         CODEX_FALLBACK_MODEL="$CODEX_MODEL"
     fi
@@ -79,7 +79,11 @@ is_recoverable_openclaw_error() {
         || [[ "$text" == *"session has expired"* ]] \
         || [[ "$text" == *"session not found"* ]] \
         || [[ "$text" == *"invalid session"* ]] \
-        || [[ "$text" == *"stale session"* ]]
+        || [[ "$text" == *"stale session"* ]] \
+        || [[ "$text" == *"429"* ]] \
+        || [[ "$text" == *"rate limit"* ]] \
+        || [[ "$text" == *"too many requests"* ]] \
+        || [[ "$text" == *"quota exceeded"* ]]
 }
 
 resolve_codex_fallback_bin() {
@@ -309,6 +313,10 @@ def is_recoverable_text(text: str) -> bool:
         "session not found",
         "invalid session",
         "stale session",
+        "429",
+        "rate limit",
+        "too many requests",
+        "quota exceeded",
     )
     return any(p in s for p in pats)
 

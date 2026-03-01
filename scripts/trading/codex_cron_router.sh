@@ -40,6 +40,14 @@ COIN_RUNNER="$BASE/scripts/coin_codex_runner.py"
 LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-openclaw}}"
 CODEX_BIN="${CODEX_BIN:-openclaw}"
 CODEX_MODEL="${CODEX_MODEL:-openai-codex/gpt-5.3-codex-spark}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-}"
+if [[ -z "$CODEX_FALLBACK_MODEL" ]]; then
+    if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
+        CODEX_FALLBACK_MODEL="gpt-5.3-codex"
+    else
+        CODEX_FALLBACK_MODEL="$CODEX_MODEL"
+    fi
+fi
 OPENCLAW_SESSION_ID="${OPENCLAW_SESSION_ID:-openclaw-codex-router}"
 CODEX_JOB_LOCK_WAIT="${CODEX_JOB_LOCK_WAIT:-45}"
 JOB_LOCK_DIR="$STATE_DIR/locks"
@@ -213,21 +221,56 @@ if [[ "$PAYLOAD_KIND" == "systemEvent" ]]; then
                 echo "- 지시사항의 줄수 제한 준수"
             } > "$TMP_PROMPT"
 
-            if python3 - "$CODEX_BIN" "$OPENCLAW_SESSION_ID" "$TMP_PROMPT" "$TMP_OUT" <<'PY' >> "$LOG_FILE" 2>&1; then
+            if python3 - "$CODEX_BIN" "$OPENCLAW_SESSION_ID" "$TMP_PROMPT" "$TMP_OUT" "$CODEX_MODEL" "$CODEX_FALLBACK_MODEL" <<'PY' >> "$LOG_FILE" 2>&1; then
 import json
 import pathlib
 import subprocess
 import sys
 
-agent_bin, session_id, prompt_path, out_path = sys.argv[1:5]
+agent_bin, session_id, prompt_path, out_path, model, fallback_model = sys.argv[1:7]
 prompt = pathlib.Path(prompt_path).read_text(encoding="utf-8")
-cmd = [agent_bin, "agent", "--json", "--session-id", session_id, "--message", prompt]
-run = subprocess.run(cmd, capture_output=True, text=True, check=False)
-if run.returncode != 0:
-    raise SystemExit(run.stderr or run.stdout or "openclaw agent failed")
-raw = (run.stdout or "").strip()
-if not raw:
-    raise SystemExit("openclaw empty output")
+
+def is_recoverable(text: str) -> bool:
+    s = (text or "").lower()
+    pats = (
+        "ctx max",
+        "context max",
+        "context limit",
+        "context length",
+        "context overflow",
+        "maximum context",
+        "prompt too large",
+        "too many tokens",
+        "token limit",
+        "conversation too long",
+        "session expired",
+        "session has expired",
+        "session not found",
+        "invalid session",
+        "stale session",
+        "429",
+        "rate limit",
+        "too many requests",
+        "quota exceeded",
+    )
+    return any(p in s for p in pats)
+
+def run_agent(model_name: str):
+    cmd = [agent_bin, "agent", "--json", "--session-id", session_id, "--model", model_name, "--message", prompt]
+    run = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if run.returncode != 0:
+        err = (run.stderr or run.stdout or "").strip()
+        return None, err or "openclaw agent failed"
+    raw = (run.stdout or "").strip()
+    if not raw:
+        return None, "openclaw empty output"
+    return raw, ""
+
+raw, err = run_agent(model)
+if raw is None and is_recoverable(err) and fallback_model and fallback_model != model:
+    raw, err = run_agent(fallback_model)
+if raw is None:
+    raise SystemExit(err or "openclaw agent failed")
 try:
     obj = json.loads(raw)
 except Exception:
