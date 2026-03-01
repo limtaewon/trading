@@ -123,6 +123,8 @@ def _sum_flow_rows(rows: list[dict]) -> dict:
     out = {
         "foreign": 0.0,
         "inst": 0.0,
+        "foreign_1d": 0.0,
+        "inst_1d": 0.0,
         "foreign_pos_days": 0,
         "inst_pos_days": 0,
         "n_days": 0,
@@ -130,11 +132,18 @@ def _sum_flow_rows(rows: list[dict]) -> dict:
     if not rows:
         return out
     days_seen: set[str] = set()
+    by_day: dict[str, dict[str, float]] = {}
     for r in rows:
         investor = str(r.get("investor_type", "")).strip().upper()
         d = str(r.get("trade_date", "")).strip()
         days_seen.add(d)
         v = float(r.get("net_buy_value_krw", 0) or 0)
+        if d:
+            day_row = by_day.setdefault(d, {"FOREIGN": 0.0, "INST": 0.0})
+            if investor == "FOREIGN":
+                day_row["FOREIGN"] += v
+            elif investor in ("INST", "INSTITUTION"):
+                day_row["INST"] += v
         if investor == "FOREIGN":
             out["foreign"] += v
             if v > 0:
@@ -143,7 +152,13 @@ def _sum_flow_rows(rows: list[dict]) -> dict:
             out["inst"] += v
             if v > 0:
                 out["inst_pos_days"] += 1
-    out["n_days"] = len([x for x in days_seen if x])
+    clean_days = sorted([x for x in days_seen if x], reverse=True)
+    out["n_days"] = len(clean_days)
+    if clean_days:
+        latest = clean_days[0]
+        latest_row = by_day.get(latest, {})
+        out["foreign_1d"] = float(latest_row.get("FOREIGN", 0.0) or 0.0)
+        out["inst_1d"] = float(latest_row.get("INST", 0.0) or 0.0)
     return out
 
 
@@ -214,9 +229,55 @@ def _build_flow_summary(flow: dict) -> str:
         return "수급데이터 부족"
     fsum = _fmt_krw_jo(float(flow.get("foreign", 0.0) or 0.0))
     isum = _fmt_krw_jo(float(flow.get("inst", 0.0) or 0.0))
+    f1d = _fmt_krw_jo(float(flow.get("foreign_1d", 0.0) or 0.0))
+    i1d = _fmt_krw_jo(float(flow.get("inst_1d", 0.0) or 0.0))
     fpos = int(flow.get("foreign_pos_days", 0) or 0)
     ipos = int(flow.get("inst_pos_days", 0) or 0)
-    return f"외인 {fsum}({fpos}/{n}일+), 기관 {isum}({ipos}/{n}일+)"
+    return f"외인 {fsum}({fpos}/{n}일+,1일 {f1d}), 기관 {isum}({ipos}/{n}일+,1일 {i1d})"
+
+
+def classify_action_posture(
+    regime_label: str,
+    vix: float,
+    usdkrw: float,
+    flow: dict,
+) -> tuple[str, list[str]]:
+    """레짐 라벨과 별개로 실행 강도(posture)를 결정한다.
+
+    stress 신호:
+    - VIX >= 20
+    - USD/KRW >= 1430
+    - 외국인 1일 순매도 <= -2조
+    """
+    flags: list[str] = []
+    if vix >= 20.0:
+        flags.append("VIX>=20")
+    if usdkrw >= 1430.0:
+        flags.append("USDKRW>=1430")
+    if float(flow.get("foreign_1d", 0.0) or 0.0) <= -2_000_000_000_000:
+        flags.append("FOREIGN_1D<=-2T")
+
+    stress_n = len(flags)
+    base = "normal"
+    if regime_label == "BULL_CALM":
+        base = "aggressive"
+    elif regime_label in ("BULL_VOL", "SIDEWAYS"):
+        base = "normal"
+    elif regime_label == "BEAR_CALM":
+        base = "cautious"
+    elif regime_label == "BEAR_VOL":
+        base = "defensive"
+
+    # 충돌 신호가 2개 이상이면 최소 1단계 감속, 3개면 방어 모드
+    if stress_n >= 3:
+        return "defensive", flags
+    if stress_n >= 2:
+        if base == "aggressive":
+            return "cautious", flags
+        if base == "normal":
+            return "cautious", flags
+        return base, flags
+    return base, flags
 
 
 # ─── 레짐 분류 로직 ───────────────────────────────────────────
@@ -426,6 +487,12 @@ def main():
     )
     news_mood = classify_news_mood(news_sentiment)
     regime_label = make_regime_label(trend, volatility)
+    posture, posture_flags = classify_action_posture(
+        regime_label=regime_label,
+        vix=vix_level,
+        usdkrw=usdkrw_level,
+        flow=flow_trend,
+    )
 
     # 코스닥
     kosdaq_close = float(kosdaq_data[0].get("close_price", 0)) if kosdaq_data else 0
@@ -463,7 +530,13 @@ def main():
         int(flow_trend.get("n_days", 0) or 0),
         str(flow_trend.get("source", "-")),
     )
+    log.info(
+        "  수급(1일): 외인 %s, 기관 %s",
+        _fmt_krw_jo(float(flow_trend.get("foreign_1d", 0.0) or 0.0)),
+        _fmt_krw_jo(float(flow_trend.get("inst_1d", 0.0) or 0.0)),
+    )
     log.info(f"  레짐:     {regime_label}")
+    log.info(f"  행동강도: {posture} (flags={','.join(posture_flags) if posture_flags else '-'})")
     log.info(f"  뉴스:     pos={news_sentiment['positive']} neg={news_sentiment['negative']} neu={news_sentiment['neutral']} → {news_mood}")
     log.info(f"  요약:     {summary}")
     log.info("-" * 60)
@@ -498,16 +571,26 @@ def main():
     elapsed = time.time() - start
     log.info("=" * 60)
 
-    # 매매 가이드라인 출력
+    # 매매 가이드라인 출력 (레짐 라벨 + 행동강도 분리)
     guide = {
-        "BULL_CALM": "적극적 매수 검토. 추세 따라가기.",
+        "BULL_CALM": "추세 우호. 선별 매수 검토.",
         "BULL_VOL": "분할 매수. 변동성 주의, 포지션 축소 고려.",
         "BEAR_CALM": "관망 또는 방어적 포지션. 현금 비중 확대.",
         "BEAR_VOL": "신규 매수 금지. 손절 규율 엄격 적용.",
         "SIDEWAYS": "박스권 하단 매수, 상단 매도. 단기 트레이딩.",
     }
-    guide_text = guide.get(regime_label, '중립적 접근')
-    log.info(f"  가이드: {guide_text}")
+    posture_guide = {
+        "aggressive": "공격적 집행 가능(분할 진입 권장)",
+        "normal": "표준 집행(추격보다 확인매수)",
+        "cautious": "감속 집행(사이즈 축소·분할·확인 우선)",
+        "defensive": "방어 모드(신규매수 최소화/보류)",
+    }
+    guide_text = guide.get(regime_label, "중립적 접근")
+    posture_text = posture_guide.get(posture, "중립 집행")
+    if posture_flags:
+        guide_text = f"{guide_text} 단, 스트레스 신호({', '.join(posture_flags)})로 감속."
+    log.info(f"  가이드(레짐): {guide_text}")
+    log.info(f"  가이드(행동): {posture_text}")
     log.info(f"  완료 ({elapsed:.1f}초)")
     log.info("=" * 60)
 
@@ -521,7 +604,8 @@ def main():
             f"KOSPI {kospi_close:,.0f} | KOSDAQ {kosdaq_close:,.0f} | VIX {vix_level:.1f}\n"
             f"USD/KRW {usdkrw_level:,.0f} | DXY {dxy_level:.1f}\n"
             f"수급(최근 {int(flow_trend.get('n_days', 0) or 0)}일): {flow_summary}\n"
-            f"→ {guide_text}"
+            f"행동강도: {posture} ({', '.join(posture_flags) if posture_flags else '-'})\n"
+            f"→ {posture_text}"
         )
     except Exception as e:
         log.warning(f"텔레그램 전송 실패: {e}")
