@@ -19,6 +19,11 @@
 - 브리핑 파이프라인:
   send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
   (decision_run / decision_candidate 기반)
+- 인증/환경 부트스트랩:
+  핵심 실행기(`prepare_gpt_prompt.py`, `execute_gpt_orders.py`, `manage_positions.py`,
+  `decision_operating_pipeline.py`, `send_decision_dryrun_telegram.py`, `send_dooray_briefing.py`)는
+  시작 시 `env_bootstrap.py`로 `~/.openclaw/.env.trading`/`~/.openclaw/.env`를 자동 로드한다.
+  따라서 수동 실행에서도 ClickHouse 401 재발 가능성을 줄인다.
 - 프롬프트 무결성 점검:
   prompt_sanity_check.py (메인/포지션 프롬프트 섹션/금지문구 자동 검사)
 

@@ -27,6 +27,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
+
 # ── logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,

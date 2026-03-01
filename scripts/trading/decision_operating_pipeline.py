@@ -24,6 +24,10 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
+
 
 def _log(msg: str) -> None:
     print(f"{dt.datetime.now().strftime('%H:%M:%S')} [decision-p0] {msg}", flush=True)

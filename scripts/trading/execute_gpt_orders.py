@@ -24,6 +24,10 @@ from typing import Any
 from urllib import parse, request
 from zoneinfo import ZoneInfo
 
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
+
 KST = ZoneInfo("Asia/Seoul")
 HOME = Path.home()
 
@@ -43,7 +47,7 @@ EXEC_DIR = STATE_DIR / "executions"
 JOURNAL_FILE = STATE_DIR / "events.jsonl"
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://localhost:8123")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
-CLICKHOUSE_PASS = os.getenv("CLICKHOUSE_PASS", "")
+CLICKHOUSE_PASS = os.getenv("CLICKHOUSE_PASS", os.getenv("CLICKHOUSE_PASSWORD", ""))
 INPUT_VERSION = os.getenv("TRADING_INPUT_VERSION", "v2")
 FORCED_MODEL_NAME = "gpt-5.3-codex-spark"
 _env_model_name = os.getenv("TRADING_MODEL_NAME", "").strip() or os.getenv("CODEX_MODEL", "").strip()

@@ -23,6 +23,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
+
 
 def _log(msg: str) -> None:
     print(f"{dt.datetime.now().strftime('%H:%M:%S')} [dryrun-report] {msg}", flush=True)
@@ -31,7 +35,7 @@ def _log(msg: str) -> None:
 def _ch_url_and_headers() -> tuple[str, dict[str, str]]:
     host = os.getenv("CLICKHOUSE_HOST", "").strip()
     user = os.getenv("CLICKHOUSE_USER", "").strip()
-    pw = os.getenv("CLICKHOUSE_PASS", "").strip()
+    pw = os.getenv("CLICKHOUSE_PASS", os.getenv("CLICKHOUSE_PASSWORD", "")).strip()
     headers: dict[str, str] = {"Content-Type": "text/plain; charset=utf-8"}
 
     if host:

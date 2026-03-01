@@ -21,11 +21,14 @@ from urllib.request import urlopen, Request
 
 import requests
 
+from env_bootstrap import bootstrap_openclaw_env
 from market_realtime import fetch_naver_realtime_indices, fetch_naver_usdkrw
+
+bootstrap_openclaw_env()
 
 CLICKHOUSE_HTTP = os.environ.get("CLICKHOUSE_HOST", "http://localhost:8123").strip()
 CH_USER = os.environ.get("CLICKHOUSE_USER", "default").strip()
-CH_PASSWORD = os.environ.get("CLICKHOUSE_PASS", "").strip()
+CH_PASSWORD = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
 CH_DB = os.environ.get("CLICKHOUSE_DB", "trading").strip() or "trading"
 
 WEBHOOK = os.environ.get("DOORAY_WEBHOOK_URL", "").strip()

@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Runtime env bootstrap for trading scripts.
+
+Loads OpenClaw env files so manual execution has the same credentials
+as cron-router execution.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+def _parse_env_line(line: str) -> tuple[str, str] | None:
+    s = line.strip()
+    if not s or s.startswith("#") or "=" not in s:
+        return None
+    if s.startswith("export "):
+        s = s[len("export ") :].strip()
+        if "=" not in s:
+            return None
+    k, v = s.split("=", 1)
+    key = k.strip()
+    if not key:
+        return None
+    val = v.strip()
+    if len(val) >= 2 and ((val[0] == "'" and val[-1] == "'") or (val[0] == '"' and val[-1] == '"')):
+        val = val[1:-1]
+    return key, val
+
+
+def _load_env_file(path: Path, override: bool) -> int:
+    if not path.exists() or not path.is_file():
+        return 0
+    loaded = 0
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            parsed = _parse_env_line(raw)
+            if not parsed:
+                continue
+            k, v = parsed
+            if override or not os.environ.get(k):
+                os.environ[k] = v
+                loaded += 1
+    except Exception:
+        return loaded
+    return loaded
+
+
+def bootstrap_openclaw_env(override: bool = False) -> int:
+    """Load ~/.openclaw env files. Returns number of keys loaded."""
+    home = Path.home()
+    explicit = os.getenv("OPENCLAW_ENV_FILE", "").strip()
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    candidates.extend(
+        [
+            home / ".openclaw" / ".env.trading",
+            home / ".openclaw" / ".env",
+        ]
+    )
+
+    total = 0
+    seen: set[Path] = set()
+    for p in candidates:
+        rp = p.resolve() if p.exists() else p
+        if rp in seen:
+            continue
+        seen.add(rp)
+        total += _load_env_file(p, override=override)
+    return total
+

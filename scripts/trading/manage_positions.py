@@ -30,6 +30,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import requests
 
 from codex_exec_guard import run_codex_cached
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
 
 KST = datetime.now().astimezone().tzinfo
 HOME = Path.home()
