@@ -13,6 +13,9 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
 try:
     import requests
 except ImportError:
@@ -22,7 +25,7 @@ from market_realtime import fetch_naver_realtime_indices, fetch_naver_usdkrw
 
 CH_HOST = os.environ.get("CLICKHOUSE_HOST", "http://localhost:8123").strip()
 CH_USER = os.environ.get("CLICKHOUSE_USER", "default").strip()
-CH_PASSWORD = os.environ.get("CLICKHOUSE_PASS", "").strip()
+CH_PASSWORD = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
 
 # 텔레그램 설정
 TG_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()

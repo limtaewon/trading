@@ -25,7 +25,10 @@ from typing import Any
 
 import requests
 
+from env_bootstrap import bootstrap_openclaw_env
 from codex_exec_guard import run_codex_cached
+
+bootstrap_openclaw_env()
 
 CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "").strip()
 if not CLICKHOUSE_URL:

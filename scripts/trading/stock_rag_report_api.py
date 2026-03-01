@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,13 +28,17 @@ from urllib.parse import parse_qs, urlparse, quote_plus
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
 from market_realtime import fetch_naver_realtime_indices, fetch_naver_usdkrw
 from codex_exec_guard import run_codex_cached
+
+bootstrap_openclaw_env()
 
 
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://localhost:8123")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
-CLICKHOUSE_PASS = os.getenv("CLICKHOUSE_PASS", "")
+CLICKHOUSE_PASS = os.getenv("CLICKHOUSE_PASS", os.getenv("CLICKHOUSE_PASSWORD", ""))
 OPENCLAW_HOME = Path(os.path.expanduser("~/.openclaw"))
 KRX_STOCKS_PATH = OPENCLAW_HOME / "data" / "krx_stocks.json"
 

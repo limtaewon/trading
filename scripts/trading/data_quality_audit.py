@@ -15,9 +15,15 @@ import base64
 import datetime as dt
 import json
 import os
+import sys
 from collections import OrderedDict
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
 
 
 def _log(msg: str) -> None:

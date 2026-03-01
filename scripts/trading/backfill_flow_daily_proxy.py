@@ -11,10 +11,16 @@ import argparse
 import base64
 import json
 import os
+import sys
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
 
 
 def _ch_url_and_headers() -> tuple[str, dict[str, str]]:

@@ -23,6 +23,11 @@ import sys
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
+
 
 def _log(msg: str) -> None:
     print(f"{dt.datetime.now().strftime('%H:%M:%S')} [flow-sync] {msg}", flush=True)

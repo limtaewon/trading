@@ -16,12 +16,18 @@ import json
 import math
 import os
 import re
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
 
 try:
     import yfinance as yf

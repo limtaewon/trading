@@ -6,9 +6,14 @@ import json
 import time
 import hashlib
 import tempfile
+import sys
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
 from codex_exec_guard import run_codex_cached
+
+bootstrap_openclaw_env()
 
 CH_URL = os.environ.get("CLICKHOUSE_URL", "http://localhost:8123")
 CH_DB = os.environ.get("CLICKHOUSE_DB", "trading")

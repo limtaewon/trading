@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 
 def _parse_env_line(line: str) -> tuple[str, str] | None:
@@ -77,5 +78,45 @@ def bootstrap_openclaw_env(override: bool = False) -> int:
         os.environ["CLICKHOUSE_PASSWORD"] = ch_pass
     elif ch_password and not ch_pass:
         os.environ["CLICKHOUSE_PASS"] = ch_password
+
+    # Normalize ClickHouse host/url/auth defaults to prevent intermittent auth failures.
+    ch_host = (os.environ.get("CLICKHOUSE_HOST", "") or "").strip()
+    ch_url = (os.environ.get("CLICKHOUSE_URL", "") or "").strip()
+    ch_user = (os.environ.get("CLICKHOUSE_USER", "") or "").strip() or "default"
+    ch_pass2 = (
+        (os.environ.get("CLICKHOUSE_PASS", "") or "").strip()
+        or (os.environ.get("CLICKHOUSE_PASSWORD", "") or "").strip()
+        or "trading"
+    )
+
+    os.environ["CLICKHOUSE_USER"] = ch_user
+    os.environ["CLICKHOUSE_PASS"] = ch_pass2
+    os.environ["CLICKHOUSE_PASSWORD"] = ch_pass2
+
+    base = ch_url or ch_host or "http://localhost:8123"
+    p = urlparse(base)
+    scheme = p.scheme or "http"
+    hostname = p.hostname or "localhost"
+    netloc = hostname
+    if p.port:
+        netloc = f"{hostname}:{p.port}"
+
+    # Keep explicit URL userinfo if present; otherwise compose from USER/PASS.
+    if p.username is not None:
+        userinfo = f"{p.username}:{p.password or ''}@"
+        netloc = f"{userinfo}{netloc}"
+    else:
+        userinfo = f"{ch_user}:{ch_pass2}@"
+        netloc = f"{userinfo}{netloc}"
+
+    path = p.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    if path == "":
+        path = "/"
+    normalized_url = urlunparse((scheme, netloc, path, p.params, p.query, p.fragment))
+    normalized_host = urlunparse((scheme, f"{hostname}:{p.port}" if p.port else hostname, path, p.params, p.query, p.fragment))
+    os.environ["CLICKHOUSE_URL"] = normalized_url
+    os.environ["CLICKHOUSE_HOST"] = normalized_host
 
     return total

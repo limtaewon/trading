@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import os
 import sys
+from urllib.parse import urlencode, urlparse, urlunparse
 
 # ensure local imports work regardless of CWD (cron, manual run, etc.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
 
 import json
 import re
@@ -36,7 +40,6 @@ import shutil
 from ticker_mapper import TickerMapper
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 import base64
@@ -88,7 +91,38 @@ BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "20"))
 REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "15"))
 
 # ClickHouse (userinfo URL을 쓰되, 내부적으로 Authorization 헤더로 변환해서 요청한다)
-CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "http://localhost:8123")
+def _normalize_clickhouse_url() -> str:
+    ch_url = os.environ.get("CLICKHOUSE_URL", "").strip()
+    ch_host = os.environ.get("CLICKHOUSE_HOST", "").strip()
+    ch_user = os.environ.get("CLICKHOUSE_USER", "").strip() or "default"
+    ch_pass = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip() or "trading"
+
+    base = ch_url or ch_host or "http://localhost:8123"
+    p = urlparse(base)
+    scheme = p.scheme or "http"
+    hostname = p.hostname or "localhost"
+    netloc = hostname
+    if p.port:
+        netloc = f"{hostname}:{p.port}"
+
+    # Preserve explicit userinfo from CLICKHOUSE_URL.
+    if p.username is not None:
+        userinfo = f"{p.username}:{p.password or ''}@"
+        netloc = f"{userinfo}{netloc}"
+    elif ch_user:
+        userinfo = f"{ch_user}:{ch_pass}@"
+        netloc = f"{userinfo}{netloc}"
+
+    path = p.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    if path == "":
+        path = "/"
+
+    return urlunparse((scheme, netloc, path, p.params, p.query, p.fragment))
+
+
+CLICKHOUSE_URL = _normalize_clickhouse_url()
 
 NEWS_PER_QUERY = int(os.environ.get("NEWS_PER_QUERY", "30"))
 # For smoke tests: limit number of keyword queries to run (0/empty = no limit)

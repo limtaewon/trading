@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from typing import Any
 
 import requests
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
 
 CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "").strip() or os.environ.get("CLICKHOUSE_HOST", "http://localhost:8123").strip() or "http://localhost:8123"
 CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "").strip()

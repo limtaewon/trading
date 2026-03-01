@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,11 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
 from codex_exec_guard import run_codex_cached
+
+bootstrap_openclaw_env()
 
 LOGGER = logging.getLogger("llm_relation_reasoner")
 logging.basicConfig(

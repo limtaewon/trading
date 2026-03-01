@@ -10,9 +10,13 @@ GPT가 importance 4~5 판정한 것만 삽입 + 알림
 
 import os
 import sys
+from urllib.parse import urlparse, urlunparse
 
 # ensure local imports work regardless of CWD (cron, manual run, etc.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_bootstrap import bootstrap_openclaw_env
+
+bootstrap_openclaw_env()
 
 try:
     import requests
@@ -75,7 +79,37 @@ GEMINI_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemi
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "bge-m3")
 
-CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "http://localhost:8123")
+def _normalize_clickhouse_url() -> str:
+    ch_url = os.environ.get("CLICKHOUSE_URL", "").strip()
+    ch_host = os.environ.get("CLICKHOUSE_HOST", "").strip()
+    ch_user = os.environ.get("CLICKHOUSE_USER", "").strip() or "default"
+    ch_pass = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip() or "trading"
+
+    base = ch_url or ch_host or "http://localhost:8123"
+    p = urlparse(base)
+    scheme = p.scheme or "http"
+    hostname = p.hostname or "localhost"
+    netloc = hostname
+    if p.port:
+        netloc = f"{hostname}:{p.port}"
+
+    if p.username is not None:
+        userinfo = f"{p.username}:{p.password or ''}@"
+        netloc = f"{userinfo}{netloc}"
+    elif ch_user:
+        userinfo = f"{ch_user}:{ch_pass}@"
+        netloc = f"{userinfo}{netloc}"
+
+    path = p.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    if path == "":
+        path = "/"
+
+    return urlunparse((scheme, netloc, path, p.params, p.query, p.fragment))
+
+
+CLICKHOUSE_URL = _normalize_clickhouse_url()
 TRADING_BOT_WEBHOOK = os.environ.get("TRADING_BOT_WEBHOOK", "")
 ALERT_LOG = Path.home() / ".openclaw" / "data" / "alert_history.json"
 SIMILARITY_THRESHOLD = 0.2
