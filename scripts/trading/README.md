@@ -10,7 +10,9 @@
 - P0 의사결정 로그 파이프라인:
   enrich_data.sh -> refresh_interest_watchlist.py -> decision_operating_pipeline.py
 - watchlist 산출 정책:
-  candidate_pool(기본 200)에서 후보를 산출한 뒤 최종 limit(기본 30)만 저장
+  후보 유니버스는 `technical_signals ∪ news ∪ news_event_frames ∪ hidden_relation_signals` 합집합
+  candidate_pool(기본 200) 다중 버킷 선별 후 최종 limit(기본 30)만 저장
+  저장은 append snapshot 방식(최신 ts 조회), `WATCHLIST_RETENTION_DAYS`(기본 21일)로 오래된 스냅샷 정리
 - Decision 운영 정책(실거래 정렬):
   universe는 `watchlist-only`로 강제(technical/feature fallback 미사용)
   watchlist 조회 source는 `WATCHLIST_ACTIVE_SOURCE`로 강제(기본: `enrich_data`)

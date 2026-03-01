@@ -125,7 +125,9 @@ bash scripts/ops/deploy_to_runtime.sh
 - 두레이/파이프라인 브리핑의 유망주는 `trading.decision_candidate`를 기준으로 표시한다.
 - `decision_candidate`는 `decision_operating_pipeline.py`가 생성하며, 기본 universe는 `watchlist`다.
 - `watchlist` 소스는 `trading.interest_watchlist`이고, `refresh_interest_watchlist.py`가 아래 신호를 합성해 갱신한다.
-- watchlist는 후보풀(`WATCHLIST_CANDIDATE_POOL`, 기본 200)에서 점수 계산 후 최종 저장(`--limit`, 기본 30)으로 확정한다.
+- watchlist 후보 유니버스는 `technical_signals ∪ news_tickers ∪ news_event_frame_tickers ∪ hidden_relation_tickers` 합집합으로 구성한다.
+- watchlist는 후보풀(`WATCHLIST_CANDIDATE_POOL`, 기본 200)에서 다중 버킷 합집합 선별 후 최종 저장(`--limit`, 기본 30)으로 확정한다.
+- 저장 방식은 `append snapshot`이며, 조회 시 최신 `ts`를 사용한다. 오래된 스냅샷은 `WATCHLIST_RETENTION_DAYS`(기본 21일) 기준으로 정리한다.
 - 기술: `technical_signals` (signal_score, RSI, BB, 거래량)
 - 뉴스: `news`, `news_event_frames` (pos/neg, 뉴스건수, explain_ready)
 - 연관: `hidden_relation_signals` (relation_score, bias, source_tickers/channels)
@@ -134,7 +136,7 @@ bash scripts/ops/deploy_to_runtime.sh
 
 ### 11-2. LLM 반영 방식
 - 후보군은 룰 기반 `composite_score`로 1차 정렬한다.
-- 후보풀 상위 종목을 LLM에 전달해 `llm_score/verdict/reason/risk_flags/catalysts`를 얻는다.
+- LLM 입력은 버킷 균형 샘플링(rule/news+explain/relation/reaction)으로 편향을 줄여 `llm_score/verdict/reason/risk_flags/catalysts`를 얻는다.
 - 최종 점수는 `rule_weight` + `llm_weight` 가중합으로 산출한다.
 - LLM 호출 실패 시 자동으로 룰 기반 점수만 사용한다.
 

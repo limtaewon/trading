@@ -2,7 +2,8 @@
 """동적 관심목록 재산출 및 저장
 
 요약:
-- technical_signals(최근일자)
+- 유니버스: technical_signals(최근일자) ∪ 최근 뉴스 ticker ∪ 최근 이벤트프레임 ticker ∪ 최신 연관 ticker
+- technical_signals(최근일자, 있으면 사용)
 - 최근 3일 뉴스 점수
 - 최근 3일 explainability 충족 기사수
 - hidden_relation_signals 최신 점수
@@ -43,6 +44,7 @@ LLM_WEIGHT_DEFAULT = float(os.environ.get("WATCHLIST_LLM_WEIGHT", "0.3"))
 LLM_MODEL_DEFAULT = os.environ.get("WATCHLIST_LLM_MODEL", os.environ.get("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark")).strip()
 LLM_MAX_ITEMS_DEFAULT = max(5, int(os.environ.get("WATCHLIST_LLM_MAX_ITEMS", "30")))
 CANDIDATE_POOL_DEFAULT = max(30, int(os.environ.get("WATCHLIST_CANDIDATE_POOL", "200")))
+WATCHLIST_RETENTION_DAYS_DEFAULT = max(7, int(os.environ.get("WATCHLIST_RETENTION_DAYS", "21")))
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -153,6 +155,53 @@ def _select_candidate_pool(prepared: list[dict[str, Any]], candidate_pool: int) 
             if len(merged) >= pool:
                 break
     return merged
+
+
+def _select_llm_input(pool_rows: list[dict[str, Any]], llm_max_items: int) -> list[dict[str, Any]]:
+    """LLM 입력 편향을 줄이기 위해 버킷 균형 샘플링."""
+    rows = [r for r in pool_rows if _is_ticker(str(r.get("ticker", "")).strip())]
+    max_items = max(1, int(llm_max_items))
+    if len(rows) <= max_items:
+        return rows
+
+    bucket_n = max(1, max_items // 4)
+
+    def _top(src: list[dict[str, Any]], key_fn, n: int) -> list[dict[str, Any]]:
+        return sorted(src, key=key_fn, reverse=True)[: max(1, int(n))]
+
+    by_rule = _top(rows, lambda x: float(x.get("rule_score_raw", 0.0) or 0.0), bucket_n)
+    by_news_explain = _top(
+        rows,
+        lambda x: (
+            int(x.get("explain_ready", 0) or 0) * 100
+            + (int(x.get("news_pos", 0) or 0) - int(x.get("news_neg", 0) or 0)) * 5
+            + int(x.get("news_cnt", 0) or 0)
+        ),
+        bucket_n,
+    )
+    by_relation = _top(rows, lambda x: abs(float(x.get("relation_score", 0.0) or 0.0)), bucket_n)
+    by_reaction = _top(rows, lambda x: abs(float(x.get("pct", 0.0) or 0.0)) + float(x.get("vol_r", 0.0) or 0.0), bucket_n)
+
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for r in (by_rule + by_news_explain + by_relation + by_reaction):
+        tk = str(r.get("ticker", "")).strip()
+        if not tk or tk in seen:
+            continue
+        seen.add(tk)
+        selected.append(r)
+        if len(selected) >= max_items:
+            return selected
+
+    for r in _top(rows, lambda x: float(x.get("rule_score_raw", 0.0) or 0.0), len(rows)):
+        tk = str(r.get("ticker", "")).strip()
+        if not tk or tk in seen:
+            continue
+        seen.add(tk)
+        selected.append(r)
+        if len(selected) >= max_items:
+            break
+    return selected
 
 
 def _extract_json_obj(raw: str) -> dict[str, Any] | None:
@@ -489,6 +538,53 @@ def load_candidates(limit: int):
     WITH
       latest_date AS (SELECT max(date) AS d FROM trading.technical_signals),
       latest_rel AS (SELECT max(asof_ts) AS ts FROM trading.hidden_relation_signals),
+      tech_latest AS (
+        SELECT
+          ticker,
+          ticker_name,
+          signal,
+          signal_score,
+          rsi14,
+          bb_pct,
+          vol_ratio,
+          change_pct
+        FROM trading.technical_signals
+        WHERE date = (SELECT d FROM latest_date)
+      ),
+      news_tickers AS (
+        SELECT DISTINCT ticker
+        FROM (
+          SELECT arrayJoin(tickers) AS ticker
+          FROM trading.news
+          WHERE published_at >= now() - INTERVAL 3 DAY
+        )
+        WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$')
+      ),
+      frame_tickers AS (
+        SELECT DISTINCT ticker
+        FROM (
+          SELECT arrayJoin(tickers) AS ticker
+          FROM trading.news_event_frames
+          WHERE published_at >= now() - INTERVAL 3 DAY
+        )
+        WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$')
+      ),
+      relation_tickers AS (
+        SELECT DISTINCT ticker
+        FROM trading.hidden_relation_signals
+        WHERE asof_ts = (SELECT ts FROM latest_rel)
+          AND length(ticker) = 6
+          AND match(ticker, '^[0-9]{{6}}$')
+      ),
+      universe AS (
+        SELECT ticker FROM tech_latest
+        UNION DISTINCT
+        SELECT ticker FROM news_tickers
+        UNION DISTINCT
+        SELECT ticker FROM frame_tickers
+        UNION DISTINCT
+        SELECT ticker FROM relation_tickers
+      ),
       news_ranked AS (
         SELECT
           ticker,
@@ -548,14 +644,14 @@ def load_candidates(limit: int):
         GROUP BY symbol
       )
     SELECT
-      ts.ticker AS ticker,
-      ts.ticker_name AS ticker_name,
-      ts.signal AS signal,
-      ts.signal_score AS score,
-      round(ts.rsi14, 2) AS rsi,
-      round(ts.bb_pct, 4) AS bb,
-      round(ts.vol_ratio, 2) AS vol_r,
-      round(ts.change_pct, 2) AS pct,
+      u.ticker AS ticker,
+      ifNull(nullIf(ts.ticker_name, ''), u.ticker) AS ticker_name,
+      ifNull(ts.signal, '') AS signal,
+      ifNull(ts.signal_score, 0) AS score,
+      round(ifNull(ts.rsi14, 50), 2) AS rsi,
+      round(ifNull(ts.bb_pct, 0), 4) AS bb,
+      round(ifNull(ts.vol_ratio, 0), 2) AS vol_r,
+      round(ifNull(ts.change_pct, 0), 2) AS pct,
       ifNull(na.pos, 0) AS pos,
       ifNull(na.neg, 0) AS neg,
       ifNull(na.news_cnt, 0) AS news_cnt,
@@ -573,28 +669,28 @@ def load_candidates(limit: int):
       ifNull(lf.inst_flow, 0) AS inst_flow,
       ifNull(lf.foreign_net_flow, 0) AS foreign_net_flow,
       round(
-        (ts.signal_score * 1.6)
+        (ifNull(ts.signal_score, 0) * 1.6)
         + (ifNull(na.pos,0)-ifNull(na.neg,0)) * 0.25
         + least(ifNull(na.news_cnt,0),10) * 0.10
         + ifNull(hrs.total_relation_score,0) * 2
         + if(ifNull(fa.explain_ready_3d,0) > 0, 1.0, -0.4)
-        + if(ts.rsi14 BETWEEN 45 AND 65, 0.4, 0.0), 4) AS composite_score
-    FROM trading.technical_signals ts
-    LEFT JOIN news_agg na ON na.ticker = ts.ticker
-    LEFT JOIN news_top nt ON nt.ticker = ts.ticker
-    LEFT JOIN frame_agg fa ON fa.ticker = ts.ticker
+        + if(ifNull(ts.rsi14, 50) BETWEEN 45 AND 65, 0.4, 0.0), 4) AS composite_score
+    FROM universe u
+    LEFT JOIN tech_latest ts ON ts.ticker = u.ticker
+    LEFT JOIN news_agg na ON na.ticker = u.ticker
+    LEFT JOIN news_top nt ON nt.ticker = u.ticker
+    LEFT JOIN frame_agg fa ON fa.ticker = u.ticker
     LEFT JOIN trading.hidden_relation_signals hrs
-      ON hrs.ticker = ts.ticker AND hrs.asof_ts = (SELECT ts FROM latest_rel)
+      ON hrs.ticker = u.ticker AND hrs.asof_ts = (SELECT ts FROM latest_rel)
     LEFT JOIN latest_flow lf
-      ON lf.ticker = ts.ticker
-    WHERE ts.date = (SELECT d FROM latest_date)
-      AND ts.ticker_name != ''
-      AND (
-            ts.signal_score >= 1
+      ON lf.ticker = u.ticker
+    WHERE (
+            ifNull(ts.signal_score, 0) >= 1
             OR ifNull(fa.explain_ready_3d, 0) > 0
             OR (ifNull(na.pos,0) - ifNull(na.neg,0)) >= 2
+            OR abs(ifNull(hrs.total_relation_score, 0)) >= 1.2
           )
-    ORDER BY composite_score DESC, score DESC, vol_r DESC
+    ORDER BY composite_score DESC, explain_ready DESC, news_cnt DESC, score DESC, vol_r DESC
     LIMIT {raw_limit}
     """
     return ch_query(q)
@@ -612,6 +708,7 @@ def main() -> int:
     ap.add_argument("--rule-weight", type=float, default=LLM_RULE_WEIGHT_DEFAULT)
     ap.add_argument("--llm-weight", type=float, default=LLM_WEIGHT_DEFAULT)
     ap.add_argument("--llm-max-items", type=int, default=LLM_MAX_ITEMS_DEFAULT)
+    ap.add_argument("--retention-days", type=int, default=WATCHLIST_RETENTION_DAYS_DEFAULT)
     args = ap.parse_args()
 
     limit = max(1, int(args.limit))
@@ -621,6 +718,7 @@ def main() -> int:
     llm_cache_ttl = max(0, int(args.llm_cache_ttl))
     llm_model = str(args.llm_model or LLM_MODEL_DEFAULT).strip() or LLM_MODEL_DEFAULT
     llm_max_items = max(5, int(args.llm_max_items))
+    retention_days = max(7, int(args.retention_days))
     rule_w = max(0.0, float(args.rule_weight))
     llm_w = max(0.0, float(args.llm_weight))
     w_sum = rule_w + llm_w
@@ -681,7 +779,7 @@ def main() -> int:
     llm_scores: dict[str, dict[str, Any]] = {}
     llm_error = ""
     if llm_enabled:
-        llm_input = [c for c in pool_rows if _is_ticker(c["ticker"])][: min(llm_max_items, len(pool_rows))]
+        llm_input = _select_llm_input(pool_rows, min(llm_max_items, len(pool_rows)))
         llm_scores, llm_error = _run_llm_rerank(
             llm_input,
             timeout_sec=llm_timeout,
@@ -695,10 +793,6 @@ def main() -> int:
 
     decision_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    ch_execute(
-        f"DELETE FROM trading.interest_watchlist WHERE toDate(ts) = toDate('{ts[:10]}') AND source = {_sql_quote(source)}"
-    )
 
     for c in pool_rows:
         llm_item = llm_scores.get(c["ticker"])
@@ -822,10 +916,21 @@ def main() -> int:
         )
 
     n = ch_insert_sql("trading.interest_watchlist", out)
+    prune_info = "-"
+    try:
+        ch_execute(
+            "ALTER TABLE trading.interest_watchlist "
+            f"DELETE WHERE ts < now() - INTERVAL {retention_days} DAY"
+        )
+        prune_info = f"retention={retention_days}d"
+    except Exception as e:
+        prune_info = f"retention_failed:{type(e).__name__}"
+
     print(
         "inserted_interest_watchlist="
         f"{n} llm_enabled={llm_enabled} llm_rows={len(llm_scores)} "
-        f"candidate_pool={candidate_pool} pool_selected={len(pool_rows)} final_limit={limit} llm_error={llm_error or '-'}"
+        f"candidate_pool={candidate_pool} pool_selected={len(pool_rows)} "
+        f"final_limit={limit} snapshot_mode=append {prune_info} llm_error={llm_error or '-'}"
     )
     return 0
 
