@@ -529,6 +529,11 @@ def get_watchlist_top(limit: int = 15) -> list[dict]:
                 "score": safe_float(ts.get("score", context.get("technical_score", r.get("wl_score", 0))), 0.0),
                 "wl_score": safe_float(r.get("wl_score", 0), 0.0),
                 "wl_action": str(r.get("wl_action", "") or ""),
+                "research_direct_cnt": int(context.get("research_direct_cnt", 0) or 0),
+                "research_avg_conf": safe_float(context.get("research_avg_conf", 0), 0.0),
+                "research_valid_cnt": int(context.get("research_valid_cnt", 0) or 0),
+                "research_conflict_cnt": int(context.get("research_conflict_cnt", 0) or 0),
+                "research_last_hours": safe_float(context.get("research_last_hours", 0), 0.0),
             }
         )
     return out
@@ -562,6 +567,11 @@ def _get_watchlist_bottom_impl(limit: int = 10) -> list[dict]:
                 "score": safe_float(ts.get("score", context.get("technical_score", r.get("wl_score", 0))), 0.0),
                 "wl_score": safe_float(r.get("wl_score", 0), 0.0),
                 "wl_action": str(r.get("wl_action", "") or ""),
+                "research_direct_cnt": int(context.get("research_direct_cnt", 0) or 0),
+                "research_avg_conf": safe_float(context.get("research_avg_conf", 0), 0.0),
+                "research_valid_cnt": int(context.get("research_valid_cnt", 0) or 0),
+                "research_conflict_cnt": int(context.get("research_conflict_cnt", 0) or 0),
+                "research_last_hours": safe_float(context.get("research_last_hours", 0), 0.0),
             }
         )
     return out
@@ -1052,13 +1062,17 @@ def format_candidates(rows: list[dict], label: str = "매수 후보") -> str:
     if not rows:
         return f"({label} 없음)"
 
-    lines = [f"| 종목코드 | 종목명 | 종가 | 등락% | RSI | MACD_H | BB% | 거래량비 | 시그널 | 점수 | 외국인보유비중 | 외국인순매수 | 기관순매수 |",
-             "|---------|--------|------|-------|-----|--------|-----|---------|--------|------|----------------|---------------|----------------|"]
+    lines = [f"| 종목코드 | 종목명 | 종가 | 등락% | RSI | MACD_H | BB% | 거래량비 | 시그널 | 점수 | 외국인보유비중 | 외국인순매수 | 기관순매수 | Research(건/유효/충돌/conf) |",
+             "|---------|--------|------|-------|-----|--------|-----|---------|--------|------|----------------|---------------|----------------|---------------------------|"]
 
     for r in rows:
         foreign = safe_float(r.get("foreign_ownership", 0), 0.0)
         foreign_net = safe_float(r.get("foreign_net_flow", 0), 0.0)
         inst = safe_float(r.get("inst_net_flow", 0), 0.0)
+        rs_direct = int(r.get("research_direct_cnt", 0) or 0)
+        rs_valid = int(r.get("research_valid_cnt", 0) or 0)
+        rs_conflict = int(r.get("research_conflict_cnt", 0) or 0)
+        rs_conf = safe_float(r.get("research_avg_conf", 0), 0.0)
         lines.append(
             f"| {r.get('ticker','')} | {r.get('ticker_name','')} | "
             f"{format_krw(safe_float(r.get('close_price',0)))} | "
@@ -1068,7 +1082,8 @@ def format_candidates(rows: list[dict], label: str = "매수 후보") -> str:
             f"{safe_float(r.get('bb',0)):.2f} | "
             f"{safe_float(r.get('vol_r',0)):.2f} | "
             f"{r.get('signal','')} | {r.get('score',0)} | "
-            f"{foreign:.2f}% | {foreign_net:+.0f} | {inst:+.0f} |"
+            f"{foreign:.2f}% | {foreign_net:+.0f} | {inst:+.0f} | "
+            f"{rs_direct}/{rs_valid}/{rs_conflict}/{rs_conf:.2f} |"
         )
 
     return "\n".join(lines)

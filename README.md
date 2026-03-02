@@ -74,6 +74,7 @@
 - `analyze_news_research.py`는 `news_research_queue`의 `pending/retry`를 dequeue해 비동기 심층 분석을 수행한다.
 - `analyze_news_research.py`는 비동기 강화 레이어로 운영하며, `status/retry_count/next_retry_at` 기반 재시도(backoff) 정책을 사용한다.
 - `status='ok'`인 레코드만 완료로 간주하고, `fallback/error`는 다음 주기 재분석 대상으로 유지한다.
+- `refresh_interest_watchlist.py`는 `news_research`의 `direct_tickers/source_verdict/confidence`를 후보 유니버스 및 점수에 반영해 실운영 후보 선별에 사용한다.
 
 ## 4) 보조 데이터 강화 파이프라인
 
@@ -101,7 +102,8 @@
 - 생성기:
 - `scripts/build_codex_jobs_manifest.py`
 - 보유 포지션 동적 관리는 `position-manager-20m` command 잡(평일 09:00~15:59, 20분 주기)으로 실행한다.
-- `data-news-research-30m` command 잡(평일 08:12~16:42, 30분 간격)으로 심층 뉴스 연구 워커를 비동기 실행한다.
+- `data-news-research-15m` command 잡(평일 08:00~16:59, 15분 간격)으로 심층 뉴스 연구 워커를 비동기 실행한다.
+- 기본 처리량: `NEWS_RESEARCH_LIMIT=16`, `NEWS_RESEARCH_BATCH=4`, `NEWS_RESEARCH_WINDOW_HOURS=24`
 - 연관 파이프라인은 장중 오프셋 순서로 실행한다:
   - `data-news-cluster-hourly` (`*/20`)
   - `data-news-relation-score-20m` (`3,23,43`)
@@ -140,7 +142,7 @@ bash scripts/ops/deploy_to_runtime.sh
 - `decision_candidate`는 `decision_operating_pipeline.py`가 생성하며, 기본 universe는 `watchlist`다.
 - decision의 watchlist 로딩은 append 스냅샷 최신 `ts` 1개를 고정하고 `rank ASC` 우선으로 후보를 선택한다.
 - `watchlist` 소스는 `trading.interest_watchlist`이고, `refresh_interest_watchlist.py`가 아래 신호를 합성해 갱신한다.
-- watchlist 후보 유니버스는 `technical_signals ∪ news_tickers ∪ news_event_frame_tickers ∪ hidden_relation_tickers` 합집합으로 구성한다.
+- watchlist 후보 유니버스는 `technical_signals ∪ news_tickers ∪ news_event_frame_tickers ∪ hidden_relation_tickers ∪ news_research_tickers` 합집합으로 구성한다.
 - watchlist는 후보풀(`WATCHLIST_CANDIDATE_POOL`, 기본 200)에서 다중 버킷 합집합 선별 후 최종 저장(`--limit`, 기본 30)으로 확정한다.
 - 저장 방식은 `append snapshot`이며, 조회 시 최신 `ts`를 사용한다.
 - `refresh_interest_watchlist.py`는 `run_id` 단위 idempotency를 지원한다. 동일 `run_id` 재실행 시 기본은 중복 insert를 스킵하고, `--replace-existing-run`일 때만 해당 run 스냅샷을 교체한다.
@@ -151,8 +153,28 @@ bash scripts/ops/deploy_to_runtime.sh
 - 기술: `technical_signals` (signal_score, RSI, BB, 거래량)
 - 뉴스: `news`, `news_event_frames` (pos/neg, 뉴스건수, explain_ready)
 - 연관: `hidden_relation_signals` (relation_score, bias, source_tickers/channels)
+- 리서치: `news_research` (direct_tickers, source_verdict, confidence, thesis)
 - 수급: `feature_snapshot`
   `foreign_flow`(외국인 보유비중%), `news_event_score`(외국인 순매수 수량 proxy), `inst_flow`(기관 순매수 수량)
+
+### 11-1-1. `news_research` 조인/반영 방식(실운영)
+- `refresh_interest_watchlist.py`의 후보 SQL에서 `news_research`를 뉴스ID가 아닌 **티커 기준**으로 조인한다.
+- 조인 키 생성:
+  - `arrayJoin(direct_tickers) AS ticker`로 직접 연관 종목을 펼친다.
+  - 6자리 종목코드/`000000` 제외 필터를 적용한다.
+- 유니버스 확장(`research_tickers`):
+  - 최근 `WATCHLIST_RESEARCH_LOOKBACK_DAYS` 기간
+  - `status IN ('ok','fallback')`
+  - `source_verdict != 'conflict'`
+  - `confidence >= WATCHLIST_RESEARCH_MIN_CONF`
+  - 조건을 만족한 ticker를 유니버스에 `UNION DISTINCT`로 편입한다.
+- 점수 반영(`research_agg`):
+  - `research_direct_cnt`, `research_avg_conf`, `research_valid_cnt`, `research_conflict_cnt`, `research_last_hours`를 ticker별 집계한다.
+  - `LEFT JOIN research_agg nr ON nr.ticker = u.ticker`로 결합한다.
+  - 후보 생존 조건과 `composite_score` 가점/감점에 함께 반영한다.
+- 결과 전파:
+  - research 집계값을 `interest_watchlist.request_json.context`에 저장한다.
+  - `prepare_gpt_prompt.py`는 해당 context를 읽어 후보 테이블의 `Research(건/유효/충돌/conf)` 컬럼으로 LLM 입력에 노출한다.
 
 ### 11-2. LLM 반영 방식
 - 후보군은 룰 기반 `composite_score`로 1차 정렬한다.
@@ -240,7 +262,7 @@ python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45
 | `news_cluster_state` | 클러스터 상태(emerging/reinforcing 등) | `cluster_news.py` | `prepare_gpt_prompt.py`, `llm_relation_reasoner.py`, `stock_rag_report_api.py` |
 | `news_cluster_map` | 뉴스-클러스터 매핑 상세 | `cluster_news.py` | `stock_rag_report_api.py` |
 | `news_research_queue` | 심층 연구 비동기 작업 큐(`pending/retry/done/dead`) | `collect_news.py`, `analyze_news_research.py` | `analyze_news_research.py` |
-| `news_research` | 중요 뉴스 심층 연구 결과 저장(`status/retry/backoff` 포함) | `analyze_news_research.py` | 운영 분석/확장 로직 |
+| `news_research` | 중요 뉴스 심층 연구 결과 저장(`status/retry/backoff` 포함) | `analyze_news_research.py` | `refresh_interest_watchlist.py`(유니버스/점수 조인), `prepare_gpt_prompt.py`(watchlist context 노출), 운영 분석 |
 
 ### 10-3. 연관성/관심종목 레이어
 | 테이블 | 역할 | 주 생성/갱신 스크립트 | 주 사용 스크립트 |

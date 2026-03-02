@@ -121,12 +121,17 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
-            "name": "data-news-research-30m",
+            "name": "data-news-research-15m",
             "enabled": True,
-            "schedule": {"expr": "12,42 8-16 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "*/15 8-16 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
-                "command": f'{env} && {py} {trading_scripts}/analyze_news_research.py >> {logs}/news-research.log 2>&1',
+                "command": (
+                    f'{env} && NEWS_RESEARCH_LIMIT="${{NEWS_RESEARCH_LIMIT:-16}}" '
+                    f'NEWS_RESEARCH_BATCH="${{NEWS_RESEARCH_BATCH:-4}}" '
+                    f'NEWS_RESEARCH_WINDOW_HOURS="${{NEWS_RESEARCH_WINDOW_HOURS:-24}}" '
+                    f'{py} {trading_scripts}/analyze_news_research.py >> {logs}/news-research.log 2>&1'
+                ),
             },
             "source": "legacy-crontab",
         },

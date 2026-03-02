@@ -50,6 +50,12 @@ LLM_MAX_ITEMS_DEFAULT = max(5, int(os.environ.get("WATCHLIST_LLM_MAX_ITEMS", "30
 CANDIDATE_POOL_DEFAULT = max(30, int(os.environ.get("WATCHLIST_CANDIDATE_POOL", "200")))
 WATCHLIST_ADAPTIVE_WEIGHTING_DEFAULT = os.environ.get("WATCHLIST_ADAPTIVE_WEIGHTING", "1").strip() == "1"
 WATCHLIST_RELATION_STALE_HOURS_DEFAULT = max(1, int(os.environ.get("WATCHLIST_RELATION_STALE_HOURS", "6")))
+WATCHLIST_RESEARCH_LOOKBACK_DAYS_DEFAULT = max(1, int(os.environ.get("WATCHLIST_RESEARCH_LOOKBACK_DAYS", "7")))
+try:
+    WATCHLIST_RESEARCH_MIN_CONF_DEFAULT = float(os.environ.get("WATCHLIST_RESEARCH_MIN_CONF", "0.65") or 0.65)
+except Exception:
+    WATCHLIST_RESEARCH_MIN_CONF_DEFAULT = 0.65
+WATCHLIST_RESEARCH_MIN_CONF_DEFAULT = max(0.0, min(1.0, WATCHLIST_RESEARCH_MIN_CONF_DEFAULT))
 try:
     WATCHLIST_EVENT_RULE_FLOOR_DEFAULT = float(os.environ.get("WATCHLIST_EVENT_RULE_FLOOR", "40"))
 except Exception:
@@ -236,10 +242,14 @@ def _candidate_weights(
     explain_ready = int(c.get("explain_ready", 0) or 0)
     news_edge = int(c.get("news_pos", 0) or 0) - int(c.get("news_neg", 0) or 0)
     rel_abs = abs(float(c.get("relation_score", 0.0) or 0.0))
+    rs_direct = int(c.get("research_direct_cnt", 0) or 0)
+    rs_conf = float(c.get("research_avg_conf", 0.0) or 0.0)
 
     tech_missing = tech_score <= 0.01 and signal == ""
     llm_target = lw
     if tech_missing and (explain_ready > 0 or news_edge >= 2):
+        llm_target = max(llm_target, 0.55)
+    elif tech_missing and rs_direct > 0 and rs_conf >= WATCHLIST_RESEARCH_MIN_CONF_DEFAULT:
         llm_target = max(llm_target, 0.55)
     elif tech_score < 1.0 and explain_ready > 0:
         llm_target = max(llm_target, 0.45)
@@ -265,10 +275,14 @@ def _candidate_rule_score(
     signal = str(c.get("signal", "") or "").strip()
     news_cnt = int(c.get("news_cnt", 0) or 0)
     news_edge = int(c.get("news_pos", 0) or 0) - int(c.get("news_neg", 0) or 0)
+    rs_direct = int(c.get("research_direct_cnt", 0) or 0)
+    rs_conf = float(c.get("research_avg_conf", 0.0) or 0.0)
 
     # 기술 결측/약세지만 이벤트 근거가 명확하면 최소 점수 바닥 부여
     if explain_ready > 0 and news_cnt >= 1 and news_edge >= 1 and (tech_score < 1.0 or signal == ""):
         return max(base, _clamp(event_rule_floor, 0.0, 100.0))
+    if rs_direct > 0 and rs_conf >= WATCHLIST_RESEARCH_MIN_CONF_DEFAULT and (tech_score < 1.0 or signal == ""):
+        return max(base, _clamp(event_rule_floor - 3.0, 0.0, 100.0))
     return base
 
 
@@ -359,6 +373,13 @@ def _build_llm_prompt(candidates: list[dict[str, Any]]) -> str:
                     "source_tickers": str(c.get("rel_source_tickers", "") or "")[:120],
                     "roles": str(c.get("rel_roles", "") or "")[:120],
                     "channels": str(c.get("rel_channels", "") or "")[:120],
+                },
+                "research_context": {
+                    "direct_cnt": int(c.get("research_direct_cnt", 0) or 0),
+                    "valid_cnt": int(c.get("research_valid_cnt", 0) or 0),
+                    "conflict_cnt": int(c.get("research_conflict_cnt", 0) or 0),
+                    "avg_confidence": round(float(c.get("research_avg_conf", 0.0) or 0.0), 4),
+                    "last_hours": round(float(c.get("research_last_hours", 0.0) or 0.0), 2),
                 },
                 "foreign_ownership": float(c.get("foreign_ownership", 0.0) or 0.0),
                 "foreign_net_flow": float(c.get("foreign_net_flow", 0.0) or 0.0),
@@ -725,6 +746,8 @@ def apply_llm_overlay(
 def load_candidates(limit: int):
     raw_limit = max(int(limit) * 6, 300)
     relation_stale_hours = WATCHLIST_RELATION_STALE_HOURS_DEFAULT
+    research_lookback_days = WATCHLIST_RESEARCH_LOOKBACK_DAYS_DEFAULT
+    research_min_conf = WATCHLIST_RESEARCH_MIN_CONF_DEFAULT
     q = f"""
     WITH
       latest_date AS (SELECT max(date) AS d FROM trading.technical_signals),
@@ -774,6 +797,18 @@ def load_candidates(limit: int):
           AND match(ticker, '^[0-9]{{6}}$')
           AND ticker != '000000'
       ),
+      research_tickers AS (
+        SELECT DISTINCT ticker
+        FROM (
+          SELECT arrayJoin(direct_tickers) AS ticker
+          FROM trading.news_research
+          WHERE published_at >= now() - INTERVAL {research_lookback_days} DAY
+            AND status IN ('ok','fallback')
+            AND source_verdict != 'conflict'
+            AND confidence >= {research_min_conf}
+        )
+        WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$') AND ticker != '000000'
+      ),
       universe AS (
         SELECT ticker FROM tech_latest
         UNION DISTINCT
@@ -782,6 +817,8 @@ def load_candidates(limit: int):
         SELECT ticker FROM frame_tickers
         UNION DISTINCT
         SELECT ticker FROM relation_tickers
+        UNION DISTINCT
+        SELECT ticker FROM research_tickers
       ),
       news_ranked AS (
         SELECT
@@ -831,6 +868,27 @@ def load_candidates(limit: int):
         WHERE published_at >= now() - INTERVAL 3 DAY
         GROUP BY ticker
       ),
+      research_agg AS (
+        SELECT
+          ticker,
+          count() AS research_direct_cnt,
+          round(avg(toFloat64(confidence)), 4) AS research_avg_conf,
+          countIf(source_verdict = 'valid') AS research_valid_cnt,
+          countIf(source_verdict = 'conflict') AS research_conflict_cnt,
+          min(dateDiff('minute', analyzed_at, now())) / 60.0 AS research_last_hours
+        FROM (
+          SELECT
+            arrayJoin(direct_tickers) AS ticker,
+            toFloat64(confidence) AS confidence,
+            source_verdict,
+            analyzed_at
+          FROM trading.news_research
+          WHERE published_at >= now() - INTERVAL {research_lookback_days} DAY
+            AND status IN ('ok','fallback')
+        )
+        WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$') AND ticker != '000000'
+        GROUP BY ticker
+      ),
       latest_flow AS (
         SELECT
           symbol AS ticker,
@@ -863,6 +921,11 @@ def load_candidates(limit: int):
       ifNull(arrayStringConcat(hrs.source_tickers, ', '), '') AS rel_source_tickers,
       ifNull(arrayStringConcat(hrs.top_roles, ', '), '') AS rel_roles,
       ifNull(arrayStringConcat(hrs.top_channels, ', '), '') AS rel_channels,
+      ifNull(nr.research_direct_cnt, 0) AS research_direct_cnt,
+      ifNull(nr.research_avg_conf, 0.0) AS research_avg_conf,
+      ifNull(nr.research_valid_cnt, 0) AS research_valid_cnt,
+      ifNull(nr.research_conflict_cnt, 0) AS research_conflict_cnt,
+      ifNull(nr.research_last_hours, 9999.0) AS research_last_hours,
       ifNull(lf.foreign_ownership, 0) AS foreign_ownership,
       ifNull(lf.inst_flow, 0) AS inst_flow,
       ifNull(lf.foreign_net_flow, 0) AS foreign_net_flow,
@@ -871,6 +934,9 @@ def load_candidates(limit: int):
         + (ifNull(na.pos,0)-ifNull(na.neg,0)) * 0.25
         + least(ifNull(na.news_cnt,0),10) * 0.10
         + ifNull(hrs.total_relation_score,0) * 2
+        + least(ifNull(nr.research_direct_cnt,0), 4) * 0.18
+        + greatest(0.0, ifNull(nr.research_avg_conf,0) - 0.55) * 1.2
+        - if(ifNull(nr.research_conflict_cnt,0) > 0, 0.5, 0.0)
         + if(ifNull(fa.explain_ready_3d,0) > 0, 1.0, -0.4)
         + if(isNull(ts.rsi14), 0.0, if(ts.rsi14 BETWEEN 45 AND 65, 0.4, 0.0)), 4) AS composite_score
     FROM universe u
@@ -878,6 +944,7 @@ def load_candidates(limit: int):
     LEFT JOIN news_agg na ON na.ticker = u.ticker
     LEFT JOIN news_top nt ON nt.ticker = u.ticker
     LEFT JOIN frame_agg fa ON fa.ticker = u.ticker
+    LEFT JOIN research_agg nr ON nr.ticker = u.ticker
     LEFT JOIN trading.hidden_relation_signals hrs
       ON hrs.ticker = u.ticker AND hrs.asof_ts = (SELECT ts FROM latest_rel)
     LEFT JOIN latest_flow lf
@@ -889,6 +956,10 @@ def load_candidates(limit: int):
             OR ifNull(fa.explain_ready_3d, 0) > 0
             OR (ifNull(na.pos,0) - ifNull(na.neg,0)) >= 2
             OR abs(ifNull(hrs.total_relation_score, 0)) >= 1.2
+            OR (
+                ifNull(nr.research_direct_cnt, 0) > 0
+                AND ifNull(nr.research_avg_conf, 0.0) >= {research_min_conf}
+            )
           )
     ORDER BY composite_score DESC, explain_ready DESC, news_cnt DESC, score DESC, vol_r DESC
     LIMIT {raw_limit}
@@ -979,6 +1050,11 @@ def main() -> int:
                 "rel_source_tickers": str(rr.get("rel_source_tickers", "") or ""),
                 "rel_roles": str(rr.get("rel_roles", "") or ""),
                 "rel_channels": str(rr.get("rel_channels", "") or ""),
+                "research_direct_cnt": int(rr.get("research_direct_cnt", 0) or 0),
+                "research_avg_conf": float(rr.get("research_avg_conf", 0.0) or 0.0),
+                "research_valid_cnt": int(rr.get("research_valid_cnt", 0) or 0),
+                "research_conflict_cnt": int(rr.get("research_conflict_cnt", 0) or 0),
+                "research_last_hours": float(rr.get("research_last_hours", 9999.0) or 9999.0),
             }
         )
 
@@ -1092,6 +1168,11 @@ def main() -> int:
                 "relation_source_tickers": str(c.get("rel_source_tickers", "") or ""),
                 "relation_roles": str(c.get("rel_roles", "") or ""),
                 "relation_channels": str(c.get("rel_channels", "") or ""),
+                "research_direct_cnt": int(c.get("research_direct_cnt", 0) or 0),
+                "research_avg_conf": float(c.get("research_avg_conf", 0) or 0.0),
+                "research_valid_cnt": int(c.get("research_valid_cnt", 0) or 0),
+                "research_conflict_cnt": int(c.get("research_conflict_cnt", 0) or 0),
+                "research_last_hours": float(c.get("research_last_hours", 9999.0) or 9999.0),
                 "foreign_ownership": float(c.get("foreign_ownership", 0) or 0),
                 "inst_flow": float(c.get("inst_flow", 0) or 0),
                 "foreign_net_flow": float(c.get("foreign_net_flow", 0) or 0),
