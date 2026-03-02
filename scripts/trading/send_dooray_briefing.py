@@ -64,6 +64,43 @@ MACRO_TOPIC_KEYWORDS = {
     "sanctions": ["제재", "관세", "수출통제", "엠바고", "금수", "sanction", "tariff"],
 }
 
+CODE_LABELS = {
+    "HARD_RISK_OFF": "전역 위험차단",
+    "STAGE0_FAIL": "데이터 품질 미통과",
+    "LOW_LIQUIDITY_REAL": "실제 유동성 부족",
+    "LOW_LIQUIDITY": "유동성 부족",
+    "MISSING_LIQUIDITY_SNAPSHOT": "유동성 데이터 누락",
+    "MISSING_FEATURE_SNAPSHOT": "시세 스냅샷 누락",
+    "MISSING_SNAPSHOT": "스냅샷 누락",
+    "SPREAD_WIDE": "호가 스프레드 확장",
+    "SPREAD_TOO_WIDE": "호가 스프레드 과대",
+    "FLOW_DENOM_INVALID": "수급 기준값 오류",
+    "FLOW_SHOCK_ALERT": "수급 충격 경고",
+    "FLOW_DISTRIBUTION_BLOCK": "수급 분배 경고",
+    "EXTREME-only": "극단 충격만 차단",
+    "FEATURE_SNAPSHOT_ANY_SESSION": "최근 시세 스냅샷",
+    "ADV20_FALLBACK": "20일 평균 거래대금 대체값",
+    "GEOPOLITICAL_RISK": "지정학 리스크",
+    "OIL_SHOCK_RISK": "유가 충격 리스크",
+    "SHIPPING_DISRUPTION_RISK": "해운 교란 리스크",
+    "FOREIGN_1D<=-2T": "외국인 하루 순매도 과다",
+    "stage2_block=": "수급 차단 기준=",
+    "stage3_gate=": "뉴스 게이트=",
+    "stage4_gate=": "타이밍 게이트=",
+    "OFF": "비활성",
+    "PASS": "정상",
+    "WARN": "주의",
+    "FAIL": "실패",
+}
+
+ACTION_LABELS = {
+    "BUY": "매수 가능",
+    "HOLD": "관찰 유지",
+    "REDUCE": "비중 축소",
+    "SELL": "매도 검토",
+    "NEUTRAL": "중립",
+}
+
 
 def run_cmd(cmd: str):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -82,6 +119,45 @@ def _dooray_text_from_html(src: str) -> str:
     return t
 
 
+def _humanize_codes(s: str) -> str:
+    out = str(s or "")
+    for k, v in CODE_LABELS.items():
+        out = out.replace(k, v)
+    return out
+
+
+def _beautify_pipeline_text(msg: str) -> str:
+    lines = []
+    for raw in str(msg or "").splitlines():
+        line = str(raw)
+        striped = line.strip()
+        if "cluster_id:" in striped:
+            continue
+        if striped == "요약(비개발자용)":
+            line = "🧭 요약(비개발자용)"
+        elif striped == "시장 방향":
+            line = "📈 시장 방향"
+        elif striped == "주요 뉴스/연관 지표":
+            line = "📰 주요 뉴스/연관 지표"
+        elif striped == "LLM 해석":
+            line = "🧠 LLM 해석"
+        elif striped == "LLM-룰 정합성 체크":
+            line = "🤝 LLM-룰 정합성 체크"
+        elif striped == "오늘 금지사항":
+            line = "⛔ 오늘 금지사항"
+        line = line.replace("- Absolute Block:", "- 절대 차단 사유:")
+        line = line.replace("- 제약 코드:", "- 제약 사유:")
+        line = line.replace("liquidity_source=", "")
+        line = _humanize_codes(line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _action_label(action: str) -> str:
+    a = str(action or "").strip().upper()
+    return ACTION_LABELS.get(a, a or "-")
+
+
 def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clusters: int = 3):
     from send_decision_dryrun_telegram import resolve_decision_id, build_message  # type: ignore
 
@@ -91,7 +167,7 @@ def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clust
         top_n=max(1, int(top_candidates)),
         clusters_n=max(1, int(clusters)),
     )
-    msg = _dooray_text_from_html(html_msg)
+    msg = _beautify_pipeline_text(_dooray_text_from_html(html_msg))
     digest_rows = build_macro_digest_rows(hours=24, top_n=3)
     if digest_rows:
         msg = msg + "\n\n🌍 매크로 24h Digest"
@@ -129,16 +205,18 @@ def _classify_exec_possible(action: str, abs_blocks: list[str], fail_codes: list
 def _action_delta(action: str, exec_possible: bool, fail_codes: list[str], abs_blocks: list[str]) -> str:
     a = str(action or "").upper()
     if abs_blocks:
-        return f"하향 유지 ({','.join(abs_blocks)})"
+        reasons = ", ".join([CODE_LABELS.get(x, x) for x in abs_blocks[:2]])
+        return f"관찰 유지 ({reasons})"
     if not exec_possible:
         if fail_codes:
-            return f"하향 유지 ({','.join([str(x) for x in fail_codes[:2]])})"
-        return "하향 유지 (실행 제약)"
+            reasons = ", ".join([CODE_LABELS.get(str(x), str(x)) for x in fail_codes[:2]])
+            return f"관찰 유지 ({reasons})"
+        return "관찰 유지 (실행 제약)"
     if a == "BUY":
-        return "상향 유지 (매수 조건 충족)"
+        return "매수 가능 (조건 충족)"
     if a == "REDUCE":
-        return "하향 유지 (리스크 감축)"
-    return "유지 (조건 관찰)"
+        return "비중 축소 (리스크 관리)"
+    return "관찰 유지 (조건 관찰)"
 
 
 def _ticker_name_map(tickers: list[str]) -> dict[str, str]:
@@ -337,10 +415,10 @@ GROUP BY cluster_id
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [f"🧠 연관관계 +A 브리핑 ({now})", ""]
-    lines.append("[핵심 한줄]")
+    lines.append("🧭 핵심 한줄")
     lines.append(f"- {core_line}")
     lines.append("")
-    lines.append(f"[Top 가설 {max(1, int(top_hypothesis))}개]")
+    lines.append(f"🧠 Top 가설 {max(1, int(top_hypothesis))}개")
     if hypotheses:
         for h in hypotheses:
             lines.append(
@@ -350,7 +428,7 @@ GROUP BY cluster_id
     else:
         lines.append("- 유효한 연관 가설이 부족합니다.")
     lines.append("")
-    lines.append("[액션 영향(기존판단 대비)]")
+    lines.append("⚠️ 액션 영향(기존판단 대비)")
     if top_cards:
         for c in top_cards:
             lines.append(
@@ -359,10 +437,10 @@ GROUP BY cluster_id
     else:
         lines.append("- 후보 카드 없음")
     lines.append("")
-    lines.append("[종목별 연관 카드]")
+    lines.append("👀 종목별 연관 카드")
     for c in top_cards:
         lines.append(
-            f"- {c['name']}({c['ticker']}) | 최종액션 {c['action']} | 실행가능 {'YES' if c['exec_possible'] else 'NO'}"
+            f"- {c['name']}({c['ticker']}) | 최종액션 {_action_label(c['action'])} | 실행가능 {'예' if c['exec_possible'] else '아니오'}"
         )
         chain = c["causal_chain"] or c["summary"] or c["cluster_storyline"] or "-"
         lines.append(f"  인과사슬: {_short(chain, 96)}")
@@ -373,10 +451,10 @@ GROUP BY cluster_id
             f"  신뢰도: {c['confidence']:.2f} | 시간지평: {c['time_horizon'] or '1-3d'} | 액션보정: {c['delta']}"
         )
     lines.append("")
-    lines.append("[무효화 조건]")
+    lines.append("🔁 무효화 조건")
     lines.append("- Stage2 충격레벨 ALERT 이상 지속 또는 거래량/후속근거 약화 시 가설 즉시 약화")
     lines.append("")
-    lines.append("[신뢰도 스탬프]")
+    lines.append("📊 신뢰도 스탬프")
     lines.append(
         f"- data_quality: {quality} (feature_snapshot_coverage {int(fs_health.get('covered',0))}/{int(fs_health.get('total',0))}, "
         f"relation_coverage {relation_cov_num}/{relation_cov_den})"
@@ -392,7 +470,7 @@ GROUP BY cluster_id
         "feature_snapshot_health": fs_health,
         "relation_coverage": {"num": relation_cov_num, "den": relation_cov_den, "pct": relation_cov_pct},
     }
-    return "\n".join(lines), raw
+    return _humanize_codes("\n".join(lines)), raw
 
 
 def refresh_market_data():
