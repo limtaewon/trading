@@ -202,6 +202,22 @@ WHERE database='trading' AND name={_sql_quote(table_name)}
         return False
 
 
+def _column_exists(table_name: str, column_name: str) -> bool:
+    rows = _safe_ch_select(
+        f"""
+SELECT count() AS cnt
+FROM system.columns
+WHERE database='trading'
+  AND table={_sql_quote(table_name)}
+  AND name={_sql_quote(column_name)}
+""",
+        timeout_sec=15,
+    )
+    if not rows:
+        return False
+    return int(_float(rows[0].get("cnt"), 0.0)) > 0
+
+
 _SECTOR_CACHE: dict[str, str] = {}
 
 
@@ -388,6 +404,7 @@ def _run_llm_summary(context: dict[str, Any], timeout_sec: int = 90) -> tuple[di
         "아래 JSON 지표를 근거로만 해석하라. 없는 사실/수치/뉴스를 만들지 마라.\n"
         "숫자 단위/자릿수는 입력값을 변경하지 마라. 특히 금액 단위(억/KRW)와 비율(%)은 재계산/재포맷 금지.\n"
         "LLM 해석 섹션에서는 숫자를 재서술하지 말고, 방향성/제약/우선순위만 정성적으로 작성하라.\n"
+        "macro_top3(글로벌 지정학/금리·달러/국내 수급)를 해석의 기준 축으로 반드시 반영하라.\n"
         "각 필드는 핵심만 간결히 작성하라(항목당 1~2문장, 불필요한 반복 금지).\n"
         "출력은 JSON만 반환한다.\n\n"
         "[INPUT_JSON]\n"
@@ -559,8 +576,10 @@ def _overall_reason_text(run: dict) -> str:
 def _block_reason_text(codes: list[str]) -> str:
     m = {
         "STAGE0_FAIL": "데이터 품질 게이트 미통과",
-        "LOW_LIQUIDITY": "유동성 제약(거래대금 부족)",
+        "LOW_LIQUIDITY_REAL": "유동성 제약(실제 거래대금 부족)",
+        "MISSING_LIQUIDITY_SNAPSHOT": "유동성 스냅샷 결손(데이터 미수집/조인 실패)",
         "SPREAD_WIDE": "스프레드 과대",
+        "SPREAD_TOO_WIDE": "스프레드 과대(절대 차단)",
         "HARD_RISK_OFF": "시장 하드 리스크오프",
         "FLOW_DENOM_INVALID": "수급 분모 검증 실패",
         "FLOW_DISTRIBUTION_BLOCK": "수급 분배(매도 우위) 신호",
@@ -637,13 +656,130 @@ def _summarize_stage5_failures(cands: list[dict[str, Any]]) -> tuple[dict[str, i
             # 하위 호환: 절대 블록에서 Stage5 관련 코드만 추출
             for x in c.get("absolute_block_reason") or []:
                 sx = str(x)
-                if sx in {"LOW_LIQUIDITY", "SPREAD_WIDE"}:
+                if sx in {"LOW_LIQUIDITY", "LOW_LIQUIDITY_REAL", "MISSING_LIQUIDITY_SNAPSHOT", "SPREAD_WIDE", "SPREAD_TOO_WIDE"}:
                     codes.append(sx)
         for code in set(codes):
             counts[code] = counts.get(code, 0) + 1
             if exec_mult <= 0.0:
                 exec_zero[code] = exec_zero.get(code, 0) + 1
     return counts, exec_zero
+
+
+def _stage5_seed_text(stage_debug: dict[str, Any]) -> str:
+    stage5 = stage_debug.get("stage5") if isinstance(stage_debug.get("stage5"), dict) else {}
+    policy = stage5.get("policy") if isinstance(stage5.get("policy"), dict) else {}
+    tiers = policy.get("liquidity_tiers_krw") if isinstance(policy.get("liquidity_tiers_krw"), dict) else {}
+    spread = policy.get("spread_bp") if isinstance(policy.get("spread_bp"), dict) else {}
+    g50 = _to_eok_from_krw(_float(tiers.get("gte_50eok"), 0.0))
+    g10 = _to_eok_from_krw(_float(tiers.get("gte_10eok"), 0.0))
+    g5 = _to_eok_from_krw(_float(tiers.get("gte_5eok"), 0.0))
+    g3 = _to_eok_from_krw(_float(tiers.get("gte_3eok"), 0.0))
+    warn = _float(spread.get("warn"), 50.0)
+    block = _float(spread.get("abs_block"), 80.0)
+    if g50 <= 0 or g10 <= 0 or g5 <= 0 or g3 <= 0:
+        return "- Stage5 기준(Seed): 유동성 tier(50억/10억/5억/3억), 스프레드 경고 50bp·차단 80bp"
+    return (
+        "- Stage5 기준(Seed): "
+        f"유동성 tier >= {g50:.0f}억(100) / >= {g10:.0f}억(80) / >= {g5:.0f}억(60) / >= {g3:.0f}억(40), "
+        f"< {g3:.0f}억은 LOW_LIQUIDITY_REAL 차단, 스프레드 {warn:.0f}bp 경고·{block:.0f}bp 차단"
+    )
+
+
+def _feature_snapshot_health(tickers: list[str]) -> dict[str, float]:
+    uniq = sorted({str(t).strip() for t in tickers if re.fullmatch(r"\d{6}", str(t or "").strip())})
+    if not uniq or not _table_exists("feature_snapshot"):
+        return {"coverage_pct": 0.0, "covered": 0.0, "total": float(len(uniq)), "age_min": 99999.0}
+    in_expr = _sql_in_strings(uniq)
+    rows = _safe_ch_select(
+        f"""
+SELECT
+    count() AS covered_cnt,
+    if(count()=0, 99999, greatest(dateDiff('minute', max(last_ts), now()), 0)) AS age_min
+FROM
+(
+    SELECT
+        symbol,
+        argMaxIf(ts, ts, session = 'REGULAR') AS last_ts,
+        argMaxIf(liquidity_krw, ts, session = 'REGULAR') AS liq
+    FROM trading.feature_snapshot
+    WHERE symbol IN {in_expr}
+      AND ts >= now() - INTERVAL 5 DAY
+    GROUP BY symbol
+    HAVING liq > 0
+)
+"""
+    )
+    covered = _float((rows[0] if rows else {}).get("covered_cnt"), 0.0)
+    age_min = _float((rows[0] if rows else {}).get("age_min"), 99999.0)
+    total = float(len(uniq))
+    coverage_pct = (100.0 * covered / total) if total > 0 else 0.0
+    return {"coverage_pct": round(coverage_pct, 2), "covered": covered, "total": total, "age_min": age_min}
+
+
+def _macro_top3_lines(
+    stage1_debug: dict[str, Any],
+    stage2_debug: dict[str, Any],
+    flow_rows: list[dict[str, Any]],
+    dedup_clusters: list[dict[str, Any]],
+) -> list[str]:
+    geo_line = "최근 클러스터 기준 초대형 지정학 이벤트 직접 매핑은 제한적입니다."
+    geo_keywords = ["이란", "중동", "전쟁", "공습", "분쟁", "관세", "제재", "원유", "호르무즈"]
+    geo_pick: dict[str, Any] | None = None
+    for c in dedup_clusters:
+        st = str(c.get("storyline") or "")
+        if any(k in st for k in geo_keywords):
+            geo_pick = c
+            break
+    if geo_pick:
+        geo_line = f"{_shorten(str(geo_pick.get('storyline') or ''), 80)} (상태: {_state_label(str(geo_pick.get('state_label') or ''))}, 중요도: {_to_star(_float(geo_pick.get('importance_max'), 1.0))})"
+
+    fx_rows = _safe_ch_select(
+        """
+SELECT currency_pair, close_rate, date
+FROM trading.exchange_rate
+WHERE currency_pair IN ('USDKRW')
+ORDER BY date DESC
+LIMIT 1
+"""
+    )
+    rt_rows = _safe_ch_select(
+        """
+SELECT rate_code, rate_value, date
+FROM trading.interest_rate
+WHERE rate_code IN ('KR_TB10Y','KR_TB3Y','BOK_BASE')
+ORDER BY date DESC
+LIMIT 20
+"""
+    )
+    usdkrw = _float((fx_rows[0] if fx_rows else {}).get("close_rate"), 0.0)
+    tb10 = 0.0
+    bok = 0.0
+    for r in rt_rows:
+        code = str(r.get("rate_code") or "")
+        if code == "KR_TB10Y" and tb10 <= 0:
+            tb10 = _float(r.get("rate_value"), 0.0)
+        if code == "BOK_BASE" and bok <= 0:
+            bok = _float(r.get("rate_value"), 0.0)
+    posture = str(stage1_debug.get("action_posture") or "normal")
+    stress_flags = str(stage1_debug.get("stress_flags") or "").strip()
+    rates_line = f"USDKRW {usdkrw:,.2f}, KR10Y {tb10:.2f}% / 기준금리 {bok:.2f}% (posture: {posture})"
+    if stress_flags:
+        rates_line += f", stress={stress_flags}"
+
+    by_inv = {"foreign": 0.0, "institution": 0.0, "individual": 0.0}
+    for r in flow_rows:
+        inv = str(r.get("investor_type") or "").lower()
+        by_inv[inv] = by_inv.get(inv, 0.0) + (_float(r.get("net_amount"), 0.0) / 100.0)
+    shock = str(stage2_debug.get("shock_level") or "UNKNOWN")
+    f5 = _to_eok_from_krw(_float(stage2_debug.get("foreign_net_krw_5d"), 0.0))
+    i5 = _to_eok_from_krw(_float(stage2_debug.get("inst_net_krw_5d"), 0.0))
+    flow_line = (
+        f"외국인 5영업일 {f5:+,.0f}억 / 기관 {i5:+,.0f}억, "
+        f"당일(참고) 외국인 {by_inv.get('foreign', 0.0):+,.0f}억·기관 {by_inv.get('institution', 0.0):+,.0f}억·개인 {by_inv.get('individual', 0.0):+,.0f}억 "
+        f"(Stage2={shock})"
+    )
+
+    return [geo_line, rates_line, flow_line]
 
 
 def build_message(decision_id: str, top_n: int, clusters_n: int) -> str:
@@ -654,7 +790,7 @@ SELECT
     stage1_pass, stage1_score, stage2_pass, stage2_score,
     stage3_pass, stage3_score, stage4_pass, stage4_score,
     stage5_pass, stage5_score, total_score, absolute_block_reason,
-    stage_debug_json
+    data_freshness_json, stage_debug_json
 FROM trading.decision_run
 WHERE decision_id = '{decision_id}'
 ORDER BY decision_time DESC
@@ -668,7 +804,8 @@ SELECT
     decision_id, decision_time, stage0_pass, stage0_score,
     stage1_pass, stage1_score, stage2_pass, stage2_score,
     stage3_pass, stage3_score, stage4_pass, stage4_score,
-    stage5_pass, stage5_score, total_score, absolute_block_reason
+    stage5_pass, stage5_score, total_score, absolute_block_reason,
+    data_freshness_json
 FROM trading.decision_run
 WHERE decision_id = '{decision_id}'
 ORDER BY decision_time DESC
@@ -708,6 +845,7 @@ ORDER BY market, investor_type
 """
     )
 
+    liq_src_select = "any(c.liquidity_source) AS liquidity_source" if _column_exists("decision_candidate", "liquidity_source") else "'' AS liquidity_source"
     cand_rows_all = _safe_ch_select(
         f"""
 SELECT
@@ -722,6 +860,7 @@ SELECT
     c.absolute_block_reason,
     c.stage5_fail_codes,
     c.stage5_exec_multiplier,
+    {liq_src_select},
     c.stage3_evidence_count,
     c.stage3_score_capped,
     c.primary_cluster_id
@@ -1049,7 +1188,21 @@ GROUP BY cluster_id
                 parts.append(f"{code}:{int(v)}")
         txt = " / ".join(parts)
         lines.append(f"- Stage5 제약 요약: {txt}")
-    lines.append("- Stage5 기준(Seed): LOW_LIQUIDITY if liquidity_krw < 10억")
+    lines.append(_stage5_seed_text(stage_debug))
+    stage0_debug = stage_debug.get("stage0") if isinstance(stage_debug.get("stage0"), dict) else {}
+    freshness_map = stage0_debug.get("freshness_map") if isinstance(stage0_debug.get("freshness_map"), dict) else _parse_json_obj(run.get("data_freshness_json"))
+    feature_age_min = _float((freshness_map or {}).get("feature_snapshot"), 99999.0)
+    all_cand_tickers = [str(c.get("ticker") or "") for c in cand_rows_all if str(c.get("ticker") or "").strip()]
+    fs_health = _feature_snapshot_health(all_cand_tickers)
+    coverage_pct = _float(fs_health.get("coverage_pct"), 0.0)
+    covered = int(_float(fs_health.get("covered"), 0.0))
+    total = int(_float(fs_health.get("total"), 0.0))
+    if _float(feature_age_min, 99999.0) >= 99999.0:
+        feature_age_min = _float(fs_health.get("age_min"), 99999.0)
+    lines.append(
+        f"- 데이터 품질: liquidity_snapshot_age_minutes={int(feature_age_min):,}, "
+        f"feature_snapshot_coverage_pct={coverage_pct:.1f}% ({covered}/{total})"
+    )
     lines.append("")
     lines.append("<b>시장 방향</b>")
     lines.append(
@@ -1109,6 +1262,7 @@ GROUP BY cluster_id
             stage5_codes_raw = c.get("stage5_fail_codes")
             stage5_codes = [str(x) for x in stage5_codes_raw] if isinstance(stage5_codes_raw, list) else []
             stage5_exec_mult = _float(c.get("stage5_exec_multiplier"), 1.0)
+            liquidity_source = str(c.get("liquidity_source") or "").strip()
             stage3_evidence_count = int(_float(c.get("stage3_evidence_count"), 0.0))
             stage3_score_capped = int(_float(c.get("stage3_score_capped"), 0.0)) == 1
             cluster_id = str(c.get("primary_cluster_id") or "")
@@ -1178,6 +1332,8 @@ GROUP BY cluster_id
             lines.append(
                 f"   - 집행 제약: {', '.join(stage5_codes) if stage5_codes else '-'} / exec x{stage5_exec_mult:.2f}"
             )
+            if liquidity_source:
+                lines.append(f"   - 집행 데이터 소스: liquidity_source={liquidity_source}")
             lines.append(f"   - 제약 코드: {', '.join(blocks) if blocks else '-'}")
             lines.append(f"   - cluster_id: {cluster_id or '-'}")
             if i < len(cand_rows):
@@ -1190,6 +1346,8 @@ GROUP BY cluster_id
         lines.append("- 클러스터 데이터가 부족합니다.")
     else:
         picked_clusters = dedup_clusters[: max(3, top_n)]
+        candidate_ticker_set = {str(c.get("ticker") or "") for c in cand_rows_all}
+        macro_themes = {"일반 매크로/섹터 이슈", "대외무역/관세 리스크", "가계부채/내수 부담"}
         for i, c in enumerate(picked_clusters, 1):
             cid = str(c.get("cluster_id") or "")
             state = str(c.get("state_label") or "")
@@ -1202,11 +1360,19 @@ GROUP BY cluster_id
                 for t in (c.get("top_tickers", []) or [])
                 if re.fullmatch(r"\d{6}", str(t))
             ][:5]
+            if theme in macro_themes and tickers:
+                strict_mapped = [tk for tk in tickers if tk in candidate_ticker_set]
+                if strict_mapped:
+                    tickers = strict_mapped
+                else:
+                    tickers = []
             related_names = []
             for tk in tickers:
                 nm = ticker_names.get(tk, "")
                 related_names.append(f"{nm}({tk})" if nm else tk)
-            related_text = ", ".join(related_names) if related_names else "관련 종목 매핑 없음"
+            related_text = ", ".join(related_names) if related_names else (
+                "직접 매핑 근거 부족(보수적 제외)" if theme in macro_themes else "관련 종목 매핑 없음"
+            )
 
             major_news = ""
             for tk in tickers:
@@ -1227,6 +1393,18 @@ GROUP BY cluster_id
 
     llm_enabled = _bool_env("DRYRUN_REPORT_LLM_ENABLED", True)
     lines.append("<b>LLM 해석</b>")
+    stage1_debug = stage_debug.get("stage1") if isinstance(stage_debug.get("stage1"), dict) else {}
+    macro_top3 = _macro_top3_lines(
+        stage1_debug=stage1_debug if isinstance(stage1_debug, dict) else {},
+        stage2_debug=stage2_debug if isinstance(stage2_debug, dict) else {},
+        flow_rows=flow_rows,
+        dedup_clusters=dedup_clusters,
+    )
+    lines.append("<b>0) 오늘의 매크로 Top-3</b>")
+    lines.append(f"- 글로벌 지정학: {macro_top3[0] if len(macro_top3) > 0 else '-'}")
+    lines.append(f"- 금리/달러: {macro_top3[1] if len(macro_top3) > 1 else '-'}")
+    lines.append(f"- 국내 수급: {macro_top3[2] if len(macro_top3) > 2 else '-'}")
+    lines.append("")
     if not llm_enabled:
         lines.append("- 비활성화됨(DRYRUN_REPORT_LLM_ENABLED=0)")
         return "\n".join(lines)
@@ -1266,6 +1444,11 @@ GROUP BY cluster_id
             "s5": round(_float(run.get("stage5_score"), 0.0), 2),
         },
         "stage2_debug": llm_stage2,
+        "macro_top3": {
+            "geopolitics": macro_top3[0] if len(macro_top3) > 0 else "",
+            "rates_fx": macro_top3[1] if len(macro_top3) > 1 else "",
+            "domestic_flow": macro_top3[2] if len(macro_top3) > 2 else "",
+        },
         "stage5_fail_summary": stage5_fail_summary,
         "absolute_block_reason": [str(x) for x in (run.get("absolute_block_reason") or [])],
         "market": {

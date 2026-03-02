@@ -133,6 +133,14 @@ def _is_ticker(s: str) -> bool:
     return bool(re.fullmatch(r"\d{6}", s or ""))
 
 
+STAGE5_LIQ_THRESH_50B = 5_000_000_000.0
+STAGE5_LIQ_THRESH_10B = 1_000_000_000.0
+STAGE5_LIQ_THRESH_5B = 500_000_000.0
+STAGE5_LIQ_THRESH_3B = 300_000_000.0
+STAGE5_SPREAD_WARN_BP = 50.0
+STAGE5_SPREAD_BLOCK_BP = 80.0
+
+
 def table_exists(name: str) -> bool:
     safe = name.replace("'", "\\'")
     q = (
@@ -212,6 +220,7 @@ CREATE TABLE IF NOT EXISTS trading.decision_candidate
     stage5_risk_score           Float32 DEFAULT 0,
     stage5_fail_codes           Array(String) DEFAULT [],
     stage5_exec_multiplier      Float32 DEFAULT 1,
+    liquidity_source            LowCardinality(String) DEFAULT '',
     stage3_evidence_count       UInt16 DEFAULT 0,
     stage3_score_capped         UInt8 DEFAULT 0,
     total_score                 Float32 DEFAULT 0,
@@ -233,6 +242,9 @@ ORDER BY (decision_id, ticker)
     )
     ch_execute(
         "ALTER TABLE trading.decision_candidate ADD COLUMN IF NOT EXISTS stage5_exec_multiplier Float32 DEFAULT 1"
+    )
+    ch_execute(
+        "ALTER TABLE trading.decision_candidate ADD COLUMN IF NOT EXISTS liquidity_source LowCardinality(String) DEFAULT ''"
     )
     ch_execute(
         "ALTER TABLE trading.decision_candidate ADD COLUMN IF NOT EXISTS stage3_evidence_count UInt16 DEFAULT 0"
@@ -1120,6 +1132,8 @@ HAVING match(ticker, '^[0-9]{6}$')
             """
 SELECT
     symbol AS ticker,
+    countIf(session = 'REGULAR') AS regular_rows,
+    maxIf(ts, session = 'REGULAR') AS last_snapshot_ts,
     argMaxIf(liquidity_krw, ts, session = 'REGULAR') AS liquidity_krw,
     argMaxIf(spread_bp, ts, session = 'REGULAR') AS spread_bp
 FROM trading.feature_snapshot
@@ -1128,7 +1142,16 @@ WHERE ts >= now() - INTERVAL 5 DAY
 GROUP BY symbol
 """
         )
-        maps["risk"] = {str(r.get("ticker")): r for r in rows}
+        risk_map: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            ticker = str(r.get("ticker") or "")
+            if not ticker:
+                continue
+            rr = dict(r)
+            regular_rows = _to_int(rr.get("regular_rows"), 0)
+            rr["liquidity_source"] = "FEATURE_SNAPSHOT" if regular_rows > 0 else "MISSING"
+            risk_map[ticker] = rr
+        maps["risk"] = risk_map
 
     if table_exists("stock_flow_daily"):
         rows = ch_select(
@@ -1157,10 +1180,17 @@ GROUP BY ticker
                 continue
             adv20 = _to_float(r.get("adv20_traded_value_krw"), 0.0)
             if ticker not in maps["risk"]:
-                maps["risk"][ticker] = {"ticker": ticker, "liquidity_krw": adv20, "spread_bp": 0.0}
+                maps["risk"][ticker] = {
+                    "ticker": ticker,
+                    "liquidity_krw": adv20,
+                    "spread_bp": 0.0,
+                    "liquidity_source": "ADV20_FALLBACK" if adv20 > 0 else "MISSING",
+                    "regular_rows": 0,
+                }
                 continue
             if _to_float(maps["risk"][ticker].get("liquidity_krw"), 0.0) <= 0 and adv20 > 0:
                 maps["risk"][ticker]["liquidity_krw"] = adv20
+                maps["risk"][ticker]["liquidity_source"] = "ADV20_FALLBACK"
 
     if table_exists("hidden_relation_reasoning"):
         rows = ch_select(
@@ -1344,6 +1374,8 @@ def main() -> int:
     total_scores: list[float] = []
     stage5_fail_counter: Counter[str] = Counter()
     stage5_exec_zero_counter: Counter[str] = Counter()
+    stage5_missing_snapshot_cnt = 0
+    stage5_liq_real_cnt = 0
     flow_unknown_count = 0
     prefilter_low_liquidity_count = 0
 
@@ -1588,38 +1620,50 @@ def main() -> int:
         risk = maps["risk"].get(ticker, {})
         liquidity = _to_float(risk.get("liquidity_krw"), 0.0)
         spread_bp = _to_float(risk.get("spread_bp"), 0.0)
+        liquidity_source = str(risk.get("liquidity_source") or ("MISSING" if liquidity <= 0 else "UNKNOWN"))
         stage5_fail_codes: list[str] = []
         stage5_exec_multiplier = 1.0
-        if liquidity >= 5_000_000_000:
+        if liquidity <= 0:
+            stage5_score = 20.0
+            stage5_exec_multiplier = 0.0
+            stage5_fail_codes.append("MISSING_LIQUIDITY_SNAPSHOT")
+            abs_blocks.append("MISSING_LIQUIDITY_SNAPSHOT")
+            stage5_missing_snapshot_cnt += 1
+        elif liquidity >= STAGE5_LIQ_THRESH_50B:
             stage5_score = 100.0
             stage5_exec_multiplier = 1.0
-        elif liquidity >= 1_000_000_000:
+        elif liquidity >= STAGE5_LIQ_THRESH_10B:
             stage5_score = 80.0
             stage5_exec_multiplier = 0.7
-        elif liquidity >= 500_000_000:
+        elif liquidity >= STAGE5_LIQ_THRESH_5B:
             stage5_score = 60.0
             stage5_exec_multiplier = 0.4
-        elif liquidity >= 300_000_000:
+        elif liquidity >= STAGE5_LIQ_THRESH_3B:
             stage5_score = 40.0
             stage5_exec_multiplier = 0.2
         else:
             stage5_score = 20.0
             stage5_exec_multiplier = 0.0
-            stage5_fail_codes.append("LOW_LIQUIDITY")
-            abs_blocks.append("LOW_LIQUIDITY")
-        if spread_bp > 80:
+            stage5_fail_codes.append("LOW_LIQUIDITY_REAL")
+            abs_blocks.append("LOW_LIQUIDITY_REAL")
+            stage5_liq_real_cnt += 1
+        if spread_bp > STAGE5_SPREAD_BLOCK_BP:
             stage5_score = 0.0
             stage5_fail_codes.append("SPREAD_TOO_WIDE")
             stage5_exec_multiplier = 0.0
             abs_blocks.append("SPREAD_TOO_WIDE")
-        elif spread_bp > 50:
+        elif spread_bp > STAGE5_SPREAD_WARN_BP:
             stage5_score = max(0.0, stage5_score - 15.0)
             stage5_fail_codes.append("SPREAD_WIDE")
             stage5_exec_multiplier = min(stage5_exec_multiplier, 0.6)
         # Step5는 기본적으로 사이징 엔진: 하드 차단은 극단 저유동/초광스프레드만 적용.
         stage5_pass = stage5_exec_multiplier > 0.0
         if not stage5_pass:
-            if "LOW_LIQUIDITY" not in stage5_fail_codes and "LOW_LIQUIDITY_CONDITIONAL" not in stage5_fail_codes:
+            if (
+                "LOW_LIQUIDITY_REAL" not in stage5_fail_codes
+                and "MISSING_LIQUIDITY_SNAPSHOT" not in stage5_fail_codes
+                and "LOW_LIQUIDITY_CONDITIONAL" not in stage5_fail_codes
+            ):
                 stage5_fail_codes.append("EXEC_BLOCKED")
         else:
             explain_codes.append("LIQUIDITY_OK")
@@ -1697,6 +1741,7 @@ def main() -> int:
                 "primary_event_frame_id": str(event.get("frame_id", "") or ""),
                 "primary_reasoning_id": str((maps["reasoning"].get(ticker, {}) or {}).get("reasoning_id", "") or ""),
                 "explanation_codes": explain_codes[:8],
+                "liquidity_source": liquidity_source,
                 "created_at": now_ts,
             }
         )
@@ -1768,6 +1813,11 @@ def main() -> int:
             "action_posture": stage1.action_posture,
             "stress_flags": stage1.stress_flags,
         },
+        "stage0": {
+            "freshness_map": stage0.freshness_map,
+            "freshness_score": round(stage0.freshness_score, 2),
+            "null_ratio": round(stage0.null_ratio, 4),
+        },
         "stage2": {
             "market_score": round(market_stage2.score, 2),
             "valid": market_stage2.valid,
@@ -1792,6 +1842,31 @@ def main() -> int:
         "stage5": {
             "fail_summary": dict(stage5_fail_counter),
             "exec_zero_summary": dict(stage5_exec_zero_counter),
+            "policy": {
+                "liquidity_tiers_krw": {
+                    "gte_50eok": int(STAGE5_LIQ_THRESH_50B),
+                    "gte_10eok": int(STAGE5_LIQ_THRESH_10B),
+                    "gte_5eok": int(STAGE5_LIQ_THRESH_5B),
+                    "gte_3eok": int(STAGE5_LIQ_THRESH_3B),
+                    "lt_3eok_abs_block_code": "LOW_LIQUIDITY_REAL",
+                    "missing_snapshot_abs_block_code": "MISSING_LIQUIDITY_SNAPSHOT",
+                },
+                "spread_bp": {
+                    "warn": STAGE5_SPREAD_WARN_BP,
+                    "abs_block": STAGE5_SPREAD_BLOCK_BP,
+                },
+            },
+            "health": {
+                "liquidity_snapshot_missing_count": stage5_missing_snapshot_cnt,
+                "liquidity_real_low_count": stage5_liq_real_cnt,
+                "liquidity_snapshot_coverage_pct": round(
+                    0.0
+                    if len(candidates) <= 0
+                    else (100.0 * float(max(0, len(candidates) - stage5_missing_snapshot_cnt)) / float(len(candidates))),
+                    2,
+                ),
+                "liquidity_snapshot_age_minutes": _to_int(stage0.freshness_map.get("feature_snapshot"), 0),
+            },
             "prefilter_liquidity_krw": prefilter_liquidity_krw,
             "prefilter_low_liquidity_count": prefilter_low_liquidity_count,
         },
