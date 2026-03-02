@@ -213,6 +213,8 @@ bash scripts/ops/deploy_to_runtime.sh
 - 파이프라인 모드는 `send_decision_dryrun_telegram.py`를 재사용해 `decision_run/decision_candidate` 기반 메시지를 생성한다.
 - 파이프라인 모드 메시지에 `매크로 24h Digest`를 추가해 티커 매핑이 없는 지정학/전쟁/유가 이슈도 노출한다.
 - 유망주 상세(뉴스 링크/연관 해석/타이밍 근거)는 브리핑 생성 시 `news`, `news_event_frames`, `hidden_relation_signals`, `technical_signals`를 추가 조회해 보강한다.
+- `DOORAY_SEND_RELATION_PLUS_A=1`일 때 기본 브리핑 뒤에 `연관관계 +A 브리핑`을 2차 전송한다.
+  - 조정 파라미터: `DOORAY_RELATION_PLUS_A_DELAY_SEC`(기본 2초), `DOORAY_RELATION_PLUS_A_TOP`(기본 3), `DOORAY_RELATION_PLUS_A_HYPOTHESIS`(기본 3)
 
 ### 11-4. 운영 실행 예시
 ```bash

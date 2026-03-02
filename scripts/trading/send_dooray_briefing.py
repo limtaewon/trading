@@ -15,9 +15,9 @@ import subprocess
 import argparse
 import re
 import html
+import time
 from datetime import datetime
-from urllib.parse import quote_plus
-from urllib.request import urlopen, Request
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -26,9 +26,29 @@ from market_realtime import fetch_naver_realtime_indices, fetch_naver_usdkrw
 
 bootstrap_openclaw_env()
 
-CLICKHOUSE_HTTP = os.environ.get("CLICKHOUSE_HOST", "http://localhost:8123").strip()
-CH_USER = os.environ.get("CLICKHOUSE_USER", "default").strip()
-CH_PASSWORD = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
+def _resolve_clickhouse():
+    raw_url = (
+        os.environ.get("CLICKHOUSE_URL", "").strip()
+        or os.environ.get("CLICKHOUSE_HOST", "").strip()
+        or "http://localhost:8123"
+    )
+    user = os.environ.get("CLICKHOUSE_USER", "").strip()
+    pw = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
+    sp = urlsplit(raw_url)
+    if sp.username and not user:
+        user = sp.username
+        pw = sp.password or pw
+    if sp.username:
+        netloc = sp.hostname or "localhost"
+        if sp.port:
+            netloc = f"{netloc}:{sp.port}"
+        raw_url = urlunsplit((sp.scheme or "http", netloc, sp.path or "", sp.query, sp.fragment))
+    if not user:
+        user = "default"
+    return raw_url, user, pw
+
+
+CLICKHOUSE_HTTP, CH_USER, CH_PASSWORD = _resolve_clickhouse()
 CH_DB = os.environ.get("CLICKHOUSE_DB", "trading").strip() or "trading"
 
 WEBHOOK = os.environ.get("DOORAY_WEBHOOK_URL", "").strip()
@@ -90,19 +110,307 @@ def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clust
     return msg, raw
 
 
+def _short(s: str, n: int = 96) -> str:
+    txt = str(s or "").strip()
+    if len(txt) <= n:
+        return txt
+    return txt[: max(0, n - 1)] + "…"
+
+
+def _classify_exec_possible(action: str, abs_blocks: list[str], fail_codes: list[str]) -> bool:
+    if abs_blocks:
+        return False
+    hard_fail = {"MISSING_LIQUIDITY_SNAPSHOT", "LOW_LIQUIDITY", "LOW_LIQUIDITY_REAL"}
+    if any(str(c) in hard_fail for c in (fail_codes or [])):
+        return False
+    return action.upper() in {"BUY", "REDUCE", "HOLD"}
+
+
+def _action_delta(action: str, exec_possible: bool, fail_codes: list[str], abs_blocks: list[str]) -> str:
+    a = str(action or "").upper()
+    if abs_blocks:
+        return f"하향 유지 ({','.join(abs_blocks)})"
+    if not exec_possible:
+        if fail_codes:
+            return f"하향 유지 ({','.join([str(x) for x in fail_codes[:2]])})"
+        return "하향 유지 (실행 제약)"
+    if a == "BUY":
+        return "상향 유지 (매수 조건 충족)"
+    if a == "REDUCE":
+        return "하향 유지 (리스크 감축)"
+    return "유지 (조건 관찰)"
+
+
+def _ticker_name_map(tickers: list[str]) -> dict[str, str]:
+    if not tickers:
+        return {}
+    in_sql = sql_in_strings(tickers)
+    rows = ch_query(
+        f"""
+SELECT ticker, any(ticker_name) AS ticker_name
+FROM trading.technical_signals
+WHERE date = (SELECT max(date) FROM trading.technical_signals)
+  AND ticker IN {in_sql}
+GROUP BY ticker
+"""
+    )
+    out = {str(r.get("ticker") or ""): str(r.get("ticker_name") or "").strip() for r in rows}
+    return {k: v for k, v in out.items() if k and v}
+
+
+def build_relation_plus_a_message(decision_id: str, top_candidates: int = 3, top_hypothesis: int = 3):
+    did = str(decision_id or "").strip()
+    run_rows = ch_query(
+        f"""
+SELECT
+  decision_id,
+  toString(decision_time) AS decision_time_s,
+  toString(absolute_block_reason) AS abs_blocks_s,
+  stage_debug_json
+FROM trading.decision_run
+WHERE decision_id = {sql_quote(did)}
+LIMIT 1
+"""
+    )
+    if not run_rows:
+        return "", {}
+    run = run_rows[0]
+    cand_rows = ch_query(
+        f"""
+SELECT
+  ticker,
+  action,
+  total_score,
+  toString(absolute_block_reason) AS abs_blocks_s,
+  toString(stage5_fail_codes) AS fail_codes_s,
+  primary_reasoning_id,
+  primary_cluster_id
+FROM trading.decision_candidate
+WHERE decision_id = {sql_quote(did)}
+ORDER BY total_score DESC
+LIMIT {max(3, int(top_candidates) * 4)}
+"""
+    )
+    if not cand_rows:
+        return "", {}
+
+    tickers = [str(r.get("ticker") or "").strip() for r in cand_rows if is_valid_ticker(str(r.get("ticker") or ""))]
+    ticker_names = _ticker_name_map(tickers)
+
+    in_sql = sql_in_strings(tickers[:80])
+    reasoning_rows = ch_query(
+        f"""
+SELECT
+  ticker,
+  toString(asof_ts) AS asof_ts_s,
+  summary,
+  causal_chain,
+  confidence,
+  time_horizon,
+  source_cluster,
+  evidence_titles
+FROM trading.hidden_relation_reasoning
+WHERE ticker IN {in_sql}
+  AND asof_ts >= now() - INTERVAL 7 DAY
+ORDER BY asof_ts DESC, updated_at DESC
+LIMIT 800
+"""
+    )
+    by_ticker: dict[str, list[dict]] = {}
+    for r in reasoning_rows:
+        tk = str(r.get("ticker") or "").strip()
+        if not tk:
+            continue
+        by_ticker.setdefault(tk, []).append(r)
+
+    def pick_reasoning(tk: str, primary_reasoning_id: str) -> dict:
+        arr = by_ticker.get(tk, [])
+        if not arr:
+            return {}
+        target = str(primary_reasoning_id or "").strip()
+        if target:
+            for row in arr:
+                if str(row.get("asof_ts_s") or "").strip() == target:
+                    return row
+        return arr[0]
+
+    cluster_ids = sorted({str(r.get("primary_cluster_id") or "").strip() for r in cand_rows if str(r.get("primary_cluster_id") or "").strip()})
+    cluster_map = {}
+    if cluster_ids:
+        c_rows = ch_query(
+            f"""
+SELECT
+  cluster_id,
+  argMax(storyline, asof_ts) AS storyline,
+  argMax(state_label, asof_ts) AS state_label,
+  max(toFloat64(importance_max)) AS importance_max
+FROM trading.news_cluster_state
+WHERE cluster_id IN {sql_in_strings(cluster_ids)}
+GROUP BY cluster_id
+"""
+        )
+        cluster_map = {str(r.get("cluster_id") or ""): r for r in c_rows}
+
+    top_cards = []
+    for r in cand_rows:
+        tk = str(r.get("ticker") or "").strip()
+        if not is_valid_ticker(tk):
+            continue
+        action = str(r.get("action") or "").strip().upper()
+        abs_blocks = [x.strip().strip("'\"") for x in str(r.get("abs_blocks_s") or "").strip("[]").split(",") if x.strip()]
+        fail_codes = [x.strip().strip("'\"") for x in str(r.get("fail_codes_s") or "").strip("[]").split(",") if x.strip()]
+        exec_possible = _classify_exec_possible(action, abs_blocks, fail_codes)
+        reason = pick_reasoning(tk, str(r.get("primary_reasoning_id") or ""))
+        cid = str(r.get("primary_cluster_id") or "").strip()
+        cmeta = cluster_map.get(cid, {})
+        evidence_titles = reason.get("evidence_titles", [])
+        if not isinstance(evidence_titles, list):
+            evidence_titles = []
+        top_cards.append(
+            {
+                "ticker": tk,
+                "name": ticker_names.get(tk, tk),
+                "action": action,
+                "score": float(r.get("total_score") or 0.0),
+                "exec_possible": exec_possible,
+                "delta": _action_delta(action, exec_possible, fail_codes, abs_blocks),
+                "summary": str(reason.get("summary") or "").strip(),
+                "causal_chain": str(reason.get("causal_chain") or "").strip(),
+                "confidence": float(reason.get("confidence") or 0.0),
+                "time_horizon": str(reason.get("time_horizon") or "").strip(),
+                "source_cluster": str(reason.get("source_cluster") or cid),
+                "evidence_titles": [str(x) for x in evidence_titles[:2]],
+                "fail_codes": fail_codes,
+                "abs_blocks": abs_blocks,
+                "cluster_storyline": str(cmeta.get("storyline") or "").strip(),
+                "cluster_state": str(cmeta.get("state_label") or "").strip(),
+                "cluster_importance": float(cmeta.get("importance_max") or 0.0),
+            }
+        )
+        if len(top_cards) >= max(1, int(top_candidates)):
+            break
+
+    hypotheses = []
+    for c in top_cards:
+        chain = c["causal_chain"] or c["summary"] or c["cluster_storyline"]
+        if not chain:
+            continue
+        hypotheses.append(
+            {
+                "text": chain,
+                "ticker": c["ticker"],
+                "name": c["name"],
+                "confidence": c["confidence"],
+                "horizon": c["time_horizon"] or "1-3d",
+            }
+        )
+    hypotheses = sorted(hypotheses, key=lambda x: float(x.get("confidence") or 0.0), reverse=True)[: max(1, int(top_hypothesis))]
+
+    stage_debug = {}
+    try:
+        stage_debug = json.loads(str(run.get("stage_debug_json") or "{}"))
+    except Exception:
+        stage_debug = {}
+    all_cand_tickers = [str(r.get("ticker") or "").strip() for r in cand_rows if is_valid_ticker(str(r.get("ticker") or ""))]
+    fs_health = {}
+    try:
+        from send_decision_dryrun_telegram import _feature_snapshot_health  # type: ignore
+        fs_health = _feature_snapshot_health(all_cand_tickers)
+    except Exception:
+        fs_health = {"covered": 0.0, "total": float(len(all_cand_tickers)), "coverage_pct": 0.0}
+    relation_cov_num = sum(1 for c in top_cards if c.get("summary") or c.get("causal_chain"))
+    relation_cov_den = max(1, len(top_cards))
+    relation_cov_pct = (relation_cov_num / relation_cov_den) * 100.0
+    feature_cov_pct = float(fs_health.get("coverage_pct", 0.0) or 0.0)
+
+    quality = "PASS"
+    if feature_cov_pct < 80.0 or relation_cov_pct < 66.0:
+        quality = "WARN"
+    if feature_cov_pct < 50.0 or relation_cov_pct < 34.0:
+        quality = "FAIL"
+
+    abs_blocks = str(run.get("abs_blocks_s") or "")
+    if abs_blocks and abs_blocks not in {"[]", ""}:
+        core_line = "연관 신호는 존재하지만 실행 제약이 우선입니다."
+    else:
+        core_line = "연관 강도 상위 종목 중심으로 선별 대응이 유효합니다."
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [f"🧠 연관관계 +A 브리핑 ({now})", ""]
+    lines.append("[핵심 한줄]")
+    lines.append(f"- {core_line}")
+    lines.append("")
+    lines.append(f"[Top 가설 {max(1, int(top_hypothesis))}개]")
+    if hypotheses:
+        for h in hypotheses:
+            lines.append(
+                f"- {_short(h['text'], 88)} → {h['name']}({h['ticker']}) | "
+                f"신뢰도 {float(h.get('confidence') or 0.0):.2f} | 시계열 {h.get('horizon') or '1-3d'}"
+            )
+    else:
+        lines.append("- 유효한 연관 가설이 부족합니다.")
+    lines.append("")
+    lines.append("[액션 영향(기존판단 대비)]")
+    if top_cards:
+        for c in top_cards:
+            lines.append(
+                f"- {c['name']}({c['ticker']}): {c['delta']}"
+            )
+    else:
+        lines.append("- 후보 카드 없음")
+    lines.append("")
+    lines.append("[종목별 연관 카드]")
+    for c in top_cards:
+        lines.append(
+            f"- {c['name']}({c['ticker']}) | 최종액션 {c['action']} | 실행가능 {'YES' if c['exec_possible'] else 'NO'}"
+        )
+        chain = c["causal_chain"] or c["summary"] or c["cluster_storyline"] or "-"
+        lines.append(f"  인과사슬: {_short(chain, 96)}")
+        e1 = c["evidence_titles"][0] if len(c["evidence_titles"]) > 0 else "-"
+        e2 = c["evidence_titles"][1] if len(c["evidence_titles"]) > 1 else "-"
+        lines.append(f"  근거: {_short(e1, 54)}, {_short(e2, 54)}")
+        lines.append(
+            f"  신뢰도: {c['confidence']:.2f} | 시간지평: {c['time_horizon'] or '1-3d'} | 액션보정: {c['delta']}"
+        )
+    lines.append("")
+    lines.append("[무효화 조건]")
+    lines.append("- Stage2 충격레벨 ALERT 이상 지속 또는 거래량/후속근거 약화 시 가설 즉시 약화")
+    lines.append("")
+    lines.append("[신뢰도 스탬프]")
+    lines.append(
+        f"- data_quality: {quality} (feature_snapshot_coverage {int(fs_health.get('covered',0))}/{int(fs_health.get('total',0))}, "
+        f"relation_coverage {relation_cov_num}/{relation_cov_den})"
+    )
+
+    raw = {
+        "mode": "relation_plus_a",
+        "decision_id": did,
+        "core_line": core_line,
+        "hypotheses": hypotheses,
+        "cards": top_cards,
+        "quality": quality,
+        "feature_snapshot_health": fs_health,
+        "relation_coverage": {"num": relation_cov_num, "den": relation_cov_den, "pct": relation_cov_pct},
+    }
+    return "\n".join(lines), raw
+
+
 def refresh_market_data():
     run_cmd("python3 ~/.openclaw/scripts/trading/collect_market_data.py --only index --days 2")
     run_cmd("python3 ~/.openclaw/scripts/trading/collect_market_data.py --only fx --days 2")
 
 
 def ch_query(sql: str):
-    url = (
-        f"{CLICKHOUSE_HTTP}/?user={quote_plus(CH_USER)}&password={quote_plus(CH_PASSWORD)}"
-        f"&database={quote_plus(CH_DB)}&default_format=JSON"
+    auth = (CH_USER, CH_PASSWORD) if CH_USER else None
+    resp = requests.post(
+        CLICKHOUSE_HTTP,
+        params={"database": CH_DB, "default_format": "JSON"},
+        data=(sql + "\n").encode("utf-8"),
+        timeout=30,
+        auth=auth,
     )
-    req = Request(url, data=sql.encode("utf-8"), method="POST")
-    with urlopen(req, timeout=20) as r:
-        payload = json.loads(r.read().decode("utf-8"))
+    resp.raise_for_status()
+    payload = resp.json() if resp.text else {}
     return payload.get("data", [])
 
 
@@ -865,12 +1173,21 @@ def main():
     ap.add_argument("--top-candidates", type=int, default=5, help="유망주 표시 개수")
     ap.add_argument("--clusters", type=int, default=3, help="클러스터 표시 개수")
     ap.add_argument("--legacy-format", action="store_true", help="기존 도레이 브리핑 포맷 사용")
+    ap.add_argument("--relation-plus-a", action="store_true", help="+A 연관관계 브리핑도 함께 전송")
     args = ap.parse_args()
     if not WEBHOOK and not args.dry_run:
         raise SystemExit("DOORAY_WEBHOOK_URL 환경변수가 없습니다.")
 
     refresh_market_data()
     use_pipeline = os.environ.get("DOORAY_USE_PIPELINE_BRIEFING", "1") == "1" and not args.legacy_format
+    plus_a_enabled = (
+        args.relation_plus_a
+        or (os.environ.get("DOORAY_SEND_RELATION_PLUS_A", "1") == "1")
+    )
+    plus_a_delay = max(0, int(os.environ.get("DOORAY_RELATION_PLUS_A_DELAY_SEC", "2")))
+    plus_a_top = max(1, int(os.environ.get("DOORAY_RELATION_PLUS_A_TOP", "3")))
+    plus_a_hypothesis = max(1, int(os.environ.get("DOORAY_RELATION_PLUS_A_HYPOTHESIS", "3")))
+
     if use_pipeline:
         msg, raw = build_pipeline_message(
             decision_id=args.decision_id,
@@ -883,10 +1200,30 @@ def main():
 
     if args.dry_run:
         print(msg)
+        if use_pipeline and plus_a_enabled:
+            plus_a_msg, _ = build_relation_plus_a_message(
+                decision_id=str(raw.get("decision_id", "")),
+                top_candidates=plus_a_top,
+                top_hypothesis=plus_a_hypothesis,
+            )
+            if plus_a_msg:
+                print("\n\n" + "=" * 48 + "\n")
+                print(plus_a_msg)
         return
 
     digest = hashlib.sha256(msg.encode("utf-8")).hexdigest()
     news_digest = digest
+    relation_msg = ""
+    relation_raw = {}
+    relation_digest = ""
+    if use_pipeline and plus_a_enabled:
+        relation_msg, relation_raw = build_relation_plus_a_message(
+            decision_id=str(raw.get("decision_id", "")),
+            top_candidates=plus_a_top,
+            top_hypothesis=plus_a_hypothesis,
+        )
+        if relation_msg:
+            relation_digest = hashlib.sha256(relation_msg.encode("utf-8")).hexdigest()
 
     state = load_state()
     if state.get("last_news_digest") == news_digest:
@@ -897,6 +1234,13 @@ def main():
     resp = requests.post(WEBHOOK, json={"text": msg}, timeout=10)
     resp.raise_for_status()
 
+    if relation_msg and relation_digest:
+        if state.get("last_relation_digest") != relation_digest:
+            if plus_a_delay > 0:
+                time.sleep(plus_a_delay)
+            r2 = requests.post(WEBHOOK, json={"text": relation_msg}, timeout=10)
+            r2.raise_for_status()
+
     next_state = dict(state)
     next_state.update({
         "last_digest": digest,
@@ -906,6 +1250,9 @@ def main():
     if use_pipeline:
         next_state["last_mode"] = "pipeline"
         next_state["last_decision_id"] = str(raw.get("decision_id", ""))
+        if relation_digest:
+            next_state["last_relation_digest"] = relation_digest
+            next_state["last_relation_decision_id"] = str(relation_raw.get("decision_id", ""))
     else:
         next_state["last_mode"] = "legacy"
     save_state(next_state)

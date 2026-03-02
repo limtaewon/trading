@@ -48,6 +48,8 @@
   send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
   (decision_run / decision_candidate 기반)
   pipeline 모드에서는 "매크로 24h Digest"를 추가로 붙여 티커 매핑 실패 뉴스도 노출
+  `DOORAY_SEND_RELATION_PLUS_A=1`(기본)일 때 기본 브리핑 직후 `연관관계 +A 브리핑`을 2차 전송
+  (`DOORAY_RELATION_PLUS_A_DELAY_SEC`, `DOORAY_RELATION_PLUS_A_TOP`, `DOORAY_RELATION_PLUS_A_HYPOTHESIS`로 조정)
 - 연관 매핑 정책:
   hidden_relation_scorer.py는 technical_signals뿐 아니라
   `~/.openclaw/workspace/STOCKS.csv` + `~/.openclaw/data/krx_stocks.json`
