@@ -38,7 +38,7 @@ import logging
 import hashlib
 import shutil
 from ticker_mapper import TickerMapper
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -346,6 +346,53 @@ def clean_html(text):
     return text.strip()
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _to_utc_dt(value) -> datetime:
+    if isinstance(value, datetime):
+        dtv = value
+    else:
+        s = str(value or "").strip()
+        if not s:
+            raise ValueError("empty datetime")
+        dtv = None
+        try:
+            dtv = parsedate_to_datetime(s)
+        except Exception:
+            pass
+        if dtv is None:
+            s_norm = s.replace("T", " ")
+            if s_norm.endswith("Z"):
+                s_norm = s_norm[:-1] + "+00:00"
+            try:
+                dtv = datetime.fromisoformat(s_norm)
+            except Exception:
+                dtv = None
+        if dtv is None:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+                try:
+                    dtv = datetime.strptime(s, fmt)
+                    break
+                except Exception:
+                    continue
+        if dtv is None:
+            raise ValueError(f"unsupported datetime format: {s}")
+    if dtv.tzinfo is None:
+        dtv = dtv.replace(tzinfo=timezone.utc)
+    else:
+        dtv = dtv.astimezone(timezone.utc)
+    return dtv
+
+
+def _fmt_utc(value) -> str:
+    try:
+        return _to_utc_dt(value).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return _now_utc().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def determine_mode():
     if len(sys.argv) > 1 and sys.argv[1] in ("morning", "trading"):
         return sys.argv[1]
@@ -383,7 +430,7 @@ def collect_all_news():
 
     cutoff_dt = None
     if BACKFILL_DAYS > 0:
-        cutoff_dt = datetime.now().astimezone().replace(tzinfo=None) - timedelta(days=BACKFILL_DAYS)
+        cutoff_dt = _now_utc() - timedelta(days=BACKFILL_DAYS)
 
     backfill_start_date = None
     backfill_end_date = None
@@ -421,7 +468,7 @@ def collect_all_news():
                     pub_dt = None
                     pub_date = None
                     try:
-                        pub_dt = parsedate_to_datetime(item.get("pubDate", "")).replace(tzinfo=None)
+                        pub_dt = _to_utc_dt(item.get("pubDate", ""))
                         pub_date = pub_dt.date()
                     except Exception:
                         pub_dt = None
@@ -1184,14 +1231,7 @@ def _escape(s: str) -> str:
 
 
 def _research_news_id(published_at, source_url: str, title: str) -> str:
-    pub_s = ""
-    if isinstance(published_at, datetime):
-        pub_s = published_at.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        try:
-            pub_s = parsedate_to_datetime(str(published_at)).strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            pub_s = str(published_at or "").strip()
+    pub_s = _fmt_utc(published_at)
     key = f"{pub_s}|{source_url or ''}|{title or ''}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
@@ -1199,7 +1239,7 @@ def _research_news_id(published_at, source_url: str, title: str) -> str:
 def _rows_to_values(rows):
     values = []
     for r in rows:
-        published = r["published_at"].strftime("%Y-%m-%d %H:%M:%S")
+        published = _fmt_utc(r.get("published_at"))
         title_esc = _escape(r["title"])
         summary_esc = _escape(r["summary"])
         url_esc = _escape(r["source_url"])
@@ -1215,7 +1255,7 @@ def _rows_to_values(rows):
             emb_str = "[]"
 
         values.append(
-            f"('{published}', now(), '{title_esc}', '{summary_esc}', "
+            f"(toDateTime('{published}','UTC'), now('UTC'), '{title_esc}', '{summary_esc}', "
             f"'{url_esc}', '{cat_esc}', {int(r['importance'])}, '{_escape(r['sentiment'])}', "
             f"'{impact_esc}', [{tickers_str}], '{trigger}', {emb_str})"
         )
@@ -1309,9 +1349,9 @@ def enqueue_news_research_queue(rows: list[dict], source: str = "collect_news") 
             continue
         published_at = r.get("published_at")
         if isinstance(published_at, datetime):
-            pub_s = published_at.strftime("%Y-%m-%d %H:%M:%S")
+            pub_s = _fmt_utc(published_at)
         else:
-            pub_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            pub_s = _fmt_utc(published_at)
         title = str(r.get("title", "") or "")
         source_url = str(r.get("source_url", "") or "")
         summary = str(r.get("summary", "") or "")
@@ -1344,10 +1384,10 @@ def enqueue_news_research_queue(rows: list[dict], source: str = "collect_news") 
             tickers_sql = ",".join([f"'{_escape(t)}'" for t in r["tickers"]])
             vals.append(
                 "("
-                f"now(), '{_escape(r['news_id'])}', toDateTime('{_escape(r['published_at'])}'), "
+                f"now('UTC'), '{_escape(r['news_id'])}', toDateTime('{_escape(r['published_at'])}','UTC'), "
                 f"'{_escape(r['title'])}', '{_escape(r['summary'])}', '{_escape(r['source_url'])}', "
                 f"{int(r['importance'])}, '{_escape(r['sentiment'])}', '{_escape(r['impact_type'])}', "
-                f"[{tickers_sql}], 'pending', 0, now(), '', '{_escape(r['source'])}', now(), now()"
+                f"[{tickers_sql}], 'pending', 0, now('UTC'), '', '{_escape(r['source'])}', now('UTC'), now('UTC')"
                 ")"
             )
         sql = (
@@ -1400,9 +1440,9 @@ def analyze_and_insert(news_list, embeddings, trigger_type="cron"):
             ic[importance] = ic.get(importance, 0) + 1
 
             try:
-                pub_dt = parsedate_to_datetime(news["pub_date"])
+                pub_dt = _to_utc_dt(news["pub_date"])
             except Exception:
-                pub_dt = datetime.now()
+                pub_dt = _now_utc()
 
             emb = batch_embs[j] if j < len(batch_embs) else []
 
@@ -1452,8 +1492,8 @@ def analyze_and_insert(news_list, embeddings, trigger_type="cron"):
             except Exception:
                 analysis_conf_raw = 0.6
             analysis_conf = _clamp(analysis_conf_raw, 0.0, 1.0)
-            published_s = pub_dt.strftime("%Y-%m-%d %H:%M:%S")
-            now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            published_s = _fmt_utc(pub_dt)
+            now_s = _fmt_utc(_now_utc())
 
             frame_rows.append(
                 {

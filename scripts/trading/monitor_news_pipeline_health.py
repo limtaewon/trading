@@ -19,6 +19,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -27,10 +28,28 @@ from env_bootstrap import bootstrap_openclaw_env
 
 bootstrap_openclaw_env()
 
-CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "").strip() or os.environ.get("CLICKHOUSE_HOST", "http://localhost:8123").strip() or "http://localhost:8123"
-CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "").strip()
-CLICKHOUSE_PASS = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
-CLICKHOUSE_AUTH = (CLICKHOUSE_USER, CLICKHOUSE_PASS) if CLICKHOUSE_USER else None
+def _resolve_clickhouse() -> tuple[str, tuple[str, str] | None]:
+    raw_url = (
+        os.environ.get("CLICKHOUSE_URL", "").strip()
+        or os.environ.get("CLICKHOUSE_HOST", "").strip()
+        or "http://localhost:8123"
+    )
+    user = os.environ.get("CLICKHOUSE_USER", "").strip()
+    pw = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
+    sp = urlsplit(raw_url)
+    if sp.username and not user:
+        user = sp.username
+        pw = sp.password or pw
+    if sp.username:
+        netloc = sp.hostname or "localhost"
+        if sp.port:
+            netloc = f"{netloc}:{sp.port}"
+        raw_url = urlunsplit((sp.scheme or "http", netloc, sp.path or "", sp.query, sp.fragment))
+    auth = (user, pw) if user else None
+    return raw_url, auth
+
+
+CLICKHOUSE_URL, CLICKHOUSE_AUTH = _resolve_clickhouse()
 STATE_FILE = Path.home() / ".openclaw" / "data" / "news_pipeline_health.json"
 
 
@@ -243,4 +262,3 @@ LIMIT 1
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

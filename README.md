@@ -164,7 +164,8 @@ bash scripts/ops/deploy_to_runtime.sh
 ### 11-1-1. `news_research` 조인/반영 방식(실운영)
 - `refresh_interest_watchlist.py`의 후보 SQL에서 `news_research`를 뉴스ID가 아닌 **티커 기준**으로 조인한다.
 - 조인 키 생성:
-  - `arrayJoin(direct_tickers) AS ticker`로 직접 연관 종목을 펼친다.
+  - `direct/secondary/tertiary` 3계층 티커를 각각 펼친다.
+  - 가중치: `direct=1.0`, `secondary=0.55`, `tertiary=0.30`
   - 6자리 종목코드/`000000` 제외 필터를 적용한다.
 - 유니버스 확장(`research_tickers`):
   - 최근 `WATCHLIST_RESEARCH_LOOKBACK_DAYS` 기간
@@ -173,7 +174,9 @@ bash scripts/ops/deploy_to_runtime.sh
   - `confidence >= WATCHLIST_RESEARCH_MIN_CONF`
   - 조건을 만족한 ticker를 유니버스에 `UNION DISTINCT`로 편입한다.
 - 점수 반영(`research_agg`):
-  - `research_direct_cnt`, `research_avg_conf`, `research_valid_cnt`, `research_conflict_cnt`, `research_last_hours`를 ticker별 집계한다.
+  - `research_direct_cnt`, `research_secondary_cnt`, `research_tertiary_cnt`를 집계한다.
+  - `research_weighted_refs`, `research_weighted_conf`를 가중 집계한다.
+  - `research_last_hours`는 `greatest(dateDiff(...), 0)`로 음수 latency를 제거한다.
   - `LEFT JOIN research_agg nr ON nr.ticker = u.ticker`로 결합한다.
   - 후보 생존 조건과 `composite_score` 가점/감점에 함께 반영한다.
 - 결과 전파:
@@ -188,11 +191,22 @@ bash scripts/ops/deploy_to_runtime.sh
 - `WATCHLIST_EVENT_RULE_FLOOR`(기본 40)로 explain_ready 기반 이벤트 종목 최소 점수 바닥을 적용한다.
 - LLM 점수 반영은 `rule_score + llm_weight_effective * (llm_score-50)` 형태로 적용해 중립값(50) 편향을 제거한다.
 - LLM 호출 실패 시 자동으로 룰 기반 점수만 사용한다.
+- 액션 분류는 기술점수 단일 기준이 아니라 `final/rule score + explain_ready + relation support(+quality) + research weighted signal` 결합으로 판정한다.
 
-### 11-2-1. 수급 스냅샷 보강 정책
+### 11-2-1. 시간축 표준화(UTC)
+- `collect_news.py`, `analyze_news_research.py`는 `news_research/news_research_queue` 적재 시 UTC 기준으로 저장한다.
+- `published_at`이 미래시각(시간대 오인)으로 들어오는 경우 자동 보정해 음수 latency를 방지한다.
+- 표시 레이어(브리핑/리포트)는 필요 시 로컬 타임존으로 변환해 보여준다.
+- 기존 과거 레코드는 키컬럼 제약으로 직접 UPDATE가 어려워 소비 쿼리에서 `greatest(dateDiff(...), 0)`로 음수 latency를 방어한다.
+
+### 11-2-2. 수급 스냅샷 보강 정책
 - `collect_market_data.py`의 종목 수급 스냅샷(`feature_snapshot`) 대상은 watchlist 최신 종목을 우선 사용한다.
 - 부족분만 `v_trading_dashboard` 상위로 보강한다.
 - 관련 파라미터: `INVESTOR_FLOW_SYMBOL_LIMIT`(기본 30), `INVESTOR_FLOW_WATCHLIST_MULTIPLIER`(기본 3)
+
+### 11-2-3. 공통 안정화(LLM/ClickHouse)
+- LLM 호출은 기본 `gpt-5.3-codex-spark`, 복구 가능 오류(레이트리밋/세션 만료/컨텍스트 초과) 시 `gpt-5.3-codex`로 자동 폴백한다.
+- ClickHouse 연결은 `CLICKHOUSE_URL=http://user:pass@host:8123`와 `CLICKHOUSE_HOST + USER/PASS` 두 형식을 모두 정규화해 인증 오류 재발을 줄인다.
 
 ### 11-3. 두레이 보고 흐름
 - 기본값(`DOORAY_USE_PIPELINE_BRIEFING=1`)에서 `send_dooray_briefing.py`는 파이프라인 모드를 사용한다.
@@ -227,6 +241,9 @@ python3 ~/.openclaw/scripts/trading/replay_decision.py --lookback-days 14 --limi
 
 # 7) Outcome 집계(최근 decision 후보의 1/3/5일 성과 연결)
 python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45 --limit-decisions 150 --horizons 1,3,5
+
+# 8) Outcome A/B 비교(적용 전후 구간 성능 비교)
+python3 ~/.openclaw/scripts/trading/report_decision_outcome_ab.py --lookback-days 30 --horizon 3
 ```
 
 ## 9) 보안 운영
@@ -272,7 +289,7 @@ python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45
 ### 10-3. 연관성/관심종목 레이어
 | 테이블 | 역할 | 주 생성/갱신 스크립트 | 주 사용 스크립트 |
 |---|---|---|---|
-| `hidden_relation_signals` | 종목 간 숨은 연관성 점수/바이어스 | 연관성 파이프라인 산출물 | `prepare_gpt_prompt.py`, `refresh_interest_watchlist.py`, `send_dooray_briefing.py`, `execute_gpt_orders.py` |
+| `hidden_relation_signals` | 종목 간 숨은 연관성 점수/바이어스/품질(`relation_quality`) | 연관성 파이프라인 산출물 | `prepare_gpt_prompt.py`, `refresh_interest_watchlist.py`, `send_dooray_briefing.py`, `execute_gpt_orders.py` |
 | `hidden_relation_reasoning` | 연관성 인과체인 텍스트 추론 결과 | `llm_relation_reasoner.py`(CREATE/INSERT) | `prepare_gpt_prompt.py`, `execute_gpt_orders.py`(뷰 경유 포함) |
 | `interest_watchlist` | 점수 기반 관심종목 스냅샷 | `refresh_interest_watchlist.py` | 운영 모니터링/브리핑 |
 

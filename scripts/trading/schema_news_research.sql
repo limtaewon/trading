@@ -1,9 +1,9 @@
 -- 뉴스 심층 연구 결과 저장 테이블
 CREATE TABLE IF NOT EXISTS trading.news_research
 (
-    analyzed_at            DateTime DEFAULT now(),
+    analyzed_at            DateTime('UTC') DEFAULT now('UTC'),
     news_id                String,                  -- sha256(published_at|source_url|title)
-    published_at           DateTime,
+    published_at           DateTime('UTC'),
     title                  String,
     source_url             String,
     source_domain          String,
@@ -32,9 +32,9 @@ CREATE TABLE IF NOT EXISTS trading.news_research
     model_output_json      String,
     status                 LowCardinality(String) DEFAULT 'ok', -- ok|fallback|error
     retry_count            UInt16 DEFAULT 0,
-    next_retry_at          DateTime DEFAULT now(),
+    next_retry_at          DateTime('UTC') DEFAULT now('UTC'),
     last_error             String DEFAULT '',
-    created_at             DateTime DEFAULT now()
+    created_at             DateTime('UTC') DEFAULT now('UTC')
 )
 ENGINE = ReplacingMergeTree(created_at)
 ORDER BY (published_at, news_id)

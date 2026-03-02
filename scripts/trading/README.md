@@ -15,14 +15,16 @@
   monitor_watchlist_runs.py (run 메타 헬스체크/알림)
   prune_interest_watchlist.py (append snapshot retention prune)
 - watchlist 산출 정책:
-  후보 유니버스는 `technical_signals ∪ news ∪ news_event_frames ∪ hidden_relation_signals` 합집합
+  후보 유니버스는 `technical_signals ∪ news ∪ news_event_frames ∪ hidden_relation_signals ∪ news_research(직/간접)` 합집합
   candidate_pool(기본 200) 다중 버킷 선별 후 최종 limit(기본 30)만 저장
   저장은 append snapshot 방식(최신 ts 조회)
   오래된 스냅샷 정리는 `prune_interest_watchlist.py` 전용 잡에서 수행
   (`WATCHLIST_RETENTION_DAYS`, `WATCHLIST_RUN_RETENTION_DAYS`)
   `WATCHLIST_ADAPTIVE_WEIGHTING=1` + `WATCHLIST_EVENT_RULE_FLOOR`로 이벤트 기반 종목 결손 보정
+  액션 분류는 `technical_score` 단일이 아니라 `final/rule score + explain_ready + relation support(+quality) + research weighted signal` 결합 기준
   run 메타(`interest_watchlist_runs`)를 기록하고 decision은 최신 정상 run 기준으로 watchlist를 로드
   run 헬스 모니터는 `monitor_watchlist_runs.py` 전용 잡에서 점검/알림
+  ClickHouse 접속은 `CLICKHOUSE_URL=http://user:pass@host:8123` 형식도 자동 정규화(인증 분리)해 401/404 재발을 방지
 - Decision 운영 정책(실거래 정렬):
   universe는 `watchlist-only`로 강제(technical/feature fallback 미사용)
   watchlist 조회 source는 `WATCHLIST_ACTIVE_SOURCE`로 강제(기본: `enrich_data`)
@@ -50,11 +52,14 @@
   hidden_relation_scorer.py는 technical_signals뿐 아니라
   `~/.openclaw/workspace/STOCKS.csv` + `~/.openclaw/data/krx_stocks.json`
   전종목 마스터를 함께 사용해 엔티티→티커 매핑 커버리지를 보강
+  relation_quality(0~1)를 함께 산출해 저품질 연관 신호는 total_relation_score에 자동 감쇠 반영
 - news_research 워커 정책:
   analyze_news_research.py는 기본 단일 워커 락(`NEWS_RESEARCH_SINGLE_WORKER_LOCK=1`)으로 동시 처리 레이스를 방지
   락 파일: `~/.openclaw/state/news_research_worker.lock`
   큐 적체 시 backlog 기반 동적 처리량(`NEWS_RESEARCH_MAX_DYNAMIC_LIMIT`, `NEWS_RESEARCH_MAX_ITEMS_PER_RUN`)으로 드레인
   codex_jobs `data-news-research-15m`(주간 표준) + `data-news-research-night-drain-10m`(야간 백로그 드레인) 이중 운용
+  `news_research`/`news_research_queue` 시계열은 UTC 저장 기준으로 표준화
+  LLM 기본모델은 `gpt-5.3-codex-spark`, 장애/레이트리밋 등 복구 가능 오류 시 `gpt-5.3-codex` 폴백
 - 뉴스 파이프라인 헬스체크:
   monitor_news_pipeline_health.py
   점검항목: market_regime/news/news_cluster_state/news_event_frames/hidden_relation_signals/interest_watchlist_runs

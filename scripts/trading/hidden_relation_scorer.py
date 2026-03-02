@@ -97,6 +97,25 @@ def ch_insert_json_each_row(table: str, rows: list[dict[str, Any]], timeout_sec:
         _ = r.read()
 
 
+def ensure_schema() -> None:
+    """런타임 스키마 보강(하위호환)."""
+    statements = [
+        """
+ALTER TABLE trading.hidden_relation_signals
+ADD COLUMN IF NOT EXISTS relation_quality Float32 DEFAULT 0.5
+""",
+    ]
+    for sql in statements:
+        try:
+            url, headers = _ch_url_and_headers()
+            req = Request(url, data=sql.encode("utf-8"), headers=headers, method="POST")
+            with urlopen(req, timeout=30) as r:
+                _ = r.read()
+        except Exception:
+            # 테이블 미생성/권한 이슈 등은 다음 주기에 재시도
+            continue
+
+
 def _to_float(v: Any, default: float = 0.0) -> float:
     try:
         return float(v)
@@ -429,6 +448,28 @@ def _score_cluster_row(r: dict[str, Any]) -> float:
     return state_w * importance * float(direction) * changed_mult
 
 
+def _relation_quality(a: _Agg, avg_calib: float) -> float:
+    event_n = max(0, len(a.support_event_ids))
+    cluster_n = max(0, int(a.support_clusters))
+    src_n = max(0, len(a.source_counter))
+    role_n = max(0, len(a.role_counter))
+
+    event_q = _clamp(math.log1p(event_n) / math.log1p(16.0), 0.0, 1.0)
+    cluster_q = _clamp(cluster_n / 8.0, 0.0, 1.0)
+    source_q = _clamp(src_n / 8.0, 0.0, 1.0)
+    role_q = _clamp(role_n / 4.0, 0.0, 1.0)
+    calib_q = _clamp(avg_calib, 0.0, 1.0)
+
+    quality = (
+        event_q * 0.36
+        + cluster_q * 0.18
+        + source_q * 0.20
+        + role_q * 0.10
+        + calib_q * 0.16
+    )
+    return _clamp(quality, 0.05, 1.0)
+
+
 def build_scores(lookback_hours: int, limit: int, max_tickers: int) -> list[dict[str, Any]]:
     now = dt.datetime.now()
     ticker_name_map = _load_ticker_name_map()
@@ -561,12 +602,15 @@ def build_scores(lookback_hours: int, limit: int, max_tickers: int) -> list[dict
             avg_calib = 0.5
         calib_adj = (avg_calib - 0.5) * 0.30
 
-        total = (
+        raw_total = (
             a.direct_score * 0.65
             + a.transfer_score * 1.00
             + a.cluster_score * 0.75
             + calib_adj
         )
+        rel_quality = _relation_quality(a, avg_calib)
+        quality_mult = 0.35 + 0.65 * rel_quality
+        total = raw_total * quality_mult
         if total >= 0.12:
             bias = "positive"
         elif total <= -0.12:
@@ -586,6 +630,7 @@ def build_scores(lookback_hours: int, limit: int, max_tickers: int) -> list[dict
                 "transfer_event_score": round(a.transfer_score, 6),
                 "cluster_state_score": round(a.cluster_score, 6),
                 "memory_calibration_score": round(avg_calib, 4),
+                "relation_quality": round(rel_quality, 4),
                 "total_relation_score": round(total, 6),
                 "relation_bias": bias,
                 "support_events": int(len(a.support_event_ids)),
@@ -621,6 +666,7 @@ def main() -> int:
         f"max_tickers={max_tickers} min_abs_score={min_abs_score:.4f} dry_run={args.dry_run}"
     )
 
+    ensure_schema()
     rows = build_scores(lookback_hours=lookback_hours, limit=limit, max_tickers=max_tickers)
     if min_abs_score > 0:
         rows = [r for r in rows if abs(_to_float(r.get("total_relation_score", 0.0), 0.0)) >= min_abs_score]

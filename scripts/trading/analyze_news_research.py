@@ -7,7 +7,7 @@ import time
 import hashlib
 import tempfile
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -178,24 +178,50 @@ def to_arr(items):
 def _parse_dt(value):
     if value is None:
         return None
-    s = str(value).strip()
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+    if isinstance(value, datetime):
+        dtv = value
+    else:
+        s = str(value).strip()
+        if not s:
+            return None
+        s = s.replace("T", " ")
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
         try:
-            return datetime.strptime(s, fmt)
+            dtv = datetime.fromisoformat(s)
         except Exception:
-            continue
-    return None
+            dtv = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+                try:
+                    dtv = datetime.strptime(s, fmt)
+                    break
+                except Exception:
+                    continue
+            if dtv is None:
+                return None
+    if dtv.tzinfo is None:
+        dtv = dtv.replace(tzinfo=timezone.utc)
+    else:
+        dtv = dtv.astimezone(timezone.utc)
+    return dtv
 
 
 def _fmt_dt(dt):
-    if isinstance(dt, datetime):
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
     parsed = _parse_dt(dt)
     if parsed:
         return parsed.strftime("%Y-%m-%d %H:%M:%S")
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _sanitize_published_at(dt_value) -> str:
+    parsed = _parse_dt(dt_value)
+    now_utc = datetime.now(timezone.utc)
+    if parsed is None:
+        return now_utc.strftime("%Y-%m-%d %H:%M:%S")
+    # Guard against timezone-mismatch future timestamps.
+    if parsed > now_utc + timedelta(minutes=5):
+        parsed = now_utc
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def ensure_schema():
@@ -209,6 +235,17 @@ def ensure_schema():
         with open(schema_path, "r", encoding="utf-8") as f:
             ch_query(f.read(), fmt_json=False)
         break
+    # UTC 시계열 표준화(best-effort)
+    for stmt in (
+        "ALTER TABLE trading.news_research MODIFY COLUMN IF EXISTS analyzed_at DateTime('UTC')",
+        "ALTER TABLE trading.news_research MODIFY COLUMN IF EXISTS published_at DateTime('UTC')",
+        "ALTER TABLE trading.news_research MODIFY COLUMN IF EXISTS next_retry_at DateTime('UTC')",
+        "ALTER TABLE trading.news_research MODIFY COLUMN IF EXISTS created_at DateTime('UTC')",
+    ):
+        try:
+            ch_query(stmt, fmt_json=False)
+        except Exception:
+            pass
     # 런타임 마이그레이션: fallback 재시도/상태 관리를 위한 컬럼
     ch_query(
         """
@@ -227,7 +264,7 @@ ADD COLUMN IF NOT EXISTS retry_count UInt16 DEFAULT 0
     ch_query(
         """
 ALTER TABLE trading.news_research
-ADD COLUMN IF NOT EXISTS next_retry_at DateTime DEFAULT now()
+ADD COLUMN IF NOT EXISTS next_retry_at DateTime('UTC') DEFAULT now('UTC')
 """,
         fmt_json=False,
     )
@@ -249,6 +286,17 @@ ADD COLUMN IF NOT EXISTS last_error String DEFAULT ''
         with open(schema_path, "r", encoding="utf-8") as f:
             ch_query(f.read(), fmt_json=False)
         break
+    for stmt in (
+        "ALTER TABLE trading.news_research_queue MODIFY COLUMN IF EXISTS enqueued_at DateTime('UTC')",
+        "ALTER TABLE trading.news_research_queue MODIFY COLUMN IF EXISTS published_at DateTime('UTC')",
+        "ALTER TABLE trading.news_research_queue MODIFY COLUMN IF EXISTS next_retry_at DateTime('UTC')",
+        "ALTER TABLE trading.news_research_queue MODIFY COLUMN IF EXISTS updated_at DateTime('UTC')",
+        "ALTER TABLE trading.news_research_queue MODIFY COLUMN IF EXISTS created_at DateTime('UTC')",
+    ):
+        try:
+            ch_query(stmt, fmt_json=False)
+        except Exception:
+            pass
     ch_query(
         """
 ALTER TABLE trading.news_research_queue
@@ -266,7 +314,7 @@ ADD COLUMN IF NOT EXISTS retry_count UInt16 DEFAULT 0
     ch_query(
         """
 ALTER TABLE trading.news_research_queue
-ADD COLUMN IF NOT EXISTS next_retry_at DateTime DEFAULT now()
+ADD COLUMN IF NOT EXISTS next_retry_at DateTime('UTC') DEFAULT now('UTC')
 """,
         fmt_json=False,
     )
@@ -297,15 +345,15 @@ def insert_rows(rows: list[dict]):
         tr = ",".join([f"'{esc(x)}'" for x in to_arr(r.get("tickers_raw", []))])
         vals.append(
             "(" 
-            f"now(), '{esc(r['news_id'])}', toDateTime('{esc(r['published_at'])}'), '{esc(r['title'])}', '{esc(r['source_url'])}', '{esc(r['source_domain'])}', "
+            f"now('UTC'), '{esc(r['news_id'])}', toDateTime('{esc(_sanitize_published_at(r.get('published_at')))}','UTC'), '{esc(r['title'])}', '{esc(r['source_url'])}', '{esc(r['source_domain'])}', "
             f"{int(r.get('importance',1))}, '{esc(r.get('sentiment','neutral'))}', '{esc(r.get('impact_type','stock'))}', [{tr}], "
             f"[{d1}], [{d2}], [{d3}], "
             f"'{esc(r.get('source_verdict','uncertain'))}', '{esc(r.get('source_notes',''))}', "
             f"'{esc(r.get('hidden_point',''))}', '{esc(r.get('followup_question',''))}', '{esc(r.get('followup_plan',''))}', "
             f"'{esc(r.get('thesis','mixed'))}', {float(r.get('confidence',0.5))}, {int(r.get('expected_horizon_days',5))}, '{esc(r.get('pnl_hypothesis',''))}', "
             f"'{esc(normalize_codex_model(MODEL))}', '{esc(json.dumps(r.get('model_output', {}), ensure_ascii=False))}', "
-            f"'{esc(r.get('status','ok'))}', {int(r.get('retry_count',0))}, toDateTime('{esc(r.get('next_retry_at', _fmt_dt(datetime.now())))}'), "
-            f"'{esc(r.get('last_error',''))}', now()"
+            f"'{esc(r.get('status','ok'))}', {int(r.get('retry_count',0))}, toDateTime('{esc(r.get('next_retry_at', _fmt_dt(datetime.now(timezone.utc))))}','UTC'), "
+            f"'{esc(r.get('last_error',''))}', now('UTC')"
             ")"
         )
 
@@ -329,12 +377,12 @@ def _queue_insert_rows(rows: list[dict]) -> int:
         tickers_sql = ",".join([f"'{esc(x)}'" for x in to_arr(r.get("tickers", []))])
         vals.append(
             "("
-            f"now(), '{esc(r['news_id'])}', toDateTime('{esc(_fmt_dt(r.get('published_at')))}'), "
+            f"now('UTC'), '{esc(r['news_id'])}', toDateTime('{esc(_sanitize_published_at(r.get('published_at')))}','UTC'), "
             f"'{esc(r.get('title',''))}', '{esc(r.get('summary',''))}', '{esc(r.get('source_url',''))}', "
             f"{int(r.get('importance',1))}, '{esc(r.get('sentiment','neutral'))}', '{esc(r.get('impact_type','stock'))}', "
             f"[{tickers_sql}], '{esc(r.get('status','pending'))}', {int(r.get('retry_count',0))}, "
-            f"toDateTime('{esc(_fmt_dt(r.get('next_retry_at')))}'), '{esc(r.get('last_error',''))}', "
-            f"'{esc(r.get('source','analyze_news_research'))}', now(), now()"
+            f"toDateTime('{esc(_fmt_dt(r.get('next_retry_at')))}','UTC'), '{esc(r.get('last_error',''))}', "
+            f"'{esc(r.get('source','analyze_news_research'))}', now('UTC'), now('UTC')"
             ")"
         )
     sql = """
@@ -366,7 +414,7 @@ def _acquire_worker_lock():
         json.dumps(
             {
                 "pid": os.getpid(),
-                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             },
             ensure_ascii=False,
         ).encode("utf-8"),
@@ -413,7 +461,7 @@ def _seed_queue_from_news() -> int:
             "tickers": r.get("tickers", []) if isinstance(r.get("tickers"), list) else [],
             "status": "pending",
             "retry_count": 0,
-            "next_retry_at": datetime.now(),
+            "next_retry_at": datetime.now(timezone.utc),
             "last_error": "",
             "source": "seed_from_news",
         })
@@ -511,7 +559,7 @@ def _mark_queue(rows: list[dict], status: str, error: str = "", increment_retry:
     if not rows:
         return
     out = []
-    now_dt = datetime.now()
+    now_dt = datetime.now(timezone.utc)
     for r in rows:
         rc = int(r.get("retry_count", 0) or 0)
         next_status = status
@@ -654,7 +702,7 @@ def main():
                         "model_output": m,
                         "status": "ok",
                         "retry_count": int(n.get("retry_count", 0) or 0),
-                        "next_retry_at": _fmt_dt(datetime.now()),
+                        "next_retry_at": _fmt_dt(datetime.now(timezone.utc)),
                         "last_error": "",
                     })
 
@@ -669,7 +717,7 @@ def main():
                 for n in batch:
                     domain = urlparse(n.get("source_url", "")).netloc
                     retry_count = int(n.get("retry_count", 0) or 0)
-                    next_retry = datetime.now() + timedelta(minutes=RETRY_COOLDOWN_MINUTES * max(1, min(6, retry_count + 1)))
+                    next_retry = datetime.now(timezone.utc) + timedelta(minutes=RETRY_COOLDOWN_MINUTES * max(1, min(6, retry_count + 1)))
                     fallback_rows.append({
                         "news_id": n["news_id"],
                         "published_at": n.get("published_at"),

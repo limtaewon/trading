@@ -23,6 +23,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -31,14 +32,28 @@ from codex_exec_guard import run_codex_cached
 
 bootstrap_openclaw_env()
 
-CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_URL", "").strip()
-if not CLICKHOUSE_URL:
-    CLICKHOUSE_URL = os.environ.get("CLICKHOUSE_HOST", "http://localhost:8123").strip()
-if not CLICKHOUSE_URL:
-    CLICKHOUSE_URL = "http://localhost:8123"
-CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "").strip()
-CLICKHOUSE_PASS = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
-CLICKHOUSE_AUTH = (CLICKHOUSE_USER, CLICKHOUSE_PASS) if CLICKHOUSE_USER else None
+def _resolve_clickhouse() -> tuple[str, tuple[str, str] | None]:
+    raw_url = (
+        os.environ.get("CLICKHOUSE_URL", "").strip()
+        or os.environ.get("CLICKHOUSE_HOST", "").strip()
+        or "http://localhost:8123"
+    )
+    user = os.environ.get("CLICKHOUSE_USER", "").strip()
+    pw = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
+    sp = urlsplit(raw_url)
+    if sp.username and not user:
+        user = sp.username
+        pw = sp.password or pw
+    if sp.username:
+        netloc = sp.hostname or "localhost"
+        if sp.port:
+            netloc = f"{netloc}:{sp.port}"
+        raw_url = urlunsplit((sp.scheme or "http", netloc, sp.path or "", sp.query, sp.fragment))
+    auth = (user, pw) if user else None
+    return raw_url, auth
+
+
+CLICKHOUSE_URL, CLICKHOUSE_AUTH = _resolve_clickhouse()
 
 LLM_ENABLED_DEFAULT = os.environ.get("WATCHLIST_LLM_ENABLED", "1").strip() == "1"
 LLM_TIMEOUT_SEC_DEFAULT = max(30, int(os.environ.get("WATCHLIST_LLM_TIMEOUT_SEC", "120")))
@@ -244,12 +259,16 @@ def _candidate_weights(
     rel_abs = abs(float(c.get("relation_score", 0.0) or 0.0))
     rs_direct = int(c.get("research_direct_cnt", 0) or 0)
     rs_conf = float(c.get("research_avg_conf", 0.0) or 0.0)
+    rs_w_refs = float(c.get("research_weighted_refs", 0.0) or 0.0)
+    rs_w_conf = float(c.get("research_weighted_conf", 0.0) or 0.0)
 
     tech_missing = tech_score <= 0.01 and signal == ""
     llm_target = lw
     if tech_missing and (explain_ready > 0 or news_edge >= 2):
         llm_target = max(llm_target, 0.55)
-    elif tech_missing and rs_direct > 0 and rs_conf >= WATCHLIST_RESEARCH_MIN_CONF_DEFAULT:
+    elif tech_missing and (rs_w_refs >= 1.2 or rs_direct > 0) and (
+        rs_w_conf >= WATCHLIST_RESEARCH_MIN_CONF_DEFAULT or rs_conf >= WATCHLIST_RESEARCH_MIN_CONF_DEFAULT
+    ):
         llm_target = max(llm_target, 0.55)
     elif tech_score < 1.0 and explain_ready > 0:
         llm_target = max(llm_target, 0.45)
@@ -277,11 +296,15 @@ def _candidate_rule_score(
     news_edge = int(c.get("news_pos", 0) or 0) - int(c.get("news_neg", 0) or 0)
     rs_direct = int(c.get("research_direct_cnt", 0) or 0)
     rs_conf = float(c.get("research_avg_conf", 0.0) or 0.0)
+    rs_w_refs = float(c.get("research_weighted_refs", 0.0) or 0.0)
+    rs_w_conf = float(c.get("research_weighted_conf", 0.0) or 0.0)
 
     # 기술 결측/약세지만 이벤트 근거가 명확하면 최소 점수 바닥 부여
     if explain_ready > 0 and news_cnt >= 1 and news_edge >= 1 and (tech_score < 1.0 or signal == ""):
         return max(base, _clamp(event_rule_floor, 0.0, 100.0))
-    if rs_direct > 0 and rs_conf >= WATCHLIST_RESEARCH_MIN_CONF_DEFAULT and (tech_score < 1.0 or signal == ""):
+    if (rs_w_refs >= 1.0 or rs_direct > 0) and (
+        rs_w_conf >= WATCHLIST_RESEARCH_MIN_CONF_DEFAULT or rs_conf >= WATCHLIST_RESEARCH_MIN_CONF_DEFAULT
+    ) and (tech_score < 1.0 or signal == ""):
         return max(base, _clamp(event_rule_floor - 3.0, 0.0, 100.0))
     return base
 
@@ -376,6 +399,10 @@ def _build_llm_prompt(candidates: list[dict[str, Any]]) -> str:
                 },
                 "research_context": {
                     "direct_cnt": int(c.get("research_direct_cnt", 0) or 0),
+                    "secondary_cnt": int(c.get("research_secondary_cnt", 0) or 0),
+                    "tertiary_cnt": int(c.get("research_tertiary_cnt", 0) or 0),
+                    "weighted_refs": round(float(c.get("research_weighted_refs", 0.0) or 0.0), 3),
+                    "weighted_confidence": round(float(c.get("research_weighted_conf", 0.0) or 0.0), 4),
                     "valid_cnt": int(c.get("research_valid_cnt", 0) or 0),
                     "conflict_cnt": int(c.get("research_conflict_cnt", 0) or 0),
                     "avg_confidence": round(float(c.get("research_avg_conf", 0.0) or 0.0), 4),
@@ -556,6 +583,19 @@ ORDER BY (ts, source, run_id)
     )
 
 
+def ensure_relation_quality_column() -> None:
+    try:
+        ch_execute(
+            """
+ALTER TABLE trading.hidden_relation_signals
+ADD COLUMN IF NOT EXISTS relation_quality Float32 DEFAULT 0.5
+"""
+        )
+    except Exception:
+        # hidden_relation_signals가 아직 없으면 다음 주기에 자동 생성됨
+        pass
+
+
 def insert_watchlist_run(row: dict[str, Any]) -> None:
     sql = f"""
 INSERT INTO trading.interest_watchlist_runs
@@ -680,35 +720,60 @@ DELETE WHERE decision_id = '{rid}'
 
 
 def classify_action(p: dict[str, float]) -> tuple[str, str, float, float]:
-    score = float(p.get("score", 0) or 0)
+    final_score = float(p.get("final_score", p.get("rule_score_effective", p.get("rule_score_100", 0))) or 0)
+    rule_score = float(p.get("rule_score_effective", p.get("rule_score_100", 0)) or 0)
+    tech_score = float(p.get("technical_score", p.get("score", 0)) or 0)
     rsi = float(p.get("rsi", 0) or 0)
-    rel_score = float(p.get("rel_score", 0) or 0)
+    rel_score = float(p.get("rel_score", p.get("relation_score", 0)) or 0)
+    rel_support_events = int(p.get("rel_support_events", 0) or 0)
+    rel_support_clusters = int(p.get("rel_support_clusters", 0) or 0)
+    rel_quality = float(p.get("relation_quality", 0.5) or 0.5)
     explain_ready = int(p.get("explain_ready", 0) or 0)
-    if rsi > 70:
-        return "AVOID(RSI>70)", "단기 과열 구간(RSI>70)으로 추격 성향이 높아 보류", 0.0, 0.0
-    if score >= 2 and explain_ready > 0 and rel_score >= 0:
-        why = "기술점수 +2 이상, 근거 충족, 연관성 우호 신호로 BUY 우선 검토"
-        conf = min(0.95, 0.55 + 0.18 * min(score, 5))
-    elif score >= 2 and explain_ready == 0:
-        why = "기술점수 +2 이상이나 근거 완성도 부족. WATCH로 근거 보강 필요"
-        conf = 0.45
-    elif score >= 1:
-        why = "기술점수 +1 이상이나 추가 확인 필요. 관찰/부분 검토 후보"
-        conf = 0.34
+    rs_weighted_refs = float(p.get("research_weighted_refs", 0.0) or 0.0)
+    rs_weighted_conf = float(p.get("research_weighted_conf", 0.0) or 0.0)
+
+    if rsi >= 78 and explain_ready <= 0 and rel_score <= 0:
+        return "AVOID(RSI>78)", "초과열 구간이며 이벤트 근거/연관 지지가 약해 추격 위험이 큼", 0.0, 0.08
+
+    conviction = (
+        0.42 * final_score
+        + 0.20 * rule_score
+        + min(explain_ready, 3) * 6.0
+        + min(rel_support_events, 6) * 1.6
+        + min(rel_support_clusters, 4) * 1.8
+        + min(max(rel_score, -2.0), 4.0) * 2.2
+        + min(max(rel_quality, 0.0), 1.0) * 8.0
+        + min(rs_weighted_refs, 6.0) * 1.3
+        + min(max(rs_weighted_conf, 0.0), 1.0) * 6.0
+        + min(max(tech_score, -2.0), 4.0) * 2.5
+    )
+
+    if final_score >= 72 and conviction >= 68 and (explain_ready > 0 or rel_support_events >= 3):
+        action = "BUY_REVIEW"
+        why = "최종점수와 근거(설명가능/연관지지)가 함께 높아 우선 매수검토 후보"
+        context_hint = 0.78
+    elif final_score >= 62 and conviction >= 56 and (
+        explain_ready > 0 or rel_support_events >= 2 or rs_weighted_refs >= 1.5
+    ):
+        action = "WATCH(근거보강)"
+        why = "근거는 있으나 확신이 중간 구간으로 추가 확인 후 진입이 적절"
+        context_hint = 0.50
+    elif final_score >= 52:
+        action = "WATCH"
+        why = "랭킹은 유효하나 신호/근거의 동시 충족이 부족해 관찰 우선"
+        context_hint = 0.34
     else:
-        why = "기술 신호가 약함. 데이터 보강 후 재평가"
-        conf = 0.12
-    return classify_action_action(score, explain_ready, rel_score, why)
+        action = "HOLD"
+        why = "총점/근거 대비 기대값이 낮아 보류"
+        context_hint = 0.15
 
+    if rsi > 70 and action == "BUY_REVIEW":
+        action = "WATCH(과열확인)"
+        why += " (RSI 과열 구간이라 추격매수는 제한)"
+        context_hint = min(context_hint, 0.48)
 
-def classify_action_action(score: float, explain_ready: int, rel_score: float, why: str):
-    if score >= 2 and explain_ready > 0 and rel_score >= 0:
-        return "BUY_REVIEW", why, 0.75, min(1.0, 0.6 + 0.05 * score + 0.06 * min(abs(rel_score), 8))
-    if score >= 2 and explain_ready == 0:
-        return "WATCH(근거보강)", why, 0.45, 0.40
-    if score >= 1:
-        return "WATCH", why, 0.35, 0.32
-    return "HOLD", why, 0.15, 0.20
+    conf = _clamp(0.20 + conviction / 130.0, 0.05, 0.95)
+    return action, why, context_hint, conf
 
 
 def apply_llm_overlay(
@@ -797,17 +862,43 @@ def load_candidates(limit: int):
           AND match(ticker, '^[0-9]{{6}}$')
           AND ticker != '000000'
       ),
+      research_expanded AS (
+        SELECT
+          arrayJoin(direct_tickers) AS ticker,
+          toFloat64(confidence) AS confidence,
+          source_verdict,
+          analyzed_at,
+          1.0 AS src_w
+        FROM trading.news_research
+        WHERE published_at >= now() - INTERVAL {research_lookback_days} DAY
+          AND status IN ('ok','fallback')
+        UNION ALL
+        SELECT
+          arrayJoin(secondary_tickers) AS ticker,
+          toFloat64(confidence) AS confidence,
+          source_verdict,
+          analyzed_at,
+          0.55 AS src_w
+        FROM trading.news_research
+        WHERE published_at >= now() - INTERVAL {research_lookback_days} DAY
+          AND status IN ('ok','fallback')
+        UNION ALL
+        SELECT
+          arrayJoin(tertiary_tickers) AS ticker,
+          toFloat64(confidence) AS confidence,
+          source_verdict,
+          analyzed_at,
+          0.30 AS src_w
+        FROM trading.news_research
+        WHERE published_at >= now() - INTERVAL {research_lookback_days} DAY
+          AND status IN ('ok','fallback')
+      ),
       research_tickers AS (
         SELECT DISTINCT ticker
-        FROM (
-          SELECT arrayJoin(direct_tickers) AS ticker
-          FROM trading.news_research
-          WHERE published_at >= now() - INTERVAL {research_lookback_days} DAY
-            AND status IN ('ok','fallback')
-            AND source_verdict != 'conflict'
-            AND confidence >= {research_min_conf}
-        )
-        WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$') AND ticker != '000000'
+        FROM research_expanded
+        WHERE source_verdict != 'conflict'
+          AND confidence >= {research_min_conf}
+          AND length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$') AND ticker != '000000'
       ),
       universe AS (
         SELECT ticker FROM tech_latest
@@ -871,21 +962,16 @@ def load_candidates(limit: int):
       research_agg AS (
         SELECT
           ticker,
-          count() AS research_direct_cnt,
+          countIf(src_w = 1.0) AS research_direct_cnt,
+          countIf(src_w = 0.55) AS research_secondary_cnt,
+          countIf(src_w = 0.30) AS research_tertiary_cnt,
+          round(sum(src_w), 4) AS research_weighted_refs,
+          round(sum(src_w * confidence) / greatest(sum(src_w), 1.0), 4) AS research_weighted_conf,
           round(avg(toFloat64(confidence)), 4) AS research_avg_conf,
           countIf(source_verdict = 'valid') AS research_valid_cnt,
           countIf(source_verdict = 'conflict') AS research_conflict_cnt,
-          min(dateDiff('minute', analyzed_at, now())) / 60.0 AS research_last_hours
-        FROM (
-          SELECT
-            arrayJoin(direct_tickers) AS ticker,
-            toFloat64(confidence) AS confidence,
-            source_verdict,
-            analyzed_at
-          FROM trading.news_research
-          WHERE published_at >= now() - INTERVAL {research_lookback_days} DAY
-            AND status IN ('ok','fallback')
-        )
+          min(greatest(dateDiff('minute', analyzed_at, now()), 0)) / 60.0 AS research_last_hours
+        FROM research_expanded
         WHERE length(ticker) = 6 AND match(ticker, '^[0-9]{{6}}$') AND ticker != '000000'
         GROUP BY ticker
       ),
@@ -916,12 +1002,17 @@ def load_candidates(limit: int):
       ifNull(fa.explain_ready_3d, 0) AS explain_ready,
       round(ifNull(hrs.total_relation_score, 0), 6) AS rel_score,
       ifNull(hrs.relation_bias, 'neutral') AS rel_bias,
+      round(ifNull(hrs.relation_quality, 0.5), 4) AS relation_quality,
       ifNull(hrs.support_events, 0) AS rel_support_events,
       ifNull(hrs.support_clusters, 0) AS rel_support_clusters,
       ifNull(arrayStringConcat(hrs.source_tickers, ', '), '') AS rel_source_tickers,
       ifNull(arrayStringConcat(hrs.top_roles, ', '), '') AS rel_roles,
       ifNull(arrayStringConcat(hrs.top_channels, ', '), '') AS rel_channels,
       ifNull(nr.research_direct_cnt, 0) AS research_direct_cnt,
+      ifNull(nr.research_secondary_cnt, 0) AS research_secondary_cnt,
+      ifNull(nr.research_tertiary_cnt, 0) AS research_tertiary_cnt,
+      ifNull(nr.research_weighted_refs, 0.0) AS research_weighted_refs,
+      ifNull(nr.research_weighted_conf, 0.0) AS research_weighted_conf,
       ifNull(nr.research_avg_conf, 0.0) AS research_avg_conf,
       ifNull(nr.research_valid_cnt, 0) AS research_valid_cnt,
       ifNull(nr.research_conflict_cnt, 0) AS research_conflict_cnt,
@@ -934,7 +1025,9 @@ def load_candidates(limit: int):
         + (ifNull(na.pos,0)-ifNull(na.neg,0)) * 0.25
         + least(ifNull(na.news_cnt,0),10) * 0.10
         + ifNull(hrs.total_relation_score,0) * 2
-        + least(ifNull(nr.research_direct_cnt,0), 4) * 0.18
+        + least(ifNull(nr.research_weighted_refs,0), 6) * 0.15
+        + greatest(0.0, ifNull(nr.research_weighted_conf,0) - 0.55) * 1.4
+        + ifNull(hrs.relation_quality,0.5) * 0.8
         + greatest(0.0, ifNull(nr.research_avg_conf,0) - 0.55) * 1.2
         - if(ifNull(nr.research_conflict_cnt,0) > 0, 0.5, 0.0)
         + if(ifNull(fa.explain_ready_3d,0) > 0, 1.0, -0.4)
@@ -1007,6 +1100,7 @@ def main() -> int:
     candidate_pool = max(limit, int(args.candidate_pool))
     ensure_feature_snapshot_view()
     ensure_watchlist_run_table()
+    ensure_relation_quality_column()
     rows = load_candidates(candidate_pool)
     if not rows:
         print("candidate 0, skip")
@@ -1027,6 +1121,7 @@ def main() -> int:
                 "ticker_name": str(rr.get("ticker_name", "")).strip(),
                 "technical_score": technical_score,
                 "relation_score": relation_score,
+                "relation_quality": float(rr.get("relation_quality", 0.5) or 0.5),
                 "news_score": news_score,
                 "foreign_ownership": float(rr.get("foreign_ownership", 0) or 0),
                 "inst_flow": float(rr.get("inst_flow", 0) or 0),
@@ -1051,6 +1146,10 @@ def main() -> int:
                 "rel_roles": str(rr.get("rel_roles", "") or ""),
                 "rel_channels": str(rr.get("rel_channels", "") or ""),
                 "research_direct_cnt": int(rr.get("research_direct_cnt", 0) or 0),
+                "research_secondary_cnt": int(rr.get("research_secondary_cnt", 0) or 0),
+                "research_tertiary_cnt": int(rr.get("research_tertiary_cnt", 0) or 0),
+                "research_weighted_refs": float(rr.get("research_weighted_refs", 0.0) or 0.0),
+                "research_weighted_conf": float(rr.get("research_weighted_conf", 0.0) or 0.0),
                 "research_avg_conf": float(rr.get("research_avg_conf", 0.0) or 0.0),
                 "research_valid_cnt": int(rr.get("research_valid_cnt", 0) or 0),
                 "research_conflict_cnt": int(rr.get("research_conflict_cnt", 0) or 0),
@@ -1118,9 +1217,18 @@ def main() -> int:
     for i, c in enumerate(selected, 1):
         rr = {
             "score": c["technical_score"],
+            "technical_score": c["technical_score"],
             "rsi": c["rsi"],
             "rel_score": c["relation_score"],
+            "relation_quality": c.get("relation_quality", 0.5),
+            "rel_support_events": c.get("rel_support_events", 0),
+            "rel_support_clusters": c.get("rel_support_clusters", 0),
             "explain_ready": c["explain_ready"],
+            "rule_score_100": c.get("rule_score_100", 0.0),
+            "rule_score_effective": c.get("rule_score_effective", c.get("rule_score_100", 0.0)),
+            "final_score": c.get("final_score", 0.0),
+            "research_weighted_refs": c.get("research_weighted_refs", 0.0),
+            "research_weighted_conf": c.get("research_weighted_conf", 0.0),
         }
         base_action, base_reason, _context_score_hint, base_conf = classify_action(rr)
         action, reason, confidence = apply_llm_overlay(
@@ -1163,12 +1271,17 @@ def main() -> int:
                 ),
                 "explain_ready": int(c.get("explain_ready", 0) or 0),
                 "relation_bias": c.get("relation_bias", "neutral"),
+                "relation_quality": float(c.get("relation_quality", 0.5) or 0.5),
                 "relation_support_events": int(c.get("rel_support_events", 0) or 0),
                 "relation_support_clusters": int(c.get("rel_support_clusters", 0) or 0),
                 "relation_source_tickers": str(c.get("rel_source_tickers", "") or ""),
                 "relation_roles": str(c.get("rel_roles", "") or ""),
                 "relation_channels": str(c.get("rel_channels", "") or ""),
                 "research_direct_cnt": int(c.get("research_direct_cnt", 0) or 0),
+                "research_secondary_cnt": int(c.get("research_secondary_cnt", 0) or 0),
+                "research_tertiary_cnt": int(c.get("research_tertiary_cnt", 0) or 0),
+                "research_weighted_refs": float(c.get("research_weighted_refs", 0.0) or 0.0),
+                "research_weighted_conf": float(c.get("research_weighted_conf", 0.0) or 0.0),
                 "research_avg_conf": float(c.get("research_avg_conf", 0) or 0.0),
                 "research_valid_cnt": int(c.get("research_valid_cnt", 0) or 0),
                 "research_conflict_cnt": int(c.get("research_conflict_cnt", 0) or 0),

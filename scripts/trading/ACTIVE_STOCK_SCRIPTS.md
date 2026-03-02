@@ -28,6 +28,7 @@
 - decision_operating_pipeline.py
 - replay_decision.py
 - build_decision_outcome.py
+- report_decision_outcome_ab.py
 - refresh_stocks.py
 - refresh_interest_watchlist.py
 
