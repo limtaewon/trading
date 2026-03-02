@@ -78,6 +78,8 @@ CODE_LABELS = {
     "FLOW_SHOCK_ALERT": "수급 충격 경고",
     "FLOW_DISTRIBUTION_BLOCK": "수급 분배 경고",
     "EXTREME-only": "극단 충격만 차단",
+    "ALERT": "경고",
+    "EXTREME": "극단",
     "FEATURE_SNAPSHOT_ANY_SESSION": "최근 시세 스냅샷",
     "ADV20_FALLBACK": "20일 평균 거래대금 대체값",
     "GEOPOLITICAL_RISK": "지정학 리스크",
@@ -91,6 +93,9 @@ CODE_LABELS = {
     "PASS": "정상",
     "WARN": "주의",
     "FAIL": "실패",
+    "signal buy": "신호 매수",
+    "signal neutral": "신호 중립",
+    "signal sell": "신호 매도",
 }
 
 ACTION_LABELS = {
