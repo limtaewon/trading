@@ -17,9 +17,11 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import csv
 import json
 import os
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
@@ -156,6 +158,20 @@ ORDER BY (trade_date, ticker, investor_type)
     )
     ch_execute(
         """
+CREATE TABLE IF NOT EXISTS trading.ticker_master_kr
+(
+    ticker      String,
+    ticker_name String,
+    market      LowCardinality(String),
+    source      LowCardinality(String) DEFAULT 'local',
+    updated_at  DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY ticker
+"""
+    )
+    ch_execute(
+        """
 CREATE TABLE IF NOT EXISTS trading.market_flow_daily
 (
     trade_date               Date,
@@ -183,9 +199,143 @@ ORDER BY (trade_date, market, investor_type)
     )
 
 
+def _load_ticker_master_rows() -> list[tuple[str, str, str, str]]:
+    out: dict[str, tuple[str, str, str, str]] = {}
+
+    csv_path = Path.home() / ".openclaw" / "workspace" / "STOCKS.csv"
+    if csv_path.exists():
+        try:
+            with csv_path.open("r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    ticker = str(row.get("Code", "")).strip()
+                    name = str(row.get("Name", "")).strip()
+                    market = str(row.get("Market", "")).strip().upper()
+                    if len(ticker) == 6 and ticker.isdigit() and name:
+                        if market not in {"KOSPI", "KOSDAQ"}:
+                            market = "UNKNOWN"
+                        out[ticker] = (ticker, name, market, "STOCKS.csv")
+        except Exception:
+            pass
+
+    json_path = Path.home() / ".openclaw" / "data" / "krx_stocks.json"
+    if json_path.exists():
+        try:
+            obj = json.loads(json_path.read_text(encoding="utf-8"))
+            stocks = obj.get("stocks", {}) if isinstance(obj, dict) else {}
+            if isinstance(stocks, dict):
+                for name, ticker in stocks.items():
+                    tk = str(ticker).strip()
+                    nm = str(name).strip()
+                    if len(tk) == 6 and tk.isdigit() and nm and tk not in out:
+                        out[tk] = (tk, nm, "UNKNOWN", "krx_stocks.json")
+        except Exception:
+            pass
+
+    return list(out.values())
+
+
+def _esc(v: str) -> str:
+    return str(v or "").replace("\\", "\\\\").replace("'", "\\'")
+
+
+def sync_ticker_master() -> int:
+    rows = _load_ticker_master_rows()
+    if not rows:
+        return 0
+    ch_execute("TRUNCATE TABLE trading.ticker_master_kr")
+    values = []
+    for ticker, name, market, source in rows:
+        values.append(
+            "("
+            f"'{_esc(ticker)}', '{_esc(name)}', '{_esc(market)}', '{_esc(source)}', now()"
+            ")"
+        )
+    sql = (
+        "INSERT INTO trading.ticker_master_kr "
+        "(ticker, ticker_name, market, source, updated_at) VALUES "
+        + ",".join(values)
+    )
+    ch_execute(sql, timeout_sec=120)
+    return len(rows)
+
+
 def sync_stock_flow(days: int, sessions: list[str]) -> int:
     session_filter = ",".join("'" + s.replace("'", "\\'") + "'" for s in sessions if s)
     where_session = f"AND session IN ({session_filter})" if session_filter else ""
+    has_watchlist = table_exists("interest_watchlist")
+    watchlist_cte = ""
+    watchlist_union = ""
+    if has_watchlist:
+        watchlist_cte = """
+, wl AS (
+    WITH latest_ts AS (
+        SELECT ts
+        FROM trading.interest_watchlist
+        WHERE toDate(ts) >= today() - 3
+        ORDER BY ts DESC
+        LIMIT 1
+    )
+    SELECT ticker
+    FROM trading.interest_watchlist
+    WHERE ts = (SELECT ts FROM latest_ts)
+      AND match(ticker, '^[0-9]{6}$')
+    GROUP BY ticker
+),
+tech_latest AS (
+    SELECT
+        ticker,
+        argMax(close_price, date) AS close_price,
+        argMax(volume, date) AS vol,
+        argMax(market, date) AS market
+    FROM trading.technical_signals
+    WHERE date >= today() - 30
+    GROUP BY ticker
+),
+missing AS (
+    SELECT
+        wl.ticker AS ticker,
+        ifNull(t.close_price, 0.0) AS close_price,
+        ifNull(t.vol, 0.0) AS vol,
+        ifNull(t.market, 'UNKNOWN') AS market
+    FROM wl
+    LEFT JOIN base b ON b.ticker = wl.ticker
+    LEFT JOIN tech_latest t ON t.ticker = wl.ticker
+    WHERE b.ticker = ''
+)
+"""
+        watchlist_union = """
+UNION ALL
+SELECT
+    today() AS trade_date,
+    m.ticker AS ticker,
+    ifNull(tmap.market, m.market) AS market,
+    'FOREIGN' AS investor_type,
+    0.0 AS net_buy_shares,
+    0.0 AS net_buy_value_krw,
+    0.0 AS foreign_ownership_pct,
+    greatest(m.close_price * m.vol, 0.0) AS traded_value_krw,
+    0.0 AS net_buy_pct_turnover,
+    'MASTER_FILL' AS source_session,
+    now() AS ingested_at
+FROM missing m
+LEFT JOIN tmap ON tmap.ticker = m.ticker
+UNION ALL
+SELECT
+    today() AS trade_date,
+    m.ticker AS ticker,
+    ifNull(tmap.market, m.market) AS market,
+    'INST' AS investor_type,
+    0.0 AS net_buy_shares,
+    0.0 AS net_buy_value_krw,
+    0.0 AS foreign_ownership_pct,
+    greatest(m.close_price * m.vol, 0.0) AS traded_value_krw,
+    0.0 AS net_buy_pct_turnover,
+    'MASTER_FILL' AS source_session,
+    now() AS ingested_at
+FROM missing m
+LEFT JOIN tmap ON tmap.ticker = m.ticker
+"""
     ch_execute(f"DELETE FROM trading.stock_flow_daily WHERE trade_date >= today() - {int(days)}")
     sql = f"""
 INSERT INTO trading.stock_flow_daily
@@ -226,11 +376,21 @@ base AS (
 tmap AS (
     SELECT
         ticker,
-        argMax(market, date) AS market
-    FROM trading.technical_signals
-    WHERE date >= today() - 365
+        argMin(market, prio) AS market
+    FROM
+    (
+        SELECT ticker, argMax(market, date) AS market, toUInt8(1) AS prio
+        FROM trading.technical_signals
+        WHERE date >= today() - 365
+        GROUP BY ticker
+        UNION ALL
+        SELECT ticker, any(market) AS market, toUInt8(2) AS prio
+        FROM trading.ticker_master_kr
+        GROUP BY ticker
+    )
     GROUP BY ticker
 )
+{watchlist_cte}
 SELECT
     b.trade_date,
     b.ticker,
@@ -268,6 +428,7 @@ SELECT
     now() AS ingested_at
 FROM base b
 LEFT JOIN tmap t ON t.ticker = b.ticker
+{watchlist_union}
 """
     ch_execute(sql, timeout_sec=180)
     n = int(ch_scalar(f"SELECT count() FROM trading.stock_flow_daily WHERE trade_date >= today() - {int(days)}") or "0")
@@ -558,6 +719,8 @@ def main() -> int:
 
     try:
         ensure_tables()
+        master_rows = sync_ticker_master()
+        _log(f"ticker_master_kr rows={master_rows}")
         _log(f"정규화 수급 동기화 시작 (days={days}, sessions={','.join(sessions)})")
         stock_rows = sync_stock_flow(days, sessions=sessions)
         _log(f"stock_flow_daily rows={stock_rows}")

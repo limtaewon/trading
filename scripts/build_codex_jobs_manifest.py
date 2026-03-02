@@ -123,13 +123,32 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-news-research-15m",
             "enabled": True,
-            "schedule": {"expr": "*/15 8-16 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "*/15 8-17 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": (
-                    f'{env} && NEWS_RESEARCH_LIMIT="${{NEWS_RESEARCH_LIMIT:-16}}" '
-                    f'NEWS_RESEARCH_BATCH="${{NEWS_RESEARCH_BATCH:-4}}" '
-                    f'NEWS_RESEARCH_WINDOW_HOURS="${{NEWS_RESEARCH_WINDOW_HOURS:-24}}" '
+                    f'{env} && NEWS_RESEARCH_LIMIT="${{NEWS_RESEARCH_LIMIT:-24}}" '
+                    f'NEWS_RESEARCH_BATCH="${{NEWS_RESEARCH_BATCH:-6}}" '
+                    f'NEWS_RESEARCH_MAX_DYNAMIC_LIMIT="${{NEWS_RESEARCH_MAX_DYNAMIC_LIMIT:-80}}" '
+                    f'NEWS_RESEARCH_MAX_ITEMS_PER_RUN="${{NEWS_RESEARCH_MAX_ITEMS_PER_RUN:-96}}" '
+                    f'NEWS_RESEARCH_WINDOW_HOURS="${{NEWS_RESEARCH_WINDOW_HOURS:-48}}" '
+                    f'{py} {trading_scripts}/analyze_news_research.py >> {logs}/news-research.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "data-news-research-night-drain-10m",
+            "enabled": True,
+            "schedule": {"expr": "*/10 0-7,18-23 * * *", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && NEWS_RESEARCH_LIMIT="${{NEWS_RESEARCH_NIGHT_LIMIT:-48}}" '
+                    f'NEWS_RESEARCH_BATCH="${{NEWS_RESEARCH_NIGHT_BATCH:-8}}" '
+                    f'NEWS_RESEARCH_MAX_DYNAMIC_LIMIT="${{NEWS_RESEARCH_NIGHT_MAX_DYNAMIC_LIMIT:-160}}" '
+                    f'NEWS_RESEARCH_MAX_ITEMS_PER_RUN="${{NEWS_RESEARCH_NIGHT_MAX_ITEMS_PER_RUN:-220}}" '
+                    f'NEWS_RESEARCH_WINDOW_HOURS="${{NEWS_RESEARCH_NIGHT_WINDOW_HOURS:-96}}" '
                     f'{py} {trading_scripts}/analyze_news_research.py >> {logs}/news-research.log 2>&1'
                 ),
             },
