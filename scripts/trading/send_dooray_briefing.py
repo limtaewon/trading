@@ -82,32 +82,138 @@ def _dooray_text_from_html(src: str) -> str:
     return t
 
 
+def _parse_arr_literal(raw) -> list[str]:
+    txt = str(raw or "").strip()
+    if not txt or txt in {"[]", ""}:
+        return []
+    if txt.startswith("[") and txt.endswith("]"):
+        txt = txt[1:-1]
+    out = []
+    for p in txt.split(","):
+        s = str(p).strip().strip("'\"")
+        if s:
+            out.append(s)
+    return out
+
+
 def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clusters: int = 3):
-    from send_decision_dryrun_telegram import resolve_decision_id, build_message  # type: ignore
+    from send_decision_dryrun_telegram import resolve_decision_id, _feature_snapshot_health, _trust_label  # type: ignore
 
     did = resolve_decision_id((decision_id or "").strip())
-    html_msg = build_message(
-        decision_id=did,
-        top_n=max(1, int(top_candidates)),
-        clusters_n=max(1, int(clusters)),
+    run_rows = ch_query(
+        f"""
+SELECT
+  decision_id,
+  toString(decision_time) AS decision_time_s,
+  total_score,
+  toString(absolute_block_reason) AS abs_blocks_s,
+  stage_debug_json
+FROM trading.decision_run
+WHERE decision_id = {sql_quote(did)}
+LIMIT 1
+"""
     )
-    msg = _dooray_text_from_html(html_msg)
-    digest_rows = build_macro_digest_rows(hours=24, top_n=3)
-    if digest_rows:
-        msg = msg + "\n\n🌍 매크로 24h Digest"
-        for d in digest_rows:
-            msg += f"\n- [{d.get('topic','macro')}] {d.get('title','-')}"
-            if d.get("source_url"):
-                msg += f"\n  링크: {d.get('source_url')}"
+    if not run_rows:
+        return f"🧭 매매 브리핑 | {datetime.now().strftime('%m-%d %H:%M')}\n1) 오늘 결론: 데이터 없음", {
+            "mode": "pipeline",
+            "decision_id": did,
+            "status": "missing_decision_run",
+        }
+    run = run_rows[0]
+    cand_rows = ch_query(
+        f"""
+SELECT
+  ticker,
+  action,
+  toString(stage5_fail_codes) AS fail_codes_s,
+  toString(absolute_block_reason) AS abs_blocks_s
+FROM trading.decision_candidate
+WHERE decision_id = {sql_quote(did)}
+ORDER BY total_score DESC
+LIMIT 200
+"""
+    )
+    abs_blocks = _parse_arr_literal(run.get("abs_blocks_s"))
+    global_block = len(abs_blocks) > 0
+
+    def classify_action_text(action: str, cand_abs: list[str], fail_codes: list[str]) -> str:
+        if global_block or cand_abs:
+            return "신규매수 금지(전역)"
+        if any(x in {"MISSING_LIQUIDITY_SNAPSHOT", "MISSING_FEATURE_SNAPSHOT", "MISSING_SNAPSHOT"} for x in fail_codes):
+            return "제외(데이터 부족)"
+        if str(action or "").upper() == "BUY":
+            return "매수 가능"
+        return "관찰 유지"
+
+    action_counts = {
+        "매수 가능": 0,
+        "관찰 유지": 0,
+        "신규매수 금지(전역)": 0,
+        "제외(데이터 부족)": 0,
+    }
+    tickers = []
+    for r in cand_rows:
+        t = str(r.get("ticker") or "").strip()
+        if is_valid_ticker(t):
+            tickers.append(t)
+        cand_abs = _parse_arr_literal(r.get("abs_blocks_s"))
+        fail_codes = _parse_arr_literal(r.get("fail_codes_s"))
+        action_text = classify_action_text(str(r.get("action") or ""), cand_abs, fail_codes)
+        action_counts[action_text] = action_counts.get(action_text, 0) + 1
+
+    fs_health = _feature_snapshot_health(tickers)
+    trust_label, trust_reason = _trust_label(
+        coverage_pct=float(fs_health.get("coverage_pct", 0.0) or 0.0),
+        feature_age_min=float(fs_health.get("age_min", 99999.0) or 99999.0),
+    )
+
+    if global_block:
+        conclusion = "신규매수 금지(전역)"
+        reason = " / ".join(abs_blocks[:2])
+        actions = "관찰 후보만 모니터링 / 보유 리스크 점검 / 재평가 트리거 대기"
+        bans = "신규매수 전면 금지 / 데이터 부족 종목 매수 금지"
+        reeval = f"{abs_blocks[0]} 해제 + 매수 가능 종목 1개 이상"
+    elif action_counts["매수 가능"] > 0:
+        conclusion = "신규매수 허용(선별)"
+        reason = "전역 차단 없음 + 실행 가능 후보 존재"
+        actions = "매수 가능 종목 분할 접근 / 관찰 후보 모니터링 / 데이터 부족 종목 제외"
+        bans = "추격매수 금지 / 데이터 부족 종목 매수 금지"
+        reeval = "전역 차단 신호 발생 시 즉시 재평가"
+    else:
+        conclusion = "관찰 유지"
+        reason = "실행 가능 후보 부족"
+        actions = "관찰 후보 모니터링 / 데이터 복구 우선 / 신규 진입 보류"
+        bans = "근거 부족 종목 신규매수 금지 / 데이터 부족 종목 매수 금지"
+        reeval = "매수 가능 종목 1개 이상 확보 시 재판단"
+
+    total = len(cand_rows)
+    now = datetime.now().strftime("%m-%d %H:%M")
+    lines = [
+        f"🧭 매매 브리핑 | {now}",
+        f"1) 오늘 결론: {conclusion}",
+        f"2) 결론 사유: {_short(reason, 64)}",
+        f"3) 오늘 행동: {_short(actions, 64)}",
+        f"4) 금지사항: {_short(bans, 64)}",
+        (
+            "5) 실행가능 종목 수: "
+            f"{action_counts['매수 가능']}개 "
+            f"(관찰 {action_counts['관찰 유지']}, 제외 {action_counts['제외(데이터 부족)']}, 전체 {total})"
+        ),
+        f"6) 데이터 신뢰도: {trust_label} ({trust_reason})",
+        f"7) 재평가 조건: {_short(reeval, 64)}",
+    ]
 
     raw = {
         "mode": "pipeline",
         "decision_id": did,
         "top_candidates": max(1, int(top_candidates)),
         "clusters": max(1, int(clusters)),
-        "macro_digest": digest_rows,
+        "action_counts": action_counts,
+        "global_block": global_block,
+        "absolute_block_reason": abs_blocks,
+        "data_trust": {"label": trust_label, "reason": trust_reason},
     }
-    return msg, raw
+    return "\n".join(lines), raw
 
 
 def _short(s: str, n: int = 96) -> str:
@@ -129,16 +235,12 @@ def _classify_exec_possible(action: str, abs_blocks: list[str], fail_codes: list
 def _action_delta(action: str, exec_possible: bool, fail_codes: list[str], abs_blocks: list[str]) -> str:
     a = str(action or "").upper()
     if abs_blocks:
-        return f"하향 유지 ({','.join(abs_blocks)})"
-    if not exec_possible:
-        if fail_codes:
-            return f"하향 유지 ({','.join([str(x) for x in fail_codes[:2]])})"
-        return "하향 유지 (실행 제약)"
-    if a == "BUY":
-        return "상향 유지 (매수 조건 충족)"
-    if a == "REDUCE":
-        return "하향 유지 (리스크 감축)"
-    return "유지 (조건 관찰)"
+        return "신규매수 금지(전역)"
+    if any(x in {"MISSING_LIQUIDITY_SNAPSHOT", "MISSING_FEATURE_SNAPSHOT", "MISSING_SNAPSHOT"} for x in (fail_codes or [])):
+        return "제외(데이터 부족)"
+    if a == "BUY" and exec_possible:
+        return "매수 가능"
+    return "관찰 유지"
 
 
 def _ticker_name_map(tickers: list[str]) -> dict[str, str]:
@@ -266,6 +368,7 @@ GROUP BY cluster_id
         evidence_titles = reason.get("evidence_titles", [])
         if not isinstance(evidence_titles, list):
             evidence_titles = []
+        evidence_count = len([x for x in evidence_titles if str(x).strip()])
         top_cards.append(
             {
                 "ticker": tk,
@@ -280,6 +383,7 @@ GROUP BY cluster_id
                 "time_horizon": str(reason.get("time_horizon") or "").strip(),
                 "source_cluster": str(reason.get("source_cluster") or cid),
                 "evidence_titles": [str(x) for x in evidence_titles[:2]],
+                "evidence_count": evidence_count,
                 "fail_codes": fail_codes,
                 "abs_blocks": abs_blocks,
                 "cluster_storyline": str(cmeta.get("storyline") or "").strip(),
@@ -290,12 +394,20 @@ GROUP BY cluster_id
         if len(top_cards) >= max(1, int(top_candidates)):
             break
 
-    hypotheses = []
+    hypotheses_valid = []
+    excluded = {"low_confidence": 0, "low_evidence": 0, "empty_chain": 0}
     for c in top_cards:
         chain = c["causal_chain"] or c["summary"] or c["cluster_storyline"]
         if not chain:
+            excluded["empty_chain"] += 1
             continue
-        hypotheses.append(
+        if float(c.get("confidence", 0.0) or 0.0) < 0.60:
+            excluded["low_confidence"] += 1
+            continue
+        if int(c.get("evidence_count", 0) or 0) < 2:
+            excluded["low_evidence"] += 1
+            continue
+        hypotheses_valid.append(
             {
                 "text": chain,
                 "ticker": c["ticker"],
@@ -304,7 +416,9 @@ GROUP BY cluster_id
                 "horizon": c["time_horizon"] or "1-3d",
             }
         )
-    hypotheses = sorted(hypotheses, key=lambda x: float(x.get("confidence") or 0.0), reverse=True)[: max(1, int(top_hypothesis))]
+    hypotheses = sorted(
+        hypotheses_valid, key=lambda x: float(x.get("confidence") or 0.0), reverse=True
+    )[: max(1, min(2, int(top_hypothesis)))]
 
     stage_debug = {}
     try:
@@ -329,57 +443,52 @@ GROUP BY cluster_id
     if feature_cov_pct < 50.0 or relation_cov_pct < 34.0:
         quality = "FAIL"
 
-    abs_blocks = str(run.get("abs_blocks_s") or "")
-    if abs_blocks and abs_blocks not in {"[]", ""}:
-        core_line = "연관 신호는 존재하지만 실행 제약이 우선입니다."
+    abs_blocks = _parse_arr_literal(run.get("abs_blocks_s"))
+    if abs_blocks:
+        core_line = "연관 신호는 유효하나 결론 변경 없음(전역 차단 우선)"
+        impact_line = "결론 변경 없음: 신규매수 금지(전역) 유지"
+    elif hypotheses:
+        core_line = "유효 연관 가설이 있으나 결론은 룰 우선으로 유지"
+        impact_line = "전역 액션영향: 결론 유지(선별 관찰)"
     else:
-        core_line = "연관 강도 상위 종목 중심으로 선별 대응이 유효합니다."
+        core_line = "연관 가설 품질이 부족해 결론 변경 근거 없음"
+        impact_line = "전역 액션영향: 결론 유지(재평가 트리거 대기)"
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines = [f"🧠 연관관계 +A 브리핑 ({now})", ""]
-    lines.append("[핵심 한줄]")
-    lines.append(f"- {core_line}")
-    lines.append("")
-    lines.append(f"[Top 가설 {max(1, int(top_hypothesis))}개]")
-    if hypotheses:
-        for h in hypotheses:
-            lines.append(
-                f"- {_short(h['text'], 88)} → {h['name']}({h['ticker']}) | "
-                f"신뢰도 {float(h.get('confidence') or 0.0):.2f} | 시계열 {h.get('horizon') or '1-3d'}"
-            )
-    else:
-        lines.append("- 유효한 연관 가설이 부족합니다.")
-    lines.append("")
-    lines.append("[액션 영향(기존판단 대비)]")
-    if top_cards:
-        for c in top_cards:
-            lines.append(
-                f"- {c['name']}({c['ticker']}): {c['delta']}"
-            )
-    else:
-        lines.append("- 후보 카드 없음")
-    lines.append("")
-    lines.append("[종목별 연관 카드]")
-    for c in top_cards:
+    excluded_total = int(excluded["low_confidence"] + excluded["low_evidence"] + excluded["empty_chain"])
+    excluded_reason = []
+    if excluded["low_confidence"]:
+        excluded_reason.append(f"저신뢰 {excluded['low_confidence']}")
+    if excluded["low_evidence"]:
+        excluded_reason.append(f"근거부족 {excluded['low_evidence']}")
+    if excluded["empty_chain"]:
+        excluded_reason.append(f"체인없음 {excluded['empty_chain']}")
+    excluded_reason_txt = ", ".join(excluded_reason) if excluded_reason else "없음"
+
+    now = datetime.now().strftime("%m-%d %H:%M")
+    lines = [f"🧠 연관관계 +A | {now}"]
+    lines.append(f"1) 핵심 한줄: {_short(core_line, 62)}")
+    if len(hypotheses) >= 1:
+        h = hypotheses[0]
         lines.append(
-            f"- {c['name']}({c['ticker']}) | 최종액션 {c['action']} | 실행가능 {'YES' if c['exec_possible'] else 'NO'}"
+            f"2) 가설①: {_short(h['text'], 34)} → {h['name']} "
+            f"(신뢰도 {float(h.get('confidence') or 0.0):.2f}, {h.get('horizon') or '1-3d'})"
         )
-        chain = c["causal_chain"] or c["summary"] or c["cluster_storyline"] or "-"
-        lines.append(f"  인과사슬: {_short(chain, 96)}")
-        e1 = c["evidence_titles"][0] if len(c["evidence_titles"]) > 0 else "-"
-        e2 = c["evidence_titles"][1] if len(c["evidence_titles"]) > 1 else "-"
-        lines.append(f"  근거: {_short(e1, 54)}, {_short(e2, 54)}")
+    else:
+        lines.append("2) 가설①: 본문 노출 기준 미충족")
+    if len(hypotheses) >= 2:
+        h = hypotheses[1]
         lines.append(
-            f"  신뢰도: {c['confidence']:.2f} | 시간지평: {c['time_horizon'] or '1-3d'} | 액션보정: {c['delta']}"
+            f"3) 가설②: {_short(h['text'], 34)} → {h['name']} "
+            f"(신뢰도 {float(h.get('confidence') or 0.0):.2f}, {h.get('horizon') or '1-3d'})"
         )
-    lines.append("")
-    lines.append("[무효화 조건]")
-    lines.append("- Stage2 충격레벨 ALERT 이상 지속 또는 거래량/후속근거 약화 시 가설 즉시 약화")
-    lines.append("")
-    lines.append("[신뢰도 스탬프]")
+    else:
+        lines.append("3) 가설②: 본문 노출 기준 미충족")
+    lines.append(f"4) {impact_line}")
+    lines.append(f"5) 제외된 가설: {excluded_total}건 ({excluded_reason_txt})")
+    lines.append("6) 무효화 조건: 수급 ALERT+ 또는 후속근거 약화 시 가설 폐기")
     lines.append(
-        f"- data_quality: {quality} (feature_snapshot_coverage {int(fs_health.get('covered',0))}/{int(fs_health.get('total',0))}, "
-        f"relation_coverage {relation_cov_num}/{relation_cov_den})"
+        "7) 데이터 신뢰도: "
+        f"{quality} (relation {relation_cov_num}/{relation_cov_den}, feature {int(fs_health.get('covered',0))}/{int(fs_health.get('total',0))})"
     )
 
     raw = {
@@ -388,6 +497,7 @@ GROUP BY cluster_id
         "core_line": core_line,
         "hypotheses": hypotheses,
         "cards": top_cards,
+        "excluded": excluded,
         "quality": quality,
         "feature_snapshot_health": fs_health,
         "relation_coverage": {"num": relation_cov_num, "den": relation_cov_den, "pct": relation_cov_pct},
