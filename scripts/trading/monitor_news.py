@@ -61,7 +61,8 @@ CODEX_BIN_CANDIDATES = [
     "/usr/local/bin/openclaw",
     "openclaw",
 ]
-DOORAY_BREAKING_REPORT_ENABLED = os.environ.get("DOORAY_BREAKING_REPORT_ENABLED", "1") == "1"
+# 정기 브리핑만 운영할 때를 기본값으로 둔다(필요 시 env=1로 재활성화).
+DOORAY_BREAKING_REPORT_ENABLED = os.environ.get("DOORAY_BREAKING_REPORT_ENABLED", "0") == "1"
 DOORAY_BREAKING_REPORT_SCRIPT = os.environ.get(
     "DOORAY_BREAKING_REPORT_SCRIPT",
     str(Path.home() / ".openclaw" / "scripts" / "trading" / "send_dooray_briefing.py"),
