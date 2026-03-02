@@ -96,6 +96,13 @@ def _parse_arr_literal(raw) -> list[str]:
     return out
 
 
+def _split_slash_items(text: str, limit: int = 3) -> list[str]:
+    parts = [str(x).strip() for x in str(text or "").split("/") if str(x).strip()]
+    if not parts:
+        return []
+    return parts[: max(1, int(limit))]
+
+
 def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clusters: int = 3):
     from send_decision_dryrun_telegram import resolve_decision_id, _feature_snapshot_health, _trust_label  # type: ignore
 
@@ -188,20 +195,31 @@ LIMIT 200
 
     total = len(cand_rows)
     now = datetime.now().strftime("%m-%d %H:%M")
-    lines = [
-        f"🧭 매매 브리핑 | {now}",
-        f"1) 오늘 결론: {conclusion}",
-        f"2) 결론 사유: {_short(reason, 64)}",
-        f"3) 오늘 행동: {_short(actions, 64)}",
-        f"4) 금지사항: {_short(bans, 64)}",
-        (
-            "5) 실행가능 종목 수: "
-            f"{action_counts['매수 가능']}개 "
-            f"(관찰 {action_counts['관찰 유지']}, 제외 {action_counts['제외(데이터 부족)']}, 전체 {total})"
-        ),
-        f"6) 데이터 신뢰도: {trust_label} ({trust_reason})",
-        f"7) 재평가 조건: {_short(reeval, 64)}",
-    ]
+    action_items = _split_slash_items(actions, limit=3)
+    ban_items = _split_slash_items(bans, limit=2)
+    lines = [f"🧭 매매 브리핑 | {now}", ""]
+    lines.append("🧭 결론")
+    lines.append(f"- {conclusion}")
+    lines.append(f"- 사유: {_short(reason, 52)}")
+    lines.append("")
+    lines.append("✅ 오늘 행동")
+    for x in action_items:
+        lines.append(f"- {_short(x, 44)}")
+    lines.append(
+        "- 실행가능: "
+        f"{action_counts['매수 가능']}개 (관찰 {action_counts['관찰 유지']}, "
+        f"제외 {action_counts['제외(데이터 부족)']}, 전체 {total})"
+    )
+    lines.append("")
+    lines.append("⛔ 오늘 금지")
+    for x in ban_items:
+        lines.append(f"- {_short(x, 44)}")
+    lines.append("")
+    lines.append("📊 신뢰도")
+    lines.append(f"- {trust_label} ({trust_reason})")
+    lines.append("")
+    lines.append("🔁 재평가")
+    lines.append(f"- {_short(reeval, 52)}")
 
     raw = {
         "mode": "pipeline",
@@ -465,30 +483,40 @@ GROUP BY cluster_id
     excluded_reason_txt = ", ".join(excluded_reason) if excluded_reason else "없음"
 
     now = datetime.now().strftime("%m-%d %H:%M")
-    lines = [f"🧠 연관관계 +A | {now}"]
-    lines.append(f"1) 핵심 한줄: {_short(core_line, 62)}")
+    lines = [f"🧠 연관관계 +A | {now}", ""]
+    lines.append("🧭 한줄 요약")
+    lines.append(f"- {_short(core_line, 56)}")
+    lines.append("")
+    lines.append("🧠 유효 가설")
     if len(hypotheses) >= 1:
         h = hypotheses[0]
         lines.append(
-            f"2) 가설①: {_short(h['text'], 34)} → {h['name']} "
+            f"- {_short(h['text'], 28)} → {h['name']} "
             f"(신뢰도 {float(h.get('confidence') or 0.0):.2f}, {h.get('horizon') or '1-3d'})"
         )
     else:
-        lines.append("2) 가설①: 본문 노출 기준 미충족")
+        lines.append("- 본문 노출 가설 없음")
     if len(hypotheses) >= 2:
         h = hypotheses[1]
         lines.append(
-            f"3) 가설②: {_short(h['text'], 34)} → {h['name']} "
+            f"- {_short(h['text'], 28)} → {h['name']} "
             f"(신뢰도 {float(h.get('confidence') or 0.0):.2f}, {h.get('horizon') or '1-3d'})"
         )
-    else:
-        lines.append("3) 가설②: 본문 노출 기준 미충족")
-    lines.append(f"4) {impact_line}")
-    lines.append(f"5) 제외된 가설: {excluded_total}건 ({excluded_reason_txt})")
-    lines.append("6) 무효화 조건: 수급 ALERT+ 또는 후속근거 약화 시 가설 폐기")
+    lines.append("")
+    lines.append("⚠️ 액션 영향")
+    lines.append(f"- {_short(impact_line, 56)}")
+    lines.append("")
+    lines.append("👀 제외된 가설")
+    lines.append(f"- {excluded_total}건 ({excluded_reason_txt})")
+    lines.append("")
+    lines.append("🔁 무효화 조건")
+    lines.append("- 수급 ALERT+ 또는 후속근거 약화")
+    lines.append("")
+    lines.append("📊 신뢰도")
     lines.append(
-        "7) 데이터 신뢰도: "
-        f"{quality} (relation {relation_cov_num}/{relation_cov_den}, feature {int(fs_health.get('covered',0))}/{int(fs_health.get('total',0))})"
+        "- "
+        f"{quality} (relation {relation_cov_num}/{relation_cov_den}, "
+        f"feature {int(fs_health.get('covered',0))}/{int(fs_health.get('total',0))})"
     )
 
     raw = {
