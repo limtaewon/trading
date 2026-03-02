@@ -249,10 +249,15 @@ def _get_sector_by_kis(ticker: str) -> str:
         return "-"
 
 
-def _describe_action_hint(action: str, total_score: float, blocks: list[str]) -> str:
+def _describe_action_hint(action: str, total_score: float, blocks: list[str], global_wait: bool = False) -> str:
     a = (action or "").upper()
     if blocks:
         return f"{a} 유지(제약 존재: {', '.join(blocks)})"
+    if global_wait:
+        if a == "BUY":
+            return "관찰 후보(전역 보류 상태)"
+        if a == "HOLD" and total_score >= 70:
+            return "관찰 후보(전역 보류 상태)"
     if a == "BUY":
         return "신규매수 검토(분할 접근)"
     if a == "REDUCE":
@@ -571,6 +576,36 @@ def _overall_reason_text(run: dict) -> str:
     if not reasons:
         reasons.append("핵심 스테이지가 혼조라 방향성 확인이 더 필요합니다")
     return ". ".join(reasons) + "."
+
+
+def _global_wait_mode(run: dict) -> bool:
+    verdict = _verdict_text(run)
+    return verdict in {"신규 매수 보류", "관망", "비중 축소/리스크 관리 우선"}
+
+
+def _trust_label(coverage_pct: float, feature_age_min: float) -> tuple[str, str]:
+    cov = _float(coverage_pct, 0.0)
+    age = _float(feature_age_min, 99999.0)
+    if cov < 50.0 or age > 120.0:
+        return "낮음", f"feature_snapshot_coverage_pct={cov:.1f}%, liquidity_snapshot_age_minutes={int(age):,}"
+    if cov < 80.0 or age > 60.0:
+        return "보통", f"feature_snapshot_coverage_pct={cov:.1f}%, liquidity_snapshot_age_minutes={int(age):,}"
+    return "높음", f"feature_snapshot_coverage_pct={cov:.1f}%, liquidity_snapshot_age_minutes={int(age):,}"
+
+
+def _llm_rule_alignment(overall_judgment: str, rule_verdict: str) -> tuple[str, str]:
+    txt = str(overall_judgment or "").lower()
+    wait_words = ("관망", "보류", "대기", "신규 매수 없이", "진입 보류")
+    buy_words = ("매수", "진입", "공격적", "추가 매수")
+    llm_wait = any(w in txt for w in wait_words)
+    llm_buy = any(w in txt for w in buy_words)
+
+    rule_wait = rule_verdict in {"신규 매수 보류", "관망", "비중 축소/리스크 관리 우선"}
+    if rule_wait and llm_buy and not llm_wait:
+        return "부분충돌", "LLM이 매수 뉘앙스를 제시했으나 룰 기준으로 보수적 액션을 적용"
+    if (not rule_wait) and llm_wait:
+        return "부분충돌", "LLM이 보수적으로 해석했으며 룰 액션은 유지"
+    return "정합", "룰 결론과 LLM 해석의 방향이 일치"
 
 
 def _block_reason_text(codes: list[str]) -> str:
@@ -1146,10 +1181,12 @@ GROUP BY cluster_id
     qps = "+" if qp >= 0 else ""
 
     lines: list[str] = []
+    rule_verdict = _verdict_text(run)
+    global_wait = _global_wait_mode(run)
     lines.append(f"📌 <b>매매 파이프라인 요약</b> ({now_str})")
     if _bool_env("DRYRUN_REPORT_SHOW_DECISION_ID", False):
         lines.append(f"- decision_id: <code>{decision_id}</code>")
-    lines.append(f"- 종합판단: <b>{_verdict_text(run)}</b> (총점 {_float(run.get('total_score')):.2f})")
+    lines.append(f"- 종합판단: <b>{rule_verdict}</b> (총점 {_float(run.get('total_score')):.2f})")
     lines.append(
         "- Stage 점수: "
         f"S0 {_float(run.get('stage0_score')):.1f} / "
@@ -1216,6 +1253,15 @@ GROUP BY cluster_id
         f"- 데이터 품질: liquidity_snapshot_age_minutes={int(feature_age_min):,}, "
         f"feature_snapshot_coverage_pct={coverage_pct:.1f}% ({covered}/{total})"
     )
+    trust_label, trust_reason = _trust_label(coverage_pct=coverage_pct, feature_age_min=feature_age_min)
+    lines.append("")
+    lines.append("<b>요약(비개발자용)</b>")
+    lines.append(f"- 오늘 결론(룰 기준): <b>{rule_verdict}</b>")
+    if global_wait:
+        lines.append("- 오늘 행동 3가지: ① 신규매수 보류 ② 관찰 후보 모니터링 ③ 실행제약/데이터 복구 우선")
+    else:
+        lines.append("- 오늘 행동 3가지: ① 상위 후보 분할 접근 ② 충격 신호 재확인 ③ 제약 없는 종목만 실행")
+    lines.append(f"- 브리핑 신뢰도: <b>{trust_label}</b> ({trust_reason})")
     lines.append("")
     lines.append("<b>시장 방향</b>")
     lines.append(
@@ -1301,7 +1347,7 @@ GROUP BY cluster_id
             rel_score = _float(m.get("rel_score"), 0.0)
             evidence_ready = max(stage3_evidence_count, explain_ready)
             sector = _get_sector_by_kis(tk)
-            action_txt = _describe_action_hint(action, total, blocks)
+            action_txt = _describe_action_hint(action, total, blocks, global_wait=global_wait)
             tech_txt = _describe_technical_signal(rsi=rsi, vol_ratio=vol_ratio, pct=pct, bb_pct=bb_pct, rel_score=rel_score)
             one_line = _one_line_pick(signal_score=signal_score, rsi=rsi, bb_pct=bb_pct, vol_ratio=vol_ratio)
 
@@ -1446,7 +1492,7 @@ GROUP BY cluster_id
     llm_context = {
         "decision_id": decision_id,
         "decision_time": str(run.get("decision_time") or ""),
-        "verdict": _verdict_text(run),
+        "verdict": rule_verdict,
         "total_score": round(_float(run.get("total_score"), 0.0), 2),
         "stage_scores": {
             "s0": round(_float(run.get("stage0_score"), 0.0), 2),
@@ -1562,6 +1608,30 @@ GROUP BY cluster_id
             lines.append(f"{i}. <b>{label}</b>")
             lines.append(f"- 코멘트: {view or '-'}")
             lines.append("")
+
+    align_label, align_desc = _llm_rule_alignment(
+        overall_judgment=str(llm_obj.get("overall_judgment") or ""),
+        rule_verdict=rule_verdict,
+    )
+    lines.append("<b>LLM-룰 정합성 체크</b>")
+    lines.append(f"- 상태: {align_label}")
+    lines.append(f"- 해석: {align_desc}")
+    lines.append("")
+
+    lines.append("<b>오늘 금지사항</b>")
+    abs_blocks = [str(x) for x in (run.get("absolute_block_reason") or [])]
+    if abs_blocks:
+        lines.append(f"- Absolute Block 발생 시 신규매수 금지 ({', '.join(abs_blocks)})")
+    if stage2_debug:
+        shock_level = str(stage2_debug.get("shock_level") or "").upper()
+        if shock_level in {"ALERT", "EXTREME"}:
+            lines.append(f"- Stage2 충격레벨 {shock_level} 구간: 추격매수 금지")
+    if "MISSING_LIQUIDITY_SNAPSHOT" in stage5_fail_summary:
+        lines.append("- MISSING_LIQUIDITY_SNAPSHOT 종목 신규매수 금지")
+    elif "LOW_LIQUIDITY" in stage5_fail_summary:
+        lines.append("- LOW_LIQUIDITY 종목 신규매수 금지 또는 극소액만 허용")
+    if len(lines) > 0 and lines[-1] == "<b>오늘 금지사항</b>":
+        lines.append("- 추가 금지사항 없음")
 
     return "\n".join(lines)
 
