@@ -23,6 +23,7 @@ import json
 import time
 import logging
 import importlib.util
+import re
 from datetime import datetime
 from pathlib import Path
 from html import escape as html_escape
@@ -103,6 +104,20 @@ def ch_query_json(query: str) -> list[dict]:
         return []
 
 
+def _table_has_column(table: str, column: str) -> bool:
+    try:
+        rows = ch_query_json(
+            "SELECT count() AS c "
+            "FROM system.columns "
+            "WHERE database = 'trading' "
+            f"AND table = '{table}' "
+            f"AND name = '{column}'"
+        )
+        return bool(rows and int(rows[0].get("c", 0) or 0) > 0)
+    except Exception:
+        return False
+
+
 # ─── 데이터 수집 ──────────────────────────────────────────────
 
 def get_index_data(code: str, days: int = 30) -> list[dict]:
@@ -140,6 +155,84 @@ def get_news_sentiment(days: int = 3) -> dict:
         s = row.get("sentiment", "neutral")
         result[s] = int(row.get("cnt", 0))
     return result
+
+
+MACRO_TOPIC_KEYWORDS: dict[str, list[str]] = {
+    "geopolitics": [
+        "이란", "중동", "이스라엘", "전쟁", "공습", "미사일", "분쟁", "충돌", "휴전",
+        "geopolitic", "war", "strike", "conflict",
+    ],
+    "war": [
+        "전쟁", "공습", "폭격", "미사일", "교전", "war", "strike", "missile",
+    ],
+    "oil": [
+        "원유", "유가", "브렌트", "wti", "opec", "석유", "호르무즈", "oil", "crude",
+    ],
+    "shipping": [
+        "해운", "운임", "항로", "수에즈", "호르무즈", "물류", "shipping", "freight",
+    ],
+    "sanctions": [
+        "제재", "관세", "수출통제", "엠바고", "금수", "sanction", "tariff", "export control",
+    ],
+}
+
+
+def _detect_macro_topics(text: str) -> list[str]:
+    t = (text or "").lower()
+    topics: list[str] = []
+    for topic, kws in MACRO_TOPIC_KEYWORDS.items():
+        if any(k.lower() in t for k in kws):
+            topics.append(topic)
+    return topics
+
+
+def get_macro_topic_snapshot(hours: int = 24, limit: int = 400) -> dict:
+    """최근 중요 뉴스/이벤트에서 매크로 토픽을 추출한다.
+
+    티커 매핑 유무와 무관하게 레짐 스트레스 플래그에 반영하기 위함.
+    """
+    h = max(6, int(hours))
+    n = max(50, int(limit))
+    rows = ch_query_json(
+        f"""
+WITH parseDateTimeBestEffortOrNull(toString(published_at)) AS p_ts
+SELECT
+    event_type,
+    channels,
+    thesis_path
+FROM trading.news_event_frames
+WHERE p_ts >= now() - INTERVAL {h} HOUR
+  AND relevant = 1
+ORDER BY p_ts DESC
+LIMIT {n}
+"""
+    )
+    topic_counter: dict[str, int] = {k: 0 for k in MACRO_TOPIC_KEYWORDS.keys()}
+    topic_headline: dict[str, str] = {}
+    for r in rows:
+        event_type = str(r.get("event_type", "") or "")
+        channels = r.get("channels", [])
+        if not isinstance(channels, list):
+            channels = []
+        thesis_path = str(r.get("thesis_path", "") or "")
+        text = f"{event_type} {' '.join([str(c) for c in channels])} {thesis_path}"
+        topics = _detect_macro_topics(text)
+        if not topics:
+            continue
+        title = event_type if event_type else thesis_path[:80]
+        for topic in topics:
+            topic_counter[topic] = topic_counter.get(topic, 0) + 1
+            if topic not in topic_headline and title:
+                topic_headline[topic] = title
+
+    active_topics = [k for k, v in topic_counter.items() if int(v or 0) > 0]
+    active_topics.sort(key=lambda x: topic_counter.get(x, 0), reverse=True)
+    top = active_topics[:3]
+    return {
+        "topics": top,
+        "counts": topic_counter,
+        "headlines": {k: topic_headline.get(k, "") for k in top},
+    }
 
 
 def _sum_flow_rows(rows: list[dict]) -> dict:
@@ -264,6 +357,7 @@ def classify_action_posture(
     vix: float,
     usdkrw: float,
     flow: dict,
+    macro_topics: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     """레짐 라벨과 별개로 실행 강도(posture)를 결정한다.
 
@@ -279,8 +373,17 @@ def classify_action_posture(
         flags.append("USDKRW>=1430")
     if float(flow.get("foreign_1d", 0.0) or 0.0) <= -2_000_000_000_000:
         flags.append("FOREIGN_1D<=-2T")
+    macro_set = set(macro_topics or [])
+    if "geopolitics" in macro_set or "war" in macro_set:
+        flags.append("GEOPOLITICAL_RISK")
+    if "oil" in macro_set:
+        flags.append("OIL_SHOCK_RISK")
+    if "shipping" in macro_set:
+        flags.append("SHIPPING_DISRUPTION_RISK")
+    if "sanctions" in macro_set:
+        flags.append("SANCTIONS_RISK")
 
-    stress_n = len(flags)
+    stress_n = len(set(flags))
     base = "normal"
     if regime_label == "BULL_CALM":
         base = "aggressive"
@@ -516,6 +619,7 @@ def main():
     usdkrw_data = get_fx_data("USDKRW", 10)
     news_sentiment = get_news_sentiment(3)
     flow_trend = get_market_flow_trend(3)
+    macro_snapshot = get_macro_topic_snapshot(hours=int(os.environ.get("REGIME_MACRO_WINDOW_HOURS", "24")))
 
     # 2) 분류
     log.info("레짐 분류 중...")
@@ -531,6 +635,7 @@ def main():
         vix=vix_level,
         usdkrw=usdkrw_level,
         flow=flow_trend,
+        macro_topics=list(macro_snapshot.get("topics", [])),
     )
 
     # 코스닥
@@ -543,7 +648,9 @@ def main():
         dxy_level, usdkrw_level, news_mood, kospi_close, kosdaq_close
     )
     flow_summary = _build_flow_summary(flow_trend)
-    summary = f"{summary} | 수급 {flow_summary}"
+    macro_topics = list(macro_snapshot.get("topics", []))
+    macro_txt = ",".join(macro_topics) if macro_topics else "-"
+    summary = f"{summary} | 수급 {flow_summary} | macro {macro_txt}"
 
     today_str = kospi_data[0].get("date", datetime.now().strftime("%Y-%m-%d")) if kospi_data else datetime.now().strftime("%Y-%m-%d")
 
@@ -576,6 +683,8 @@ def main():
     )
     log.info(f"  레짐:     {regime_label}")
     log.info(f"  행동강도: {posture} (flags={','.join(posture_flags) if posture_flags else '-'})")
+    if macro_topics:
+        log.info("  매크로 토픽(24h): %s", ", ".join(macro_topics))
     log.info(f"  뉴스:     pos={news_sentiment['positive']} neg={news_sentiment['negative']} neu={news_sentiment['neutral']} → {news_mood}")
     log.info(f"  요약:     {summary}")
     log.info("-" * 60)

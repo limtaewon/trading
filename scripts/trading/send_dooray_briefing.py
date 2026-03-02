@@ -36,6 +36,13 @@ STATE_PATH = os.path.expanduser("~/.openclaw/state/dooray_briefing_state.json")
 STOCKS_CSV = os.path.expanduser("~/.openclaw/workspace/STOCKS.csv")
 PUBLIC_BASE_URL = os.environ.get("STOCK_REPORT_PUBLIC_BASE_URL", "").strip().rstrip("/")
 URGENT_CONTEXT_PATH = os.path.expanduser("~/.openclaw/state/news_urgent_context.json")
+MACRO_TOPIC_KEYWORDS = {
+    "geopolitics": ["이란", "중동", "이스라엘", "전쟁", "공습", "분쟁", "war", "strike", "conflict"],
+    "war": ["전쟁", "공습", "폭격", "미사일", "war", "missile", "strike"],
+    "oil": ["원유", "유가", "브렌트", "wti", "opec", "석유", "호르무즈", "oil", "crude"],
+    "shipping": ["해운", "운임", "항로", "수에즈", "물류", "shipping", "freight"],
+    "sanctions": ["제재", "관세", "수출통제", "엠바고", "금수", "sanction", "tariff"],
+}
 
 
 def run_cmd(cmd: str):
@@ -65,11 +72,20 @@ def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clust
         clusters_n=max(1, int(clusters)),
     )
     msg = _dooray_text_from_html(html_msg)
+    digest_rows = build_macro_digest_rows(hours=24, top_n=3)
+    if digest_rows:
+        msg = msg + "\n\n🌍 매크로 24h Digest"
+        for d in digest_rows:
+            msg += f"\n- [{d.get('topic','macro')}] {d.get('title','-')}"
+            if d.get("source_url"):
+                msg += f"\n  링크: {d.get('source_url')}"
+
     raw = {
         "mode": "pipeline",
         "decision_id": did,
         "top_candidates": max(1, int(top_candidates)),
         "clusters": max(1, int(clusters)),
+        "macro_digest": digest_rows,
     }
     return msg, raw
 
@@ -88,6 +104,23 @@ def ch_query(sql: str):
     with urlopen(req, timeout=20) as r:
         payload = json.loads(r.read().decode("utf-8"))
     return payload.get("data", [])
+
+
+def _news_has_column(col: str) -> bool:
+    try:
+        safe_col = str(col).replace("'", "\\'")
+        rows = ch_query(
+            f"""
+SELECT count() AS c
+FROM system.columns
+WHERE database = '{CH_DB}'
+  AND table = 'news'
+  AND name = '{safe_col}'
+"""
+        )
+        return bool(rows and int((rows[0] or {}).get("c", 0) or 0) > 0)
+    except Exception:
+        return False
 
 
 def load_state():
@@ -130,6 +163,59 @@ def load_ticker_map():
     except Exception:
         pass
     return m
+
+
+def build_macro_digest_rows(hours: int = 24, top_n: int = 3):
+    h = max(6, int(hours))
+    n = max(1, int(top_n))
+    try:
+        summary_expr = "summary" if _news_has_column("summary") else "'' AS summary"
+        source_expr = "source_url" if _news_has_column("source_url") else "'' AS source_url"
+        rows = ch_query(
+            f"""
+SELECT
+    toString(published_at) AS published_at_s,
+    title,
+    {summary_expr},
+    importance,
+    {source_expr}
+FROM trading.news
+WHERE published_at >= now() - INTERVAL {h} HOUR
+  AND importance >= 3
+ORDER BY importance DESC, published_at DESC
+LIMIT 250
+"""
+        )
+    except Exception:
+        return []
+    out = []
+    seen_topic = set()
+    for r in rows:
+        title = str(r.get("title", "") or "").strip()
+        summary = str(r.get("summary", "") or "").strip()
+        text = f"{title} {summary}".lower()
+        picked = None
+        for topic, kws in MACRO_TOPIC_KEYWORDS.items():
+            if any(k.lower() in text for k in kws):
+                picked = topic
+                break
+        if not picked:
+            continue
+        if picked in seen_topic:
+            continue
+        seen_topic.add(picked)
+        out.append(
+            {
+                "topic": picked,
+                "title": title,
+                "importance": int(r.get("importance", 0) or 0),
+                "source_url": str(r.get("source_url", "") or "").strip(),
+                "published_at": str(r.get("published_at_s", "") or "").strip(),
+            }
+        )
+        if len(out) >= n:
+            break
+    return out
 
 
 def get_realtime_indices():

@@ -181,6 +181,16 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "data-news-pipeline-health-20m",
+            "enabled": True,
+            "schedule": {"expr": "*/20 8-16 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/monitor_news_pipeline_health.py >> {logs}/news-pipeline-health.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "data-watchlist-retention-daily",
             "enabled": True,
             "schedule": {"expr": "20 6 * * *", "tz": "Asia/Seoul"},

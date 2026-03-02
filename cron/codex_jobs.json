@@ -536,6 +536,19 @@
       "source": "legacy-crontab"
     },
     {
+      "name": "data-news-pipeline-health-20m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/20 8-16 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_news_pipeline_health.py >> $HOME/.openclaw/logs/news-pipeline-health.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
       "name": "data-watchlist-retention-daily",
       "enabled": true,
       "schedule": {

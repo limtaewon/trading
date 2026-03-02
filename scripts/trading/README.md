@@ -8,6 +8,7 @@
 - 보유 포지션 동적 관리: manage_positions.py -> execute_gpt_orders.py
 - 뉴스/데이터 파이프라인: collect_news.py, monitor_news.py, cluster_news.py, llm_relation_reasoner.py
 - 연관 정량 스코어 파이프라인: hidden_relation_scorer.py (cluster 직후, watchlist 직전)
+- 매크로 리스크 플래그: market_regime.py가 24h 매크로 토픽(geopolitics/war/oil/shipping/sanctions)을 감지해 stress_flags에 반영
 - P0 의사결정 로그 파이프라인:
   enrich_data.sh -> hidden_relation_scorer.py -> refresh_interest_watchlist.py -> decision_operating_pipeline.py
 - Watchlist 운영 보조:
@@ -40,6 +41,18 @@
 - 브리핑 파이프라인:
   send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
   (decision_run / decision_candidate 기반)
+  pipeline 모드에서는 "매크로 24h Digest"를 추가로 붙여 티커 매핑 실패 뉴스도 노출
+- 연관 매핑 정책:
+  hidden_relation_scorer.py는 technical_signals뿐 아니라
+  `~/.openclaw/workspace/STOCKS.csv` + `~/.openclaw/data/krx_stocks.json`
+  전종목 마스터를 함께 사용해 엔티티→티커 매핑 커버리지를 보강
+- news_research 워커 정책:
+  analyze_news_research.py는 기본 단일 워커 락(`NEWS_RESEARCH_SINGLE_WORKER_LOCK=1`)으로 동시 처리 레이스를 방지
+  락 파일: `~/.openclaw/state/news_research_worker.lock`
+- 뉴스 파이프라인 헬스체크:
+  monitor_news_pipeline_health.py
+  점검항목: market_regime/news/news_cluster_state/news_event_frames/hidden_relation_signals/interest_watchlist_runs
+  codex_jobs: `data-news-pipeline-health-20m`
 - 인증/환경 부트스트랩:
   핵심 실행기(`prepare_gpt_prompt.py`, `execute_gpt_orders.py`, `manage_positions.py`,
   `decision_operating_pipeline.py`, `send_decision_dryrun_telegram.py`, `send_dooray_briefing.py`)는

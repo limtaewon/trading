@@ -68,11 +68,13 @@
 ### 3-3. 후속 해석/연관 분석
 - `cluster_news.py`: 뉴스 클러스터링
 - `hidden_relation_scorer.py`: 이벤트/클러스터 기반 정량 연관 점수(`hidden_relation_signals`) 스냅샷 생성
+- `hidden_relation_scorer.py` 엔티티→티커 매핑은 `technical_signals` + 전종목 마스터(`~/.openclaw/workspace/STOCKS.csv`, `~/.openclaw/data/krx_stocks.json`)를 함께 사용해 커버리지를 보강한다.
 - `llm_relation_reasoner.py`: 연관 종목/관계 추론
 - `analyze_news_research.py`: 중요 뉴스 심층 연구 및 구조화 저장
 - `collect_news.py`가 중요 뉴스(`importance>=3`)를 `news_research_queue`에 enqueue한다.
 - `analyze_news_research.py`는 `news_research_queue`의 `pending/retry`를 dequeue해 비동기 심층 분석을 수행한다.
 - `analyze_news_research.py`는 비동기 강화 레이어로 운영하며, `status/retry_count/next_retry_at` 기반 재시도(backoff) 정책을 사용한다.
+- `analyze_news_research.py`는 기본 단일 워커 락(`NEWS_RESEARCH_SINGLE_WORKER_LOCK=1`)으로 멀티 워커 동시 dequeue 레이스를 방지한다.
 - `status='ok'`인 레코드만 완료로 간주하고, `fallback/error`는 다음 주기 재분석 대상으로 유지한다.
 - `refresh_interest_watchlist.py`는 `news_research`의 `direct_tickers/source_verdict/confidence`를 후보 유니버스 및 점수에 반영해 실운영 후보 선별에 사용한다.
 
@@ -93,6 +95,7 @@
 - 지수/환율/금리/원자재/수급 데이터
 - 종목별 기술지표(RSI, MACD, BB, 거래량비율 등)
 - 시장 레짐(trend, volatility, risk_appetite, regime_label)
+- 시장 레짐 행동강도(action_posture) 및 스트레스 플래그(stress_flags). 24h 매크로 토픽(geopolitics/war/oil/shipping/sanctions) 기반 리스크 플래그를 함께 반영한다.
 - 공시 데이터 및 브리핑용 가공 데이터
 
 ## 5) 스케줄 관리
@@ -104,6 +107,7 @@
 - 보유 포지션 동적 관리는 `position-manager-20m` command 잡(평일 09:00~15:59, 20분 주기)으로 실행한다.
 - `data-news-research-15m` command 잡(평일 08:00~16:59, 15분 간격)으로 심층 뉴스 연구 워커를 비동기 실행한다.
 - 기본 처리량: `NEWS_RESEARCH_LIMIT=16`, `NEWS_RESEARCH_BATCH=4`, `NEWS_RESEARCH_WINDOW_HOURS=24`
+- `data-news-pipeline-health-20m` command 잡으로 뉴스/클러스터/프레임/연관/watchlist 런의 헬스를 주기 점검한다.
 - 연관 파이프라인은 장중 오프셋 순서로 실행한다:
   - `data-news-cluster-hourly` (`*/20`)
   - `data-news-relation-score-20m` (`3,23,43`)
@@ -193,6 +197,7 @@ bash scripts/ops/deploy_to_runtime.sh
 ### 11-3. 두레이 보고 흐름
 - 기본값(`DOORAY_USE_PIPELINE_BRIEFING=1`)에서 `send_dooray_briefing.py`는 파이프라인 모드를 사용한다.
 - 파이프라인 모드는 `send_decision_dryrun_telegram.py`를 재사용해 `decision_run/decision_candidate` 기반 메시지를 생성한다.
+- 파이프라인 모드 메시지에 `매크로 24h Digest`를 추가해 티커 매핑이 없는 지정학/전쟁/유가 이슈도 노출한다.
 - 유망주 상세(뉴스 링크/연관 해석/타이밍 근거)는 브리핑 생성 시 `news`, `news_event_frames`, `hidden_relation_signals`, `technical_signals`를 추가 조회해 보강한다.
 
 ### 11-4. 운영 실행 예시

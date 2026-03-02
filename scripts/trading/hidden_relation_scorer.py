@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import datetime as dt
 import json
 import math
 import os
 import re
 import sys
+from pathlib import Path
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -254,6 +256,7 @@ def _channel_weight(channels: list[str]) -> float:
 
 
 def _load_ticker_name_map() -> dict[str, str]:
+    out: dict[str, str] = _load_ticker_master_name_map()
     rows = ch_select(
         """
         SELECT ticker, ticker_name
@@ -262,11 +265,12 @@ def _load_ticker_name_map() -> dict[str, str]:
         """,
         timeout_sec=30,
     )
-    out: dict[str, str] = {}
     for r in rows:
         t = str(r.get("ticker", "")).strip()
         if _is_ticker(t):
-            out[t] = str(r.get("ticker_name", "") or "").strip()
+            nm = str(r.get("ticker_name", "") or "").strip()
+            if nm:
+                out[t] = nm
     return out
 
 
@@ -294,6 +298,45 @@ def _build_name_ticker_map(ticker_name_map: dict[str, str]) -> dict[str, str]:
                 out[k] = t
     for k in ambiguous:
         out.pop(k, None)
+    return out
+
+
+def _load_ticker_master_name_map() -> dict[str, str]:
+    """전종목 마스터(코드/종목명)를 로드한다.
+
+    우선순위:
+    1) ~/.openclaw/workspace/STOCKS.csv
+    2) ~/.openclaw/data/krx_stocks.json (name->code 구조)
+    """
+    out: dict[str, str] = {}
+    csv_path = Path.home() / ".openclaw" / "workspace" / "STOCKS.csv"
+    if csv_path.exists():
+        try:
+            with csv_path.open("r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if not row or len(row) < 2:
+                        continue
+                    code = str(row[0] or "").strip().zfill(6)
+                    name = str(row[1] or "").strip()
+                    if _is_ticker(code) and name:
+                        out[code] = name
+        except Exception:
+            pass
+
+    json_path = Path.home() / ".openclaw" / "data" / "krx_stocks.json"
+    if json_path.exists():
+        try:
+            obj = json.loads(json_path.read_text(encoding="utf-8"))
+            stocks = obj.get("stocks", {})
+            if isinstance(stocks, dict):
+                for name, code in stocks.items():
+                    c = str(code or "").strip().zfill(6)
+                    n = str(name or "").strip()
+                    if _is_ticker(c) and n and c not in out:
+                        out[c] = n
+        except Exception:
+            pass
     return out
 
 

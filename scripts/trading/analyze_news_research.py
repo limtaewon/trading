@@ -8,6 +8,7 @@ import hashlib
 import tempfile
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -30,6 +31,10 @@ OPENCLAW_BRAIN_MODEL = "openai-codex/gpt-5.3-codex-spark"
 _env_model = os.environ.get("NEWS_RESEARCH_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip()
 MODEL = _env_model or OPENCLAW_BRAIN_MODEL
 WORKDIR = os.environ.get("NEWS_CODEX_WORKDIR", os.path.expanduser("~/.openclaw/logs"))
+SINGLE_WORKER_LOCK = os.environ.get("NEWS_RESEARCH_SINGLE_WORKER_LOCK", "1").strip() not in {"0", "false", "False"}
+LOCK_FILE = os.path.expanduser(
+    os.environ.get("NEWS_RESEARCH_LOCK_FILE", "~/.openclaw/state/news_research_worker.lock")
+)
 CODEX_EXEC_CACHE_DIR = os.path.expanduser(os.environ.get("CODEX_EXEC_CACHE_DIR", "~/.openclaw/cache/codex-exec"))
 CODEX_EXEC_CACHE_TTL = int(
     os.environ.get("NEWS_RESEARCH_CODEX_CACHE_TTL", os.environ.get("CODEX_EXEC_CACHE_TTL", "300"))
@@ -59,6 +64,11 @@ CODEX_CANDIDATES = [
     "/usr/local/bin/openclaw",
     "openclaw",
 ]
+
+try:
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover - non-posix fallback
+    fcntl = None
 
 
 def split_auth(url: str):
@@ -334,6 +344,47 @@ def _queue_insert_rows(rows: list[dict]) -> int:
     return len(rows)
 
 
+def _acquire_worker_lock():
+    if not SINGLE_WORKER_LOCK:
+        return None
+    if fcntl is None:
+        return None
+    path = Path(LOCK_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(
+        fd,
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+    )
+    return fd
+
+
+def _release_worker_lock(fd):
+    if fd is None:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        os.close(fd)
+    except Exception:
+        pass
+
+
 def _seed_queue_from_news() -> int:
     rows = ch_query(f"""
         SELECT published_at, title, summary, source_url, importance, sentiment, impact_type, tickers
@@ -442,149 +493,157 @@ def _mark_queue(rows: list[dict], status: str, error: str = "", increment_retry:
 
 
 def main():
-    ensure_schema()
-    candidates = _load_queue_candidates()
-    if not candidates:
-        seeded = _seed_queue_from_news()
-        if seeded > 0:
-            candidates = _load_queue_candidates()
-    if not candidates:
-        print("[news-research] no queue candidates")
+    lock_fd = _acquire_worker_lock()
+    if SINGLE_WORKER_LOCK and fcntl is not None and lock_fd is None:
+        print("[news-research] another worker is running; skip")
         return
 
-    schema = {
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
+    try:
+        ensure_schema()
+        candidates = _load_queue_candidates()
+        if not candidates:
+            seeded = _seed_queue_from_news()
+            if seeded > 0:
+                candidates = _load_queue_candidates()
+        if not candidates:
+            print("[news-research] no queue candidates")
+            return
+
+        schema = {
+            "type": "object",
+            "properties": {
                 "items": {
-                    "type": "object",
-                    "properties": {
-                        "idx": {"type": "integer"},
-                        "direct_tickers": {"type": "array", "items": {"type": "string"}},
-                        "secondary_tickers": {"type": "array", "items": {"type": "string"}},
-                        "tertiary_tickers": {"type": "array", "items": {"type": "string"}},
-                        "source_verdict": {"type": "string"},
-                        "source_notes": {"type": "string"},
-                        "hidden_point": {"type": "string"},
-                        "followup_question": {"type": "string"},
-                        "followup_plan": {"type": "string"},
-                        "thesis": {"type": "string"},
-                        "confidence": {"type": "number"},
-                        "expected_horizon_days": {"type": "integer"},
-                        "pnl_hypothesis": {"type": "string"}
-                    },
-                    "required": ["idx","direct_tickers","secondary_tickers","tertiary_tickers","source_verdict","hidden_point","followup_question","thesis","confidence","expected_horizon_days","pnl_hypothesis"]
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "idx": {"type": "integer"},
+                            "direct_tickers": {"type": "array", "items": {"type": "string"}},
+                            "secondary_tickers": {"type": "array", "items": {"type": "string"}},
+                            "tertiary_tickers": {"type": "array", "items": {"type": "string"}},
+                            "source_verdict": {"type": "string"},
+                            "source_notes": {"type": "string"},
+                            "hidden_point": {"type": "string"},
+                            "followup_question": {"type": "string"},
+                            "followup_plan": {"type": "string"},
+                            "thesis": {"type": "string"},
+                            "confidence": {"type": "number"},
+                            "expected_horizon_days": {"type": "integer"},
+                            "pnl_hypothesis": {"type": "string"}
+                        },
+                        "required": ["idx","direct_tickers","secondary_tickers","tertiary_tickers","source_verdict","hidden_point","followup_question","thesis","confidence","expected_horizon_days","pnl_hypothesis"]
+                    }
                 }
-            }
-        },
-        "required": ["items"]
-    }
+            },
+            "required": ["items"]
+        }
 
-    inserted = 0
-    for i in range(0, len(candidates), BATCH):
-        batch = candidates[i:i+BATCH]
-        _mark_queue(batch, status="processing", error="", increment_retry=False)
-        lines = []
-        for j, n in enumerate(batch, start=1):
-            lines.append(
-                f"[{j}] title={n.get('title')}\\nsummary={n.get('summary')}\\nurl={n.get('source_url')}\\nimportance={n.get('importance')}\\nsentiment={n.get('sentiment')}\\ntickers={n.get('tickers', [])}"
+        inserted = 0
+        for i in range(0, len(candidates), BATCH):
+            batch = candidates[i:i+BATCH]
+            _mark_queue(batch, status="processing", error="", increment_retry=False)
+            lines = []
+            for j, n in enumerate(batch, start=1):
+                lines.append(
+                    f"[{j}] title={n.get('title')}\\nsummary={n.get('summary')}\\nurl={n.get('source_url')}\\nimportance={n.get('importance')}\\nsentiment={n.get('sentiment')}\\ntickers={n.get('tickers', [])}"
+                )
+            prompt = (
+                "한국 주식 뉴스 심층 연구를 수행하라.\\n"
+                "각 기사마다 1차(직접),2차(공급망/경쟁),3차(우회/대체) 연관 종목코드(6자리) 제시.\\n"
+                "출처 검증: URL 도메인/기사내용 정합성 관점에서 valid|uncertain|conflict 판정.\\n"
+                "사람들이 놓칠 포인트 1개(hidden_point), 후속검증 질문 1개(followup_question), 추적계획 1개(followup_plan) 작성.\\n"
+                "수익가설: thesis(bullish/bearish/mixed), confidence(0~1), expected_horizon_days, pnl_hypothesis 제시.\\n"
+                "반드시 기사별 idx를 포함해 구조화 응답.\\n\\n"
+                + "\\n\\n".join(lines)
             )
-        prompt = (
-            "한국 주식 뉴스 심층 연구를 수행하라.\\n"
-            "각 기사마다 1차(직접),2차(공급망/경쟁),3차(우회/대체) 연관 종목코드(6자리) 제시.\\n"
-            "출처 검증: URL 도메인/기사내용 정합성 관점에서 valid|uncertain|conflict 판정.\\n"
-            "사람들이 놓칠 포인트 1개(hidden_point), 후속검증 질문 1개(followup_question), 추적계획 1개(followup_plan) 작성.\\n"
-            "수익가설: thesis(bullish/bearish/mixed), confidence(0~1), expected_horizon_days, pnl_hypothesis 제시.\\n"
-            "반드시 기사별 idx를 포함해 구조화 응답.\\n\\n"
-            + "\\n\\n".join(lines)
-        )
 
-        try:
-            raw = codex_exec(prompt, schema)
-            obj = json.loads(raw)
-            mapped = {}
-            for it in obj.get("items", []):
-                idx = int(it.get("idx", 0))
-                if 1 <= idx <= len(batch):
-                    mapped[idx] = it
+            try:
+                raw = codex_exec(prompt, schema)
+                obj = json.loads(raw)
+                mapped = {}
+                for it in obj.get("items", []):
+                    idx = int(it.get("idx", 0))
+                    if 1 <= idx <= len(batch):
+                        mapped[idx] = it
 
-            out_rows = []
-            for idx, n in enumerate(batch, start=1):
-                m = mapped.get(idx, {})
-                domain = urlparse(n.get("source_url", "")).netloc
-                out_rows.append({
-                    "news_id": n["news_id"],
-                    "published_at": n.get("published_at"),
-                    "title": n.get("title"),
-                    "source_url": n.get("source_url"),
-                    "source_domain": domain,
-                    "importance": n.get("importance", 1),
-                    "sentiment": n.get("sentiment", "neutral"),
-                    "impact_type": n.get("impact_type", "stock"),
-                    "tickers_raw": n.get("tickers", []),
-                    "direct_tickers": m.get("direct_tickers", []),
-                    "secondary_tickers": m.get("secondary_tickers", []),
-                    "tertiary_tickers": m.get("tertiary_tickers", []),
-                    "source_verdict": m.get("source_verdict", "uncertain"),
-                    "source_notes": m.get("source_notes", ""),
-                    "hidden_point": m.get("hidden_point", ""),
-                    "followup_question": m.get("followup_question", ""),
-                    "followup_plan": m.get("followup_plan", ""),
-                    "thesis": m.get("thesis", "mixed"),
-                    "confidence": m.get("confidence", 0.5),
-                    "expected_horizon_days": m.get("expected_horizon_days", 5),
-                    "pnl_hypothesis": m.get("pnl_hypothesis", ""),
-                    "model_output": m,
-                    "status": "ok",
-                    "retry_count": int(n.get("retry_count", 0) or 0),
-                    "next_retry_at": _fmt_dt(datetime.now()),
-                    "last_error": "",
-                })
+                out_rows = []
+                for idx, n in enumerate(batch, start=1):
+                    m = mapped.get(idx, {})
+                    domain = urlparse(n.get("source_url", "")).netloc
+                    out_rows.append({
+                        "news_id": n["news_id"],
+                        "published_at": n.get("published_at"),
+                        "title": n.get("title"),
+                        "source_url": n.get("source_url"),
+                        "source_domain": domain,
+                        "importance": n.get("importance", 1),
+                        "sentiment": n.get("sentiment", "neutral"),
+                        "impact_type": n.get("impact_type", "stock"),
+                        "tickers_raw": n.get("tickers", []),
+                        "direct_tickers": m.get("direct_tickers", []),
+                        "secondary_tickers": m.get("secondary_tickers", []),
+                        "tertiary_tickers": m.get("tertiary_tickers", []),
+                        "source_verdict": m.get("source_verdict", "uncertain"),
+                        "source_notes": m.get("source_notes", ""),
+                        "hidden_point": m.get("hidden_point", ""),
+                        "followup_question": m.get("followup_question", ""),
+                        "followup_plan": m.get("followup_plan", ""),
+                        "thesis": m.get("thesis", "mixed"),
+                        "confidence": m.get("confidence", 0.5),
+                        "expected_horizon_days": m.get("expected_horizon_days", 5),
+                        "pnl_hypothesis": m.get("pnl_hypothesis", ""),
+                        "model_output": m,
+                        "status": "ok",
+                        "retry_count": int(n.get("retry_count", 0) or 0),
+                        "next_retry_at": _fmt_dt(datetime.now()),
+                        "last_error": "",
+                    })
 
-            inserted += insert_rows(out_rows)
-            _mark_queue(batch, status="done", error="", increment_retry=False)
-            time.sleep(0.4)
-        except Exception as e:
-            print(f"[news-research] batch failed: {e}")
-            # Codex 실패 시에도 연구 큐를 데이터화(후속 재분석 가능)
-            fallback_rows = []
-            for n in batch:
-                domain = urlparse(n.get("source_url", "")).netloc
-                retry_count = int(n.get("retry_count", 0) or 0)
-                next_retry = datetime.now() + timedelta(minutes=RETRY_COOLDOWN_MINUTES * max(1, min(6, retry_count + 1)))
-                fallback_rows.append({
-                    "news_id": n["news_id"],
-                    "published_at": n.get("published_at"),
-                    "title": n.get("title"),
-                    "source_url": n.get("source_url"),
-                    "source_domain": domain,
-                    "importance": n.get("importance", 1),
-                    "sentiment": n.get("sentiment", "neutral"),
-                    "impact_type": n.get("impact_type", "stock"),
-                    "tickers_raw": n.get("tickers", []),
-                    "direct_tickers": n.get("tickers", []),
-                    "secondary_tickers": [],
-                    "tertiary_tickers": [],
-                    "source_verdict": "uncertain",
-                    "source_notes": f"codex_failed_auto_fallback(retry={retry_count + 1})",
-                    "hidden_point": "코덱스 실패로 심층해석 보류",
-                    "followup_question": "후속 재분석 시 공급망 2차 수혜/피해를 확인할 것",
-                    "followup_plan": "다음 주기에서 재분석(백오프 적용)",
-                    "thesis": "mixed",
-                    "confidence": 0.3,
-                    "expected_horizon_days": 5,
-                    "pnl_hypothesis": "데이터 축적용 임시 레코드",
-                    "model_output": {"error": str(e)[:500]},
-                    "status": "fallback",
-                    "retry_count": retry_count + 1,
-                    "next_retry_at": _fmt_dt(next_retry),
-                    "last_error": str(e)[:500],
-                })
-            inserted += insert_rows(fallback_rows)
-            _mark_queue(batch, status="retry", error=str(e), increment_retry=True)
+                inserted += insert_rows(out_rows)
+                _mark_queue(batch, status="done", error="", increment_retry=False)
+                time.sleep(0.4)
+            except Exception as e:
+                print(f"[news-research] batch failed: {e}")
+                # Codex 실패 시에도 연구 큐를 데이터화(후속 재분석 가능)
+                fallback_rows = []
+                for n in batch:
+                    domain = urlparse(n.get("source_url", "")).netloc
+                    retry_count = int(n.get("retry_count", 0) or 0)
+                    next_retry = datetime.now() + timedelta(minutes=RETRY_COOLDOWN_MINUTES * max(1, min(6, retry_count + 1)))
+                    fallback_rows.append({
+                        "news_id": n["news_id"],
+                        "published_at": n.get("published_at"),
+                        "title": n.get("title"),
+                        "source_url": n.get("source_url"),
+                        "source_domain": domain,
+                        "importance": n.get("importance", 1),
+                        "sentiment": n.get("sentiment", "neutral"),
+                        "impact_type": n.get("impact_type", "stock"),
+                        "tickers_raw": n.get("tickers", []),
+                        "direct_tickers": n.get("tickers", []),
+                        "secondary_tickers": [],
+                        "tertiary_tickers": [],
+                        "source_verdict": "uncertain",
+                        "source_notes": f"codex_failed_auto_fallback(retry={retry_count + 1})",
+                        "hidden_point": "코덱스 실패로 심층해석 보류",
+                        "followup_question": "후속 재분석 시 공급망 2차 수혜/피해를 확인할 것",
+                        "followup_plan": "다음 주기에서 재분석(백오프 적용)",
+                        "thesis": "mixed",
+                        "confidence": 0.3,
+                        "expected_horizon_days": 5,
+                        "pnl_hypothesis": "데이터 축적용 임시 레코드",
+                        "model_output": {"error": str(e)[:500]},
+                        "status": "fallback",
+                        "retry_count": retry_count + 1,
+                        "next_retry_at": _fmt_dt(next_retry),
+                        "last_error": str(e)[:500],
+                    })
+                inserted += insert_rows(fallback_rows)
+                _mark_queue(batch, status="retry", error=str(e), increment_retry=True)
 
-    print(f"[news-research] inserted={inserted} model={MODEL} max_retry={MAX_RETRY} retry_cooldown_min={RETRY_COOLDOWN_MINUTES}")
+        print(f"[news-research] inserted={inserted} model={MODEL} max_retry={MAX_RETRY} retry_cooldown_min={RETRY_COOLDOWN_MINUTES}")
+    finally:
+        _release_worker_lock(lock_fd)
 
 
 if __name__ == "__main__":
