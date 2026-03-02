@@ -699,12 +699,25 @@ FROM
 (
     SELECT
         symbol,
-        argMaxIf(ts, ts, session = 'REGULAR') AS last_ts,
-        argMaxIf(liquidity_krw, ts, session = 'REGULAR') AS liq
-    FROM trading.feature_snapshot
-    WHERE symbol IN {in_expr}
-      AND ts >= now() - INTERVAL 5 DAY
-    GROUP BY symbol
+        if(regular_liq > 0, last_regular_ts, last_any_ts) AS last_ts,
+        if(
+          regular_liq > 0,
+          regular_liq,
+          any_liq
+        ) AS liq
+    FROM
+    (
+        SELECT
+            symbol,
+            maxIf(ts, session='REGULAR') AS last_regular_ts,
+            max(ts) AS last_any_ts,
+            argMaxIf(liquidity_krw, ts, session='REGULAR') AS regular_liq,
+            argMax(liquidity_krw, ts) AS any_liq
+        FROM trading.feature_snapshot
+        WHERE symbol IN {in_expr}
+          AND ts >= now() - INTERVAL 5 DAY
+        GROUP BY symbol
+    )
     HAVING liq > 0
 )
 """

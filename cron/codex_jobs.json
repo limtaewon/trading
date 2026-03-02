@@ -266,12 +266,12 @@
       "name": "data-news-research-15m",
       "enabled": true,
       "schedule": {
-        "expr": "*/15 8-16 * * 1-5",
+        "expr": "*/15 * * * *",
         "tz": "Asia/Seoul"
       },
       "payload": {
         "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && NEWS_RESEARCH_LIMIT=\"${NEWS_RESEARCH_LIMIT:-16}\" NEWS_RESEARCH_BATCH=\"${NEWS_RESEARCH_BATCH:-4}\" NEWS_RESEARCH_WINDOW_HOURS=\"${NEWS_RESEARCH_WINDOW_HOURS:-24}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/analyze_news_research.py >> $HOME/.openclaw/logs/news-research.log 2>&1"
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && NEWS_RESEARCH_LIMIT=\"${NEWS_RESEARCH_LIMIT:-24}\" NEWS_RESEARCH_BATCH=\"${NEWS_RESEARCH_BATCH:-6}\" NEWS_RESEARCH_MAX_DYNAMIC_LIMIT=\"${NEWS_RESEARCH_MAX_DYNAMIC_LIMIT:-80}\" NEWS_RESEARCH_MAX_ITEMS_PER_RUN=\"${NEWS_RESEARCH_MAX_ITEMS_PER_RUN:-96}\" NEWS_RESEARCH_WINDOW_HOURS=\"${NEWS_RESEARCH_WINDOW_HOURS:-48}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/analyze_news_research.py >> $HOME/.openclaw/logs/news-research.log 2>&1"
       },
       "source": "legacy-crontab"
     },

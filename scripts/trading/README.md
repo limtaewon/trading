@@ -37,6 +37,8 @@
 - 수급 스냅샷 대상 정책:
   collect_market_data.py는 watchlist 우선 + dashboard 보강 방식으로 feature_snapshot 종목을 선택
   feature_snapshot 의미: foreign_flow=외국인 보유비중(%), news_event_score=외국인 순매수 수량 proxy, inst_flow=기관 순매수 수량
+  feature_snapshot 수집 시 KIS quote(`acml_tr_pbmn`, `aspr_unit`)로 `liquidity_krw`, `spread_bp`를 실측 채움(0 고정 제거)
+  장후(AFTER) 스냅샷 수집은 `INVESTOR_FLOW_ALLOW_AFTER`로 제어(기본 허용)
   읽기 경로는 `v_feature_snapshot` 표준 컬럼(`foreign_ownership_pct`, `foreign_net_flow`, `inst_net_flow`) 사용 권장
 - 브리핑 파이프라인:
   send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
@@ -49,6 +51,8 @@
 - news_research 워커 정책:
   analyze_news_research.py는 기본 단일 워커 락(`NEWS_RESEARCH_SINGLE_WORKER_LOCK=1`)으로 동시 처리 레이스를 방지
   락 파일: `~/.openclaw/state/news_research_worker.lock`
+  큐 적체 시 backlog 기반 동적 처리량(`NEWS_RESEARCH_MAX_DYNAMIC_LIMIT`, `NEWS_RESEARCH_MAX_ITEMS_PER_RUN`)으로 드레인
+  codex_jobs `data-news-research-15m`는 24시간 주기(`*/15 * * * *`)로 운영
 - 뉴스 파이프라인 헬스체크:
   monitor_news_pipeline_health.py
   점검항목: market_regime/news/news_cluster_state/news_event_frames/hidden_relation_signals/interest_watchlist_runs

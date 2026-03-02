@@ -65,8 +65,10 @@ if MCPORTER_PATH and os.path.isfile(MCPORTER_PATH) and os.access(MCPORTER_PATH, 
     MCPORTER = MCPORTER_PATH
 else:
     MCPORTER = shutil.which("mcporter")
-FLOW_SYMBOL_LIMIT = int(os.getenv("INVESTOR_FLOW_SYMBOL_LIMIT", "30"))
+FLOW_SYMBOL_LIMIT = int(os.getenv("INVESTOR_FLOW_SYMBOL_LIMIT", "80"))
 FLOW_WATCHLIST_MULTIPLIER = max(1, int(os.getenv("INVESTOR_FLOW_WATCHLIST_MULTIPLIER", "3")))
+FLOW_QUOTE_RETRY = max(1, int(os.getenv("INVESTOR_FLOW_QUOTE_RETRY", "3")))
+FLOW_SNAPSHOT_ALLOW_AFTER = os.getenv("INVESTOR_FLOW_ALLOW_AFTER", "1").strip() not in {"0", "false", "False"}
 
 NAVER_RT_URL = "https://polling.finance.naver.com/api/realtime"
 NAVER_INDEX_PAGE_URL = "https://finance.naver.com/sise/sise_index.naver?code={code}"
@@ -442,6 +444,41 @@ def _extract_stock_quote(payload):
         if isinstance(item, dict):
             return item
     return payload
+
+
+def _safe_scaled_float(v, default=0.0):
+    f = _safe_float(v, default)
+    if f is None:
+        return default
+    return float(f)
+
+
+def _estimate_spread_bp(quote: dict, price: float) -> float:
+    if price <= 0:
+        return 0.0
+    # KIS quote 기본 호가 단위(aspr_unit)로 근사 스프레드(bp)를 계산한다.
+    tick = _safe_scaled_float(quote.get("aspr_unit"), 0.0)
+    if tick <= 0:
+        ask = _safe_scaled_float(quote.get("askp"), 0.0)
+        bid = _safe_scaled_float(quote.get("bidp"), 0.0)
+        if ask > 0 and bid > 0 and ask >= bid:
+            tick = ask - bid
+    if tick <= 0:
+        return 0.0
+    return max(0.0, round((tick / price) * 10000.0, 4))
+
+
+def _estimate_liquidity_krw(quote: dict) -> float:
+    # acml_tr_pbmn: 누적 거래대금(원). 장중/장후 snapshot에서 유동성 proxy로 사용.
+    traded_value = _safe_scaled_float(quote.get("acml_tr_pbmn"), 0.0)
+    if traded_value > 0:
+        return traded_value
+    # fallback: price * volume
+    price = _safe_scaled_float(quote.get("stck_prpr"), 0.0)
+    vol = _safe_scaled_float(quote.get("acml_vol"), 0.0)
+    if price > 0 and vol > 0:
+        return max(0.0, price * vol)
+    return 0.0
 
 
 def _query_top_tickers_for_flow(limit: int = 30) -> list[str]:
@@ -826,9 +863,12 @@ def collect_investor_flow(days=7):
     else:
         log.warning("  시장 수급: Naver 파싱 데이터 없음")
 
-    # (2) 종목 스냅샷 수급: 정규장(REGULAR)에서만 반영 (OFF/주말 왜곡 방지)
-    if session != "REGULAR":
+    # (2) 종목 스냅샷 수급: 정규장 우선, 필요 시 장후(AFTER)까지 허용.
+    if session not in {"REGULAR", "AFTER"}:
         log.info(f"  종목 수급 스냅샷: session={session} → 저장 스킵")
+        return total_inserted
+    if session == "AFTER" and not FLOW_SNAPSHOT_ALLOW_AFTER:
+        log.info(f"  종목 수급 스냅샷: session={session}, allow_after=0 → 저장 스킵")
         return total_inserted
 
     if not MCPORTER:
@@ -843,16 +883,19 @@ def collect_investor_flow(days=7):
     snapshot_rows = []
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     skipped_invalid_price = 0
+    skipped_no_quote = 0
 
     for symbol in symbols:
-        payload = _run_kis_stock_quote(symbol)
-        quote = _extract_stock_quote(payload)
-        if not isinstance(quote, dict):
-            # 일시 실패 대비 1회 재시도
-            time.sleep(0.08)
+        payload = None
+        quote = None
+        for retry_idx in range(FLOW_QUOTE_RETRY):
             payload = _run_kis_stock_quote(symbol)
             quote = _extract_stock_quote(payload)
+            if isinstance(quote, dict):
+                break
+            time.sleep(0.08 * (retry_idx + 1))
         if not isinstance(quote, dict):
+            skipped_no_quote += 1
             continue
 
         # feature_snapshot 컬럼 의미(하위 호환):
@@ -863,6 +906,8 @@ def collect_investor_flow(days=7):
         inst_flow = _safe_int(quote.get("pgtr_ntby_qty"), 0)
         price = _safe_float(quote.get("stck_prpr"), 0.0)
         foreign_net_flow = _safe_int(quote.get("frgn_ntby_qty"), 0)
+        spread_bp = _estimate_spread_bp(quote, price)
+        liquidity_krw = _estimate_liquidity_krw(quote)
         if price <= 0:
             skipped_invalid_price += 1
             continue
@@ -875,8 +920,8 @@ def collect_investor_flow(days=7):
             0.0,      # vwap
             0.0,      # atr14
             0.0,      # rsi14
-            0.0,      # spread_bp
-            0.0,      # liquidity_krw
+            spread_bp,      # spread_bp
+            liquidity_krw,  # liquidity_krw
             foreign_ownership,   # foreign_flow(ownership %)
             inst_flow,           # inst_flow(net qty)
             foreign_net_flow,    # news_event_score(foreign net qty proxy)
@@ -901,6 +946,8 @@ def collect_investor_flow(days=7):
         log.info(f"  → 종목 수급(feature_snapshot) {inserted_snapshot}건 저장")
     if skipped_invalid_price > 0:
         log.info(f"  종목 수급 스냅샷: 무효 가격(price<=0) {skipped_invalid_price}건 스킵")
+    if skipped_no_quote > 0:
+        log.info(f"  종목 수급 스냅샷: KIS quote 미수신 {skipped_no_quote}건 스킵")
 
     return total_inserted
 

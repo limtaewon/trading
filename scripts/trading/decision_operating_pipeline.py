@@ -1131,15 +1131,40 @@ HAVING match(ticker, '^[0-9]{6}$')
         rows = ch_select(
             """
 SELECT
-    symbol AS ticker,
-    countIf(session = 'REGULAR') AS regular_rows,
-    maxIf(ts, session = 'REGULAR') AS last_snapshot_ts,
-    argMaxIf(liquidity_krw, ts, session = 'REGULAR') AS liquidity_krw,
-    argMaxIf(spread_bp, ts, session = 'REGULAR') AS spread_bp
-FROM trading.feature_snapshot
-WHERE ts >= now() - INTERVAL 5 DAY
-  AND match(symbol, '^[0-9]{6}$')
-GROUP BY symbol
+    ticker,
+    regular_rows,
+    last_snapshot_ts,
+    last_any_snapshot_ts,
+    regular_liquidity_krw,
+    any_liquidity_krw,
+    regular_spread_bp,
+    any_spread_bp,
+    if(
+      regular_liquidity_krw > 0,
+      regular_liquidity_krw,
+      any_liquidity_krw
+    ) AS liquidity_krw,
+    if(
+      regular_liquidity_krw > 0,
+      regular_spread_bp,
+      any_spread_bp
+    ) AS spread_bp
+FROM
+(
+    SELECT
+        symbol AS ticker,
+        countIf(session = 'REGULAR') AS regular_rows,
+        maxIf(ts, session = 'REGULAR') AS last_snapshot_ts,
+        max(ts) AS last_any_snapshot_ts,
+        argMaxIf(liquidity_krw, ts, session = 'REGULAR') AS regular_liquidity_krw,
+        argMax(liquidity_krw, ts) AS any_liquidity_krw,
+        argMaxIf(spread_bp, ts, session = 'REGULAR') AS regular_spread_bp,
+        argMax(spread_bp, ts) AS any_spread_bp
+    FROM trading.feature_snapshot
+    WHERE ts >= now() - INTERVAL 5 DAY
+      AND match(symbol, '^[0-9]{6}$')
+    GROUP BY symbol
+)
 """
         )
         risk_map: dict[str, dict[str, Any]] = {}
@@ -1149,7 +1174,11 @@ GROUP BY symbol
                 continue
             rr = dict(r)
             regular_rows = _to_int(rr.get("regular_rows"), 0)
-            rr["liquidity_source"] = "FEATURE_SNAPSHOT" if regular_rows > 0 else "MISSING"
+            regular_liq = _to_float(rr.get("regular_liquidity_krw"), 0.0)
+            if regular_rows > 0 and regular_liq > 0:
+                rr["liquidity_source"] = "FEATURE_SNAPSHOT_REGULAR"
+            else:
+                rr["liquidity_source"] = "FEATURE_SNAPSHOT_ANY_SESSION"
             risk_map[ticker] = rr
         maps["risk"] = risk_map
 

@@ -27,6 +27,9 @@ BATCH = int(os.environ.get("NEWS_RESEARCH_BATCH", "4"))
 RETRY_COOLDOWN_MINUTES = max(5, int(os.environ.get("NEWS_RESEARCH_RETRY_COOLDOWN_MINUTES", "30")))
 MAX_RETRY = max(1, int(os.environ.get("NEWS_RESEARCH_MAX_RETRY", "8")))
 QUEUE_LOOKBACK_HOURS = max(24, int(os.environ.get("NEWS_RESEARCH_QUEUE_LOOKBACK_HOURS", str(WINDOW_HOURS + 72))))
+MAX_DYNAMIC_LIMIT = max(LIMIT, int(os.environ.get("NEWS_RESEARCH_MAX_DYNAMIC_LIMIT", "80")))
+MAX_ITEMS_PER_RUN = max(LIMIT, int(os.environ.get("NEWS_RESEARCH_MAX_ITEMS_PER_RUN", "96")))
+RUN_SLEEP_SEC = max(0.0, float(os.environ.get("NEWS_RESEARCH_RUN_SLEEP_SEC", "0.2")))
 OPENCLAW_BRAIN_MODEL = "openai-codex/gpt-5.3-codex-spark"
 _env_model = os.environ.get("NEWS_RESEARCH_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip()
 MODEL = _env_model or OPENCLAW_BRAIN_MODEL
@@ -417,7 +420,52 @@ def _seed_queue_from_news() -> int:
     return _queue_insert_rows(out)
 
 
-def _load_queue_candidates() -> list[dict]:
+def _queue_ready_stats() -> dict:
+    rows = ch_query(f"""
+WITH latest AS (
+    SELECT
+        news_id,
+        argMax(status, tuple(updated_at, created_at)) AS q_status,
+        argMax(retry_count, tuple(updated_at, created_at)) AS q_retry_count,
+        argMax(next_retry_at, tuple(updated_at, created_at)) AS q_next_retry_at
+    FROM trading.news_research_queue
+    WHERE published_at > now() - INTERVAL {QUEUE_LOOKBACK_HOURS} HOUR
+    GROUP BY news_id
+)
+SELECT
+    countIf(q_status IN ('pending','retry') AND q_retry_count < {MAX_RETRY} AND q_next_retry_at <= now()) AS ready_cnt,
+    countIf(q_status IN ('pending','retry') AND q_retry_count < {MAX_RETRY}) AS backlog_cnt,
+    countIf(q_status='processing') AS processing_cnt
+FROM latest
+""")
+    if not rows:
+        return {"ready_cnt": 0, "backlog_cnt": 0, "processing_cnt": 0}
+    rec = rows[0]
+    return {
+        "ready_cnt": int(rec.get("ready_cnt", 0) or 0),
+        "backlog_cnt": int(rec.get("backlog_cnt", 0) or 0),
+        "processing_cnt": int(rec.get("processing_cnt", 0) or 0),
+    }
+
+
+def _dynamic_limit_by_backlog() -> int:
+    stats = _queue_ready_stats()
+    ready = stats.get("ready_cnt", 0)
+    backlog = stats.get("backlog_cnt", 0)
+    size = LIMIT
+    if backlog >= 500:
+        size = max(size, min(MAX_DYNAMIC_LIMIT, 64))
+    elif backlog >= 250:
+        size = max(size, min(MAX_DYNAMIC_LIMIT, 48))
+    elif backlog >= 100:
+        size = max(size, min(MAX_DYNAMIC_LIMIT, 32))
+    elif ready >= LIMIT * 2:
+        size = max(size, min(MAX_DYNAMIC_LIMIT, LIMIT * 2))
+    return max(LIMIT, min(MAX_DYNAMIC_LIMIT, size))
+
+
+def _load_queue_candidates(limit_n: int) -> list[dict]:
+    lim = max(1, int(limit_n))
     return ch_query(f"""
 WITH latest AS (
     SELECT
@@ -455,7 +503,7 @@ WHERE q_status IN ('pending','retry')
   AND q_retry_count < {MAX_RETRY}
   AND q_next_retry_at <= now()
 ORDER BY q_importance DESC, q_published_at DESC
-LIMIT {LIMIT}
+LIMIT {lim}
 """)
 
 
@@ -500,11 +548,13 @@ def main():
 
     try:
         ensure_schema()
-        candidates = _load_queue_candidates()
+        dynamic_limit = _dynamic_limit_by_backlog()
+        candidates = _load_queue_candidates(dynamic_limit)
         if not candidates:
             seeded = _seed_queue_from_news()
             if seeded > 0:
-                candidates = _load_queue_candidates()
+                dynamic_limit = _dynamic_limit_by_backlog()
+                candidates = _load_queue_candidates(dynamic_limit)
         if not candidates:
             print("[news-research] no queue candidates")
             return
@@ -539,8 +589,17 @@ def main():
         }
 
         inserted = 0
+        processed_items = 0
         for i in range(0, len(candidates), BATCH):
             batch = candidates[i:i+BATCH]
+            if not batch:
+                continue
+            if processed_items >= MAX_ITEMS_PER_RUN:
+                break
+            if processed_items + len(batch) > MAX_ITEMS_PER_RUN:
+                batch = batch[: max(0, MAX_ITEMS_PER_RUN - processed_items)]
+                if not batch:
+                    break
             _mark_queue(batch, status="processing", error="", increment_retry=False)
             lines = []
             for j, n in enumerate(batch, start=1):
@@ -601,7 +660,8 @@ def main():
 
                 inserted += insert_rows(out_rows)
                 _mark_queue(batch, status="done", error="", increment_retry=False)
-                time.sleep(0.4)
+                processed_items += len(batch)
+                time.sleep(RUN_SLEEP_SEC)
             except Exception as e:
                 print(f"[news-research] batch failed: {e}")
                 # Codex 실패 시에도 연구 큐를 데이터화(후속 재분석 가능)
@@ -640,8 +700,13 @@ def main():
                     })
                 inserted += insert_rows(fallback_rows)
                 _mark_queue(batch, status="retry", error=str(e), increment_retry=True)
+                processed_items += len(batch)
 
-        print(f"[news-research] inserted={inserted} model={MODEL} max_retry={MAX_RETRY} retry_cooldown_min={RETRY_COOLDOWN_MINUTES}")
+        print(
+            f"[news-research] inserted={inserted} processed={processed_items} "
+            f"dynamic_limit={dynamic_limit} max_items={MAX_ITEMS_PER_RUN} "
+            f"model={MODEL} max_retry={MAX_RETRY} retry_cooldown_min={RETRY_COOLDOWN_MINUTES}"
+        )
     finally:
         _release_worker_lock(lock_fd)
 
