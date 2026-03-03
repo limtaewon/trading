@@ -70,6 +70,9 @@ MACRO_TOPIC_KEYWORDS = {
     "shipping": ["해운", "운임", "항로", "수에즈", "물류", "shipping", "freight"],
     "sanctions": ["제재", "관세", "수출통제", "엠바고", "금수", "sanction", "tariff"],
 }
+SHARED_FRAMEWORK_PATH = (
+    Path(__file__).resolve().parent / "prompts" / "shared_trading_framework_kr.txt"
+)
 
 CODE_LABELS = {
     "HARD_RISK_OFF": "전역 위험차단",
@@ -249,6 +252,34 @@ def _resolve_prompt_template(kind: str, default_prompt: str) -> str:
     return default_prompt
 
 
+def _load_shared_framework_text() -> str:
+    env_file = os.environ.get("TRADING_SHARED_FRAMEWORK_FILE", "").strip()
+    p = Path(env_file).expanduser() if env_file else SHARED_FRAMEWORK_PATH
+    try:
+        txt = p.read_text(encoding="utf-8").strip()
+        if txt:
+            return txt
+    except Exception:
+        pass
+    return (
+        "[공통 프레임워크]\n"
+        "- 시장/뉴스/의사결정/기술/수급/연관 순서로 판단\n"
+        "- Stage0만 하드 차단, Stage1~5는 참고지표\n"
+        "- DB 부족 시 웹 보강 신호 참조"
+    )
+
+
+def _load_web_market_signals(limit: int = 10) -> list[dict]:
+    if os.environ.get("DOORAY_WEB_SIGNALS_ENABLE", "1") != "1":
+        return []
+    try:
+        from web_market_signals import fetch_web_market_signals  # type: ignore
+
+        return fetch_web_market_signals(limit=max(1, int(limit)), timeout_sec=6)
+    except Exception:
+        return []
+
+
 def _run_briefing_llm_text(context: dict, kind: str, timeout_sec: int = 100) -> tuple[str, str]:
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
@@ -290,6 +321,11 @@ def _run_briefing_llm_text(context: dict, kind: str, timeout_sec: int = 100) -> 
         + json.dumps(context, ensure_ascii=False, indent=2)
     )
     prompt = _resolve_prompt_template(kind, default_prompt)
+    framework_txt = _load_shared_framework_text()
+    if "[COMMON_FRAMEWORK]" in prompt:
+        prompt = prompt.replace("[COMMON_FRAMEWORK]", framework_txt)
+    else:
+        prompt = prompt.rstrip() + "\n\n[공통 판단 프레임워크]\n" + framework_txt + "\n"
     if "[INPUT_JSON]" not in prompt:
         prompt = prompt.rstrip() + "\n\n[INPUT_JSON]\n" + json.dumps(context, ensure_ascii=False, indent=2)
     else:
@@ -688,7 +724,75 @@ GROUP BY cluster_id
         )
         cluster_meta = {str(r.get("cluster_id") or ""): r for r in c_rows}
 
+    recent_news_rows = ch_query(
+        """
+SELECT
+  toString(published_at) AS published_at_s,
+  title,
+  sentiment,
+  importance,
+  source_url,
+  arrayStringConcat(tickers, ',') AS tickers_str
+FROM trading.news
+WHERE published_at >= now() - INTERVAL 72 HOUR
+  AND importance >= 3
+ORDER BY importance DESC, published_at DESC
+LIMIT 140
+"""
+    )
+    recent_research_rows = ch_query(
+        """
+SELECT
+  toString(created_at) AS created_at_s,
+  toString(published_at) AS published_at_s,
+  title,
+  source_verdict,
+  confidence,
+  thesis,
+  pnl_hypothesis,
+  direct_tickers,
+  secondary_tickers,
+  tertiary_tickers,
+  source_url
+FROM trading.news_research
+WHERE created_at >= now() - INTERVAL 96 HOUR
+  AND status IN ('ok','fallback')
+ORDER BY created_at DESC
+LIMIT 140
+"""
+    )
+    relation_signal_rows = ch_query(
+        """
+SELECT
+  ticker,
+  ticker_name,
+  total_relation_score,
+  relation_bias,
+  support_events,
+  support_clusters,
+  top_channels
+FROM trading.v_hidden_relation_signals
+ORDER BY abs(total_relation_score) DESC
+LIMIT 120
+"""
+    )
+    relation_reasoning_rows = ch_query(
+        """
+SELECT
+  ticker,
+  ticker_name,
+  confidence,
+  summary,
+  time_horizon,
+  evidence_titles
+FROM trading.v_hidden_relation_reasoning
+ORDER BY asof_ts DESC
+LIMIT 120
+"""
+    )
+
     digest_rows = build_macro_digest_rows(hours=48, top_n=max(3, int(clusters)))
+    web_signals = _load_web_market_signals(limit=12)
     stage2 = stage_debug.get("stage2") if isinstance(stage_debug.get("stage2"), dict) else {}
     stage1 = stage_debug.get("stage1") if isinstance(stage_debug.get("stage1"), dict) else {}
     abs_blocks = [str(x) for x in (run.get("absolute_block_reason") or []) if str(x).strip()]
@@ -767,6 +871,11 @@ GROUP BY cluster_id
             "inst_ratio_pct_5d": _f(stage2.get("inst_net_pct_turnover_5d")),
         },
         "macro_digest": digest_rows,
+        "web_market_signals": web_signals,
+        "recent_news": recent_news_rows,
+        "news_research": recent_research_rows,
+        "relation_signals": relation_signal_rows,
+        "relation_reasonings": relation_reasoning_rows,
         "candidates": llm_candidates,
     }
     report_text, llm_err = _run_briefing_llm_text(
@@ -1491,10 +1600,32 @@ LIMIT 250
                 "importance": int(r.get("importance", 0) or 0),
                 "source_url": str(r.get("source_url", "") or "").strip(),
                 "published_at": str(r.get("published_at_s", "") or "").strip(),
+                "source": "db",
             }
         )
         if len(out) >= n:
             break
+
+    # DB가 빈약하면 웹 신호로 보강
+    if len(out) < n:
+        web_rows = _load_web_market_signals(limit=max(4, n * 3))
+        for w in web_rows:
+            topic = str(w.get("topic", "") or "").strip()
+            if not topic or topic in seen_topic:
+                continue
+            seen_topic.add(topic)
+            out.append(
+                {
+                    "topic": topic,
+                    "title": str(w.get("title", "") or "").strip(),
+                    "importance": int(w.get("importance", 3) or 3),
+                    "source_url": str(w.get("source_url", "") or "").strip(),
+                    "published_at": str(w.get("published_at", "") or "").strip(),
+                    "source": "web",
+                }
+            )
+            if len(out) >= n:
+                break
     return out
 
 

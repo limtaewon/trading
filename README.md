@@ -212,9 +212,16 @@ bash scripts/ops/deploy_to_runtime.sh
 - 기본값(`DOORAY_USE_PIPELINE_BRIEFING=1`)에서 `send_dooray_briefing.py`는 파이프라인 모드를 사용한다.
 - 파이프라인 모드는 `send_decision_dryrun_telegram.py`를 재사용해 `decision_run/decision_candidate` 기반 메시지를 생성한다.
 - 파이프라인 모드 메시지에 `매크로 24h Digest`를 추가해 티커 매핑이 없는 지정학/전쟁/유가 이슈도 노출한다.
+- 브리핑 LLM은 `scripts/trading/prompts/dooray_briefing_main_prompt.txt`를 기본 템플릿으로 사용하고, 공통 판단 프레임워크(`scripts/trading/prompts/shared_trading_framework_kr.txt`)를 동일하게 주입한다.
+- DB 매크로 데이터가 빈약할 때는 `web_market_signals.py`를 통해 Google News RSS 기반 웹 보강 신호를 추가해 브리핑 누락을 줄인다(수치 판단은 DB 우선).
 - 유망주 상세(뉴스 링크/연관 해석/타이밍 근거)는 브리핑 생성 시 `news`, `news_event_frames`, `hidden_relation_signals`, `technical_signals`를 추가 조회해 보강한다.
 - `DOORAY_SEND_RELATION_PLUS_A=1`일 때 기본 브리핑 뒤에 `연관관계 +A 브리핑`을 2차 전송한다.
   - 조정 파라미터: `DOORAY_RELATION_PLUS_A_DELAY_SEC`(기본 2초), `DOORAY_RELATION_PLUS_A_TOP`(기본 3), `DOORAY_RELATION_PLUS_A_HYPOTHESIS`(기본 3)
+
+### 11-3-1. 매매판단 프롬프트와 브리핑 프롬프트 정합성
+- `prepare_gpt_prompt.py`도 동일한 공통 프레임워크 파일을 로드해 LLM 매매판단 컨텍스트에 포함한다.
+- `prepare_gpt_prompt.py`는 DB 신호(`news/news_event_frames/news_research/relation/수급/기술`)를 최대치로 제공하고, 옵션으로 웹 보강 신호(`PROMPT_WEB_SIGNALS_ENABLE=1`)를 함께 제공한다.
+- 결과적으로 매매판단과 브리핑이 같은 판단 순서(매크로→뉴스/이벤트→의사결정→기술→수급→연관→종합)를 공유한다.
 
 ### 11-4. 운영 실행 예시
 ```bash
