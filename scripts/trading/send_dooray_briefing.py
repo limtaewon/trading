@@ -231,6 +231,10 @@ def _resolve_prompt_template(kind: str, default_prompt: str) -> str:
     key = str(kind or "").strip().upper()
     inline = os.environ.get(f"DOORAY_{key}_PROMPT", "").strip()
     file_path = os.environ.get(f"DOORAY_{key}_PROMPT_FILE", "").strip()
+    if not file_path and key == "BRIEFING_MAIN":
+        p = Path(__file__).resolve().parent / "prompts" / "dooray_briefing_main_prompt.txt"
+        if p.exists():
+            file_path = str(p)
     if file_path:
         p = Path(os.path.expanduser(file_path))
         if p.exists():
