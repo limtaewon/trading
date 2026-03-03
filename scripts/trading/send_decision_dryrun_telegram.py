@@ -476,10 +476,25 @@ def _format_flow_lines(rows: list[dict]) -> list[str]:
     return out
 
 
-def _market_direction_interpretation(kospi_pct: float, kosdaq_pct: float, flow_rows: list[dict]) -> list[str]:
+def _has_meaningful_flow(rows: list[dict]) -> bool:
+    if not rows:
+        return False
+    for r in rows:
+        if abs(_float(r.get("net_amount"), 0.0)) > 0:
+            return True
+    return False
+
+
+def _market_direction_interpretation(
+    kospi_pct: float,
+    kosdaq_pct: float,
+    flow_rows: list[dict],
+    stage2_debug: dict[str, Any] | None = None,
+) -> list[str]:
     flows: dict[tuple[str, str], float] = {}
     by_investor: dict[str, float] = {"foreign": 0.0, "institution": 0.0, "individual": 0.0}
     by_market: dict[str, float] = {"KOSPI": 0.0, "KOSDAQ": 0.0}
+    has_flow = _has_meaningful_flow(flow_rows)
 
     for r in flow_rows:
         market = str(r.get("market") or "").upper()
@@ -502,32 +517,43 @@ def _market_direction_interpretation(kospi_pct: float, kosdaq_pct: float, flow_r
     else:
         lines.append("- 지수 해석: 양 시장 방향이 엇갈려 업종/테마별 차별화가 큰 장세입니다.")
 
-    foreign_total = by_investor["foreign"]
-    inst_total = by_investor["institution"]
-    indiv_total = by_investor["individual"]
-    if foreign_total < 0 and indiv_total > 0:
-        lines.append(
-            f"- 수급 해석: 외국인 순매도({foreign_total:,.0f}억)를 개인 순매수({indiv_total:,.0f}억)가 받는 역방향 수급입니다."
-        )
-    elif foreign_total > 0 and inst_total > 0:
-        lines.append(
-            f"- 수급 해석: 외국인·기관 동반 순매수(외국인 {foreign_total:,.0f}억, 기관 {inst_total:,.0f}억)로 위험자산 선호 신호입니다."
-        )
+    if has_flow:
+        foreign_total = by_investor["foreign"]
+        inst_total = by_investor["institution"]
+        indiv_total = by_investor["individual"]
+        if foreign_total < 0 and indiv_total > 0:
+            lines.append(
+                f"- 수급 해석: 외국인 순매도({foreign_total:,.0f}억)를 개인 순매수({indiv_total:,.0f}억)가 받는 역방향 수급입니다."
+            )
+        elif foreign_total > 0 and inst_total > 0:
+            lines.append(
+                f"- 수급 해석: 외국인·기관 동반 순매수(외국인 {foreign_total:,.0f}억, 기관 {inst_total:,.0f}억)로 위험자산 선호 신호입니다."
+            )
+        else:
+            lines.append(
+                f"- 수급 해석: 외국인 {foreign_total:,.0f}억 / 기관 {inst_total:,.0f}억 / 개인 {indiv_total:,.0f}억으로 혼조세입니다."
+            )
     else:
+        s2 = stage2_debug or {}
+        f5 = _to_eok_from_krw(_float(s2.get("foreign_net_krw_5d"), 0.0))
+        i5 = _to_eok_from_krw(_float(s2.get("inst_net_krw_5d"), 0.0))
         lines.append(
-            f"- 수급 해석: 외국인 {foreign_total:,.0f}억 / 기관 {inst_total:,.0f}억 / 개인 {indiv_total:,.0f}억으로 혼조세입니다."
+            f"- 수급 해석: 당일 장마감 수급 데이터가 아직 없어 5영업일 기준으로 해석합니다(외국인 {f5:+,.0f}억 / 기관 {i5:+,.0f}억)."
         )
 
     kf = flows.get(("KOSPI", "foreign"), 0.0)
     qf = flows.get(("KOSDAQ", "foreign"), 0.0)
-    if kf < 0 and qf > 0:
-        lines.append(
-            f"- 시장별 해석: 외국인은 코스피({kf:,.0f}억) 매도, 코스닥({qf:,.0f}억) 매수로 대형주보다 중소형/테마주 선호가 상대적으로 강합니다."
-        )
-    elif kf < 0 and qf <= 0:
-        lines.append("- 시장별 해석: 외국인 자금이 양 시장 모두에서 유출되어 방어적 대응이 필요합니다.")
+    if has_flow:
+        if kf < 0 and qf > 0:
+            lines.append(
+                f"- 시장별 해석: 외국인은 코스피({kf:,.0f}억) 매도, 코스닥({qf:,.0f}억) 매수로 대형주보다 중소형/테마주 선호가 상대적으로 강합니다."
+            )
+        elif kf < 0 and qf <= 0:
+            lines.append("- 시장별 해석: 외국인 자금이 양 시장 모두에서 유출되어 방어적 대응이 필요합니다.")
+        else:
+            lines.append("- 시장별 해석: 외국인 수급은 시장 간 방향성이 뚜렷하지 않아 추가 확인이 필요합니다.")
     else:
-        lines.append("- 시장별 해석: 외국인 수급은 시장 간 방향성이 뚜렷하지 않아 추가 확인이 필요합니다.")
+        lines.append("- 시장별 해석: 당일 시장별 수급 데이터 미수집으로 세부 시장 비교 해석은 보류합니다.")
 
     return lines
 
@@ -814,18 +840,26 @@ LIMIT 20
     if stress_flags:
         rates_line += f", stress={stress_flags}"
 
+    has_flow = _has_meaningful_flow(flow_rows)
     by_inv = {"foreign": 0.0, "institution": 0.0, "individual": 0.0}
-    for r in flow_rows:
-        inv = str(r.get("investor_type") or "").lower()
-        by_inv[inv] = by_inv.get(inv, 0.0) + (_float(r.get("net_amount"), 0.0) / 100.0)
+    if has_flow:
+        for r in flow_rows:
+            inv = str(r.get("investor_type") or "").lower()
+            by_inv[inv] = by_inv.get(inv, 0.0) + (_float(r.get("net_amount"), 0.0) / 100.0)
     shock = str(stage2_debug.get("shock_level") or "UNKNOWN")
     f5 = _to_eok_from_krw(_float(stage2_debug.get("foreign_net_krw_5d"), 0.0))
     i5 = _to_eok_from_krw(_float(stage2_debug.get("inst_net_krw_5d"), 0.0))
-    flow_line = (
-        f"외국인 5영업일 {f5:+,.0f}억 / 기관 {i5:+,.0f}억, "
-        f"당일(참고) 외국인 {by_inv.get('foreign', 0.0):+,.0f}억·기관 {by_inv.get('institution', 0.0):+,.0f}억·개인 {by_inv.get('individual', 0.0):+,.0f}억 "
-        f"(Stage2={shock})"
-    )
+    if has_flow:
+        flow_line = (
+            f"외국인 5영업일 {f5:+,.0f}억 / 기관 {i5:+,.0f}억, "
+            f"당일(참고) 외국인 {by_inv.get('foreign', 0.0):+,.0f}억·기관 {by_inv.get('institution', 0.0):+,.0f}억·개인 {by_inv.get('individual', 0.0):+,.0f}억 "
+            f"(Stage2={shock})"
+        )
+    else:
+        flow_line = (
+            f"외국인 5영업일 {f5:+,.0f}억 / 기관 {i5:+,.0f}억, 당일(참고) 장마감 수급 미수집 "
+            f"(Stage2={shock})"
+        )
 
     return [geo_line, rates_line, flow_line]
 
@@ -1297,10 +1331,13 @@ GROUP BY cluster_id
             f"(|ratio|max={s2_shock_abs:.2f}%, PASS<= {pass_max:.1f} / WARN<= {warn_max:.1f} / ALERT> {warn_max:.1f})"
         )
         lines.append(f"- Stage2 분모 검증: {'PASS' if s2_valid else 'FAIL'} / flags: {', '.join([str(x) for x in s2_flags]) or '-'}")
-    if flow_rows:
+    flow_has_data = _has_meaningful_flow(flow_rows)
+    if flow_has_data:
         lines.append("- 장마감 수급(참고):")
         lines.extend(_format_flow_lines(flow_rows))
-    lines.extend(_market_direction_interpretation(kp, qp, flow_rows))
+    else:
+        lines.append("- 장마감 수급(참고): 데이터 미수집/유효값 없음(당일 장마감 수급 해석 보류)")
+    lines.extend(_market_direction_interpretation(kp, qp, flow_rows, stage2_debug))
     lines.append("")
     lines.append("<b>🚀 유망주 요약</b>")
     if not cand_rows:

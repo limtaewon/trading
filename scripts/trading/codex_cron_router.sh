@@ -36,6 +36,7 @@ STATE_DIR="$BASE/state/codex_brain"
 JOURNAL_FILE="$STATE_DIR/events.jsonl"
 PROMPT_FILE="$BASE/workspace/CODEX_PERSISTENT_MEMORY.md"
 ORDER_EXEC="$TRADING_SCRIPTS/execute_gpt_orders.py"
+DECISION_REPORT="$TRADING_SCRIPTS/send_decision_dryrun_telegram.py"
 COIN_RUNNER="$BASE/scripts/coin_codex_runner.py"
 LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-openclaw}}"
 CODEX_BIN="${CODEX_BIN:-openclaw}"
@@ -69,6 +70,27 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$JOB_NAME] $*" >> "$LOG_FILE"; }
 notify_telegram() {
     local msg="$1"
     python3 "$BASE/scripts/telegram_notify.py" "$msg" >> "$LOG_FILE" 2>&1 || true
+}
+
+send_decision_telegram_brief() {
+    if [[ "${TELEGRAM_DECISION_EACH_RUN:-1}" != "1" ]]; then
+        return 0
+    fi
+    # 브리핑 전용 systemEvent는 제외한다.
+    if [[ "$EVENT_TEXT" == *"브리핑 전용"* ]]; then
+        return 0
+    fi
+    if [[ ! -f "$DECISION_REPORT" ]]; then
+        log "decision telegram skip: report script missing ($DECISION_REPORT)"
+        return 0
+    fi
+    local top_n="${TELEGRAM_DECISION_TOP_CANDIDATES:-5}"
+    local clusters_n="${TELEGRAM_DECISION_CLUSTERS:-3}"
+    if ! python3 "$DECISION_REPORT" --top-candidates "$top_n" --clusters "$clusters_n" >> "$LOG_FILE" 2>&1; then
+        log "decision telegram failed (non-fatal)"
+    else
+        log "decision telegram sent"
+    fi
 }
 
 release_job_lock() {
@@ -333,6 +355,11 @@ if [[ "$STATUS" == "ok" && "$PAYLOAD_KIND" == "systemEvent" && "$JOB_NAME" != co
         STATUS="error"
         ERROR_MSG="order execution stage failed"
     fi
+fi
+
+# 매매 판단 결과를 텔레그램에 남긴다(실패해도 본잡은 유지).
+if [[ "$STATUS" == "ok" && "$PAYLOAD_KIND" == "systemEvent" && "$JOB_NAME" != coin-* ]]; then
+    send_decision_telegram_brief || true
 fi
 
 # 긴급 뉴스 트리거는 1회 처리 후 컨텍스트를 삭제해 재처리를 방지한다.
