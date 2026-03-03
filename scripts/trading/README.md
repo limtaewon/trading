@@ -45,9 +45,12 @@
   watchlist 누락 종목을 `MASTER_FILL` row로 보강(종목 커버리지 안정화)
   읽기 경로는 `v_feature_snapshot` 표준 컬럼(`foreign_ownership_pct`, `foreign_net_flow`, `inst_net_flow`) 사용 권장
 - 브리핑 파이프라인:
-  send_dooray_briefing.py(pipeline mode) -> send_decision_dryrun_telegram.py
-  (decision_run / decision_candidate 기반)
-  pipeline 모드에서는 "매크로 24h Digest"를 추가로 붙여 티커 매핑 실패 뉴스도 노출
+  send_dooray_briefing.py(pipeline mode, decision_run/decision_candidate 기반)
+  기본 스타일(`DOORAY_PIPELINE_STYLE=claude`)은
+  "현재 시장 상황 요약 → 내일 유망주 분석(섹터별) → 종합 판단" 템플릿으로 생성
+  (LLM 요약은 보조, 액션/점수/제약은 decision 결과를 그대로 사용)
+  `DOORAY_PIPELINE_STYLE=legacy`로 기존 상세형 포맷으로 롤백 가능
+  pipeline 모드에서는 "매크로 24h Digest" 데이터를 함께 사용해 티커 매핑 실패 뉴스도 노출
   `DOORAY_SEND_RELATION_PLUS_A=1`(기본)일 때 기본 브리핑 직후 `연관관계 +A 브리핑`을 2차 전송
   (`DOORAY_RELATION_PLUS_A_DELAY_SEC`, `DOORAY_RELATION_PLUS_A_TOP`, `DOORAY_RELATION_PLUS_A_HYPOTHESIS`로 조정)
 - 연관 매핑 정책:

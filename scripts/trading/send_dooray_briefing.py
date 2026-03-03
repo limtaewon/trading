@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 Dooray 브리핑 전송기
 - 매매 체결/잔고 데이터 제외
@@ -16,7 +18,11 @@ import argparse
 import re
 import html
 import time
+import sys
+import shutil
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
@@ -105,6 +111,130 @@ ACTION_LABELS = {
     "SELL": "매도 검토",
     "NEUTRAL": "중립",
 }
+
+
+def _f(v, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _parse_first_json_object(raw: str) -> dict | None:
+    txt = str(raw or "").strip()
+    if not txt:
+        return None
+    try:
+        obj = json.loads(txt)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", txt, re.DOTALL)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _to_eok(v_krw: float) -> float:
+    return _f(v_krw, 0.0) / 100_000_000.0
+
+
+def _norm_ticker(v: object) -> str:
+    s = str(v or "").strip()
+    m = re.search(r"(\d{6})", s)
+    return m.group(1) if m else ""
+
+
+def _fmt_eok(v_krw: float) -> str:
+    vv = _to_eok(v_krw)
+    sign = "+" if vv >= 0 else ""
+    return f"{sign}{vv:,.0f}억"
+
+
+def _run_briefing_llm(context: dict, timeout_sec: int = 80) -> tuple[dict | None, str]:
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        from codex_exec_guard import run_codex_cached  # type: ignore
+    except Exception as e:
+        return None, f"import_failed:{type(e).__name__}:{e}"
+
+    codex_bin = os.getenv("CODEX_BIN", os.getenv("OPENCLAW_BIN", "openclaw")).strip() or "openclaw"
+    resolved = shutil.which(codex_bin) or codex_bin
+    if not shutil.which(resolved) and not Path(resolved).exists():
+        return None, f"codex_not_found:{resolved}"
+
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "key_event": {"type": "string"},
+            "market_summary": {"type": "string"},
+            "sector_summary": {"type": "string"},
+            "final_judgment": {"type": "string"},
+            "trade_note": {"type": "string"},
+        },
+        "required": ["key_event", "market_summary", "sector_summary", "final_judgment", "trade_note"],
+    }
+    prompt = (
+        "너는 한국 주식 운영 브리핑 작성자다.\n"
+        "입력 JSON 숫자/사실만 사용해서 한국어로 짧고 명확하게 요약한다.\n"
+        "없는 수치/뉴스를 만들지 말고, 단위(억, %, 원)를 바꾸지 말라.\n"
+        "영문 필드명/코드명(예: absolute_blocks, shock_level)을 본문에 노출하지 말고 한국어 의미로만 작성하라.\n"
+        "핵심 이벤트 1개, 시장요약 1문장, 섹터요약 1문장, 종합판단 1문장, 매매노트 1문장만 작성.\n"
+        "출력은 JSON만 반환한다.\n\n"
+        "[INPUT_JSON]\n"
+        + json.dumps(context, ensure_ascii=False, indent=2)
+    )
+
+    schema_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as sf:
+            schema_path = sf.name
+            json.dump(schema, sf, ensure_ascii=False)
+        raw = run_codex_cached(
+            prompt=prompt,
+            codex_bin=resolved,
+            model=os.getenv("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark"),
+            workdir=None,
+            timeout_sec=max(30, int(timeout_sec)),
+            base_args=["--skip-git-repo-check", "--full-auto"],
+            output_schema_path=schema_path,
+            cache_dir=os.getenv("CODEX_EXEC_CACHE_DIR", os.path.expanduser("~/.openclaw/cache/codex-exec")),
+            cache_ttl_sec=int(os.getenv("STOCK_REPORT_CODEX_CACHE_TTL", os.getenv("CODEX_EXEC_CACHE_TTL", "180"))),
+            cache_lock_wait_sec=int(
+                os.getenv("STOCK_REPORT_CODEX_CACHE_LOCK_WAIT", os.getenv("CODEX_EXEC_CACHE_LOCK_WAIT", "20"))
+            ),
+        )
+        obj = _parse_first_json_object(raw)
+        if not obj:
+            return None, "llm_json_parse_failed"
+        return obj, ""
+    except Exception as e:
+        return None, f"llm_error:{type(e).__name__}:{e}"
+    finally:
+        if schema_path:
+            try:
+                Path(schema_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _bucket_candidate(action: str, total_score: float, rsi: float, abs_blocks: list[str], exec_mult: float) -> str:
+    if abs_blocks or exec_mult <= 0.0 or rsi >= 70.0:
+        return "red"
+    a = str(action or "").upper()
+    if a == "BUY" and total_score >= 65.0:
+        return "green"
+    if total_score >= 70.0:
+        return "green"
+    return "yellow"
 
 
 def run_cmd(cmd: str):
@@ -257,7 +387,7 @@ def _action_label(action: str) -> str:
     return ACTION_LABELS.get(a, a or "-")
 
 
-def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clusters: int = 3):
+def _build_pipeline_message_legacy(decision_id: str = "", top_candidates: int = 5, clusters: int = 3):
     from send_decision_dryrun_telegram import resolve_decision_id, build_message  # type: ignore
 
     did = resolve_decision_id((decision_id or "").strip())
@@ -285,6 +415,351 @@ def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clust
         "macro_digest": digest_rows,
     }
     return msg, raw
+
+
+def _build_pipeline_message_claude_style(decision_id: str = "", top_candidates: int = 5, clusters: int = 3):
+    from send_decision_dryrun_telegram import resolve_decision_id  # type: ignore
+
+    did = resolve_decision_id((decision_id or "").strip())
+    run_rows = ch_query(
+        f"""
+SELECT
+  decision_id,
+  toString(decision_time) AS decision_time_s,
+  total_score,
+  stage0_score,
+  stage1_score,
+  stage2_score,
+  stage3_score,
+  stage4_score,
+  stage5_score,
+  absolute_block_reason,
+  stage_debug_json
+FROM trading.decision_run
+WHERE decision_id = {sql_quote(did)}
+LIMIT 1
+"""
+    )
+    if not run_rows:
+        return "현재 의사결정 데이터가 없습니다.", {"mode": "pipeline_claude", "decision_id": did}
+    run = run_rows[0]
+    try:
+        stage_debug = json.loads(str(run.get("stage_debug_json") or "{}"))
+    except Exception:
+        stage_debug = {}
+
+    idx_rows = ch_query(
+        """
+SELECT
+  (SELECT close_price FROM trading.market_index WHERE index_code='KOSPI' ORDER BY date DESC LIMIT 1) AS kospi,
+  (SELECT change_pct FROM trading.market_index WHERE index_code='KOSPI' ORDER BY date DESC LIMIT 1) AS kospi_chg,
+  (SELECT toString(date) FROM trading.market_index WHERE index_code='KOSPI' ORDER BY date DESC LIMIT 1) AS kospi_dt,
+  (SELECT close_price FROM trading.market_index WHERE index_code='KOSDAQ' ORDER BY date DESC LIMIT 1) AS kosdaq,
+  (SELECT change_pct FROM trading.market_index WHERE index_code='KOSDAQ' ORDER BY date DESC LIMIT 1) AS kosdaq_chg,
+  (SELECT toString(date) FROM trading.market_index WHERE index_code='KOSDAQ' ORDER BY date DESC LIMIT 1) AS kosdaq_dt,
+  (SELECT close_price FROM trading.market_index WHERE index_code='VIX' ORDER BY date DESC LIMIT 1) AS vix,
+  (SELECT close_rate FROM trading.exchange_rate WHERE currency_pair='USDKRW' ORDER BY date DESC LIMIT 1) AS usdkrw
+"""
+    )
+    idx = idx_rows[0] if idx_rows else {}
+
+    regime_rows = ch_query(
+        """
+SELECT
+  regime_label,
+  ifNull(action_posture, 'normal') AS action_posture,
+  ifNull(arrayStringConcat(stress_flags, ', '), '') AS stress_flags,
+  ifNull(guide_text, '') AS guide_text
+FROM trading.market_regime
+ORDER BY date DESC, updated_at DESC
+LIMIT 1
+"""
+    )
+    regime = regime_rows[0] if regime_rows else {}
+
+    cand_rows = ch_query(
+        f"""
+WITH
+  latest_ts AS (SELECT max(date) AS d FROM trading.technical_signals),
+  latest_rel AS (SELECT max(asof_ts) AS ts FROM trading.hidden_relation_signals)
+SELECT
+  c.ticker AS ticker,
+  any(ts.ticker_name) AS ticker_name,
+  c.action,
+  c.total_score,
+  c.stage2_stock_flow_score,
+  c.stage3_event_score,
+  c.stage4_timing_score,
+  c.absolute_block_reason,
+  c.stage5_fail_codes,
+  c.stage5_exec_multiplier,
+  any(c.primary_cluster_id) AS primary_cluster_id,
+  any(ts.signal) AS signal,
+  max(toFloat64(ts.signal_score)) AS signal_score,
+  max(toFloat64(ts.rsi14)) AS rsi14,
+  max(toFloat64(ts.vol_ratio)) AS vol_ratio,
+  max(toFloat64(ts.close_price)) AS close_price,
+  max(toFloat64(ts.ma20)) AS ma20,
+  max(toFloat64(ts.ma60)) AS ma60,
+  max(toFloat64(ifNull(hrs.total_relation_score, 0))) AS rel_score,
+  any(ifNull(hrs.relation_bias, 'neutral')) AS rel_bias,
+  argMax(toFloat64(vfs.foreign_net_flow), vfs.ts) AS foreign_flow,
+  argMax(toFloat64(vfs.inst_net_flow), vfs.ts) AS inst_flow
+FROM trading.decision_candidate c
+LEFT JOIN trading.technical_signals ts
+  ON ts.ticker = c.ticker
+ AND ts.date = (SELECT d FROM latest_ts)
+LEFT JOIN trading.v_feature_snapshot vfs
+  ON vfs.symbol = c.ticker
+ AND vfs.ts >= now() - INTERVAL 2 DAY
+LEFT JOIN trading.hidden_relation_signals hrs
+  ON hrs.ticker = c.ticker
+ AND hrs.asof_ts = (SELECT ts FROM latest_rel)
+WHERE c.decision_id = {sql_quote(did)}
+GROUP BY
+  c.ticker, c.action, c.total_score, c.stage2_stock_flow_score, c.stage3_event_score, c.stage4_timing_score,
+  c.absolute_block_reason, c.stage5_fail_codes, c.stage5_exec_multiplier
+ORDER BY c.total_score DESC
+LIMIT {max(5, int(top_candidates) * 5)}
+"""
+    )
+    cand_tickers = []
+    for r in cand_rows:
+        tk = _norm_ticker(r.get("ticker"))
+        if is_valid_ticker(tk):
+            cand_tickers.append(tk)
+    news_map = get_candidate_news_map(cand_tickers, per_ticker=2) if cand_tickers else {}
+
+    cluster_ids = sorted(
+        {
+            str(r.get("primary_cluster_id") or "").strip()
+            for r in cand_rows
+            if str(r.get("primary_cluster_id") or "").strip()
+        }
+    )
+    cluster_meta: dict[str, dict] = {}
+    if cluster_ids:
+        c_rows = ch_query(
+            f"""
+SELECT
+  cluster_id,
+  argMax(storyline, asof_ts) AS storyline,
+  argMax(state_label, asof_ts) AS state_label,
+  max(toFloat64(importance_max)) AS importance_max
+FROM trading.news_cluster_state
+WHERE cluster_id IN {sql_in_strings(cluster_ids)}
+GROUP BY cluster_id
+"""
+        )
+        cluster_meta = {str(r.get("cluster_id") or ""): r for r in c_rows}
+
+    digest_rows = build_macro_digest_rows(hours=48, top_n=max(3, int(clusters)))
+    stage2 = stage_debug.get("stage2") if isinstance(stage_debug.get("stage2"), dict) else {}
+    stage1 = stage_debug.get("stage1") if isinstance(stage_debug.get("stage1"), dict) else {}
+    abs_blocks = [str(x) for x in (run.get("absolute_block_reason") or []) if str(x).strip()]
+
+    llm_context = {
+        "decision_id": did,
+        "decision_time": str(run.get("decision_time_s") or ""),
+        "total_score": round(_f(run.get("total_score")), 2),
+        "stage_scores": {
+            "s0": round(_f(run.get("stage0_score")), 2),
+            "s1": round(_f(run.get("stage1_score")), 2),
+            "s2": round(_f(run.get("stage2_score")), 2),
+            "s3": round(_f(run.get("stage3_score")), 2),
+            "s4": round(_f(run.get("stage4_score")), 2),
+            "s5": round(_f(run.get("stage5_score")), 2),
+        },
+        "absolute_blocks": abs_blocks,
+        "regime": {
+            "label": str(regime.get("regime_label") or ""),
+            "posture": str(regime.get("action_posture") or ""),
+            "stress_flags": str(regime.get("stress_flags") or ""),
+            "guide_text": str(regime.get("guide_text") or ""),
+        },
+        "market": {
+            "kospi": {"price": _f(idx.get("kospi")), "chg_pct": _f(idx.get("kospi_chg")), "date": str(idx.get("kospi_dt") or "")},
+            "kosdaq": {"price": _f(idx.get("kosdaq")), "chg_pct": _f(idx.get("kosdaq_chg")), "date": str(idx.get("kosdaq_dt") or "")},
+            "vix": _f(idx.get("vix")),
+            "usdkrw": _f(idx.get("usdkrw")),
+        },
+        "stage2": {
+            "shock_level": str(stage2.get("shock_level") or ""),
+            "foreign_net_eok_5d": round(_to_eok(_f(stage2.get("foreign_net_krw_5d"))), 1),
+            "inst_net_eok_5d": round(_to_eok(_f(stage2.get("inst_net_krw_5d"))), 1),
+            "foreign_ratio_pct_5d": _f(stage2.get("foreign_net_pct_turnover_5d")),
+            "inst_ratio_pct_5d": _f(stage2.get("inst_net_pct_turnover_5d")),
+        },
+        "macro_digest": digest_rows,
+        "candidates": [
+            {
+                "ticker": _norm_ticker(r.get("ticker")),
+                "name": str(r.get("ticker_name") or ""),
+                "action": str(r.get("action") or ""),
+                "score": round(_f(r.get("total_score")), 2),
+                "rsi": round(_f(r.get("rsi14")), 2),
+                "vol_ratio": round(_f(r.get("vol_ratio")), 2),
+                "rel_score": round(_f(r.get("rel_score")), 3),
+                "flow": {"foreign": _f(r.get("foreign_flow")), "inst": _f(r.get("inst_flow"))},
+            }
+            for r in cand_rows[:15]
+        ],
+    }
+    llm_obj, llm_err = _run_briefing_llm(llm_context, timeout_sec=int(os.getenv("DOORAY_BRIEF_LLM_TIMEOUT", "80")))
+    key_event = str((llm_obj or {}).get("key_event") or "").strip()
+    market_summary = str((llm_obj or {}).get("market_summary") or "").strip()
+    sector_summary = str((llm_obj or {}).get("sector_summary") or "").strip()
+    final_judgment = str((llm_obj or {}).get("final_judgment") or "").strip()
+    trade_note = str((llm_obj or {}).get("trade_note") or "").strip()
+    if not key_event:
+        key_event = str((digest_rows[0] if digest_rows else {}).get("title") or "핵심 거시 이벤트 모니터링")
+
+    greens: list[dict] = []
+    yellows: list[dict] = []
+    reds: list[dict] = []
+    for r in cand_rows:
+        rsi = _f(r.get("rsi14"))
+        bucket = _bucket_candidate(
+            action=str(r.get("action") or ""),
+            total_score=_f(r.get("total_score")),
+            rsi=rsi,
+            abs_blocks=[str(x) for x in (r.get("absolute_block_reason") or []) if str(x).strip()],
+            exec_mult=_f(r.get("stage5_exec_multiplier"), 1.0),
+        )
+        if bucket == "green":
+            greens.append(r)
+        elif bucket == "yellow":
+            yellows.append(r)
+        else:
+            reds.append(r)
+
+    def _candidate_block(row: dict) -> list[str]:
+        tk = _norm_ticker(row.get("ticker"))
+        name = str(row.get("ticker_name") or tk)
+        score = _f(row.get("total_score"))
+        action = str(row.get("action") or "").upper()
+        signal = str(row.get("signal") or "-").strip().lower()
+        signal_ko = {"buy": "매수신호", "neutral": "중립신호", "sell": "매도신호"}.get(signal, signal or "-")
+        rsi = _f(row.get("rsi14"))
+        vol = _f(row.get("vol_ratio"))
+        rel = _f(row.get("rel_score"))
+        ff = _f(row.get("foreign_flow"))
+        inf = _f(row.get("inst_flow"))
+        rel_bias = str(row.get("rel_bias") or "neutral").strip().lower()
+        rel_bias_ko = {"positive": "긍정", "neutral": "중립", "negative": "부정"}.get(rel_bias, rel_bias)
+        absb = [str(x) for x in (row.get("absolute_block_reason") or []) if str(x).strip()]
+        stage5_codes = [str(x) for x in (row.get("stage5_fail_codes") or []) if str(x).strip()] if isinstance(row.get("stage5_fail_codes"), list) else []
+        cid = str(row.get("primary_cluster_id") or "").strip()
+        cm = cluster_meta.get(cid, {})
+        storyline = str(cm.get("storyline") or "").strip()
+        n_rows = news_map.get(tk, [])
+        top_news = str((n_rows[0] if n_rows else {}).get("title") or storyline or "관련 뉴스 추적 중")
+        exec_note = ", ".join(_label_codes(absb[:1] + stage5_codes[:1])) if (absb or stage5_codes) else "실행 제약 없음"
+        out = [
+            f"{name} ({tk}) — decision score {score:.1f}",
+            f"- 기술: {signal_ko}, RSI {rsi:.1f}, 거래량비율 {vol:.2f}",
+            f"- 수급: 외인 지표 {ff:+,.1f}, 기관 지표 {inf:+,.1f}",
+            f"- 연관: 점수 {rel:+.2f}, {rel_bias_ko}",
+            f"- 뉴스: {_short(top_news, 96)}",
+            f"- 매매판단: {_action_label(action)} / {exec_note}",
+        ]
+        return out
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [f"📌 매매 브리핑 ({now})", ""]
+    lines.append("현재 시장 상황 요약")
+    lines.append(f"핵심 이벤트: {key_event}")
+    lines.append(
+        f"- KOSPI {_f(idx.get('kospi')):,.2f} ({_f(idx.get('kospi_chg')):+.2f}%) / "
+        f"KOSDAQ {_f(idx.get('kosdaq')):,.2f} ({_f(idx.get('kosdaq_chg')):+.2f}%)"
+    )
+    lines.append(f"- VIX {_f(idx.get('vix')):,.2f}, USD/KRW {_f(idx.get('usdkrw')):,.2f}")
+    if isinstance(stage2, dict) and stage2:
+        lines.append(
+            f"- 최근 5영업일 수급: 외국인 {_fmt_eok(_f(stage2.get('foreign_net_krw_5d')))}, "
+            f"기관 {_fmt_eok(_f(stage2.get('inst_net_krw_5d')))} "
+            f"(충격레벨: {_humanize_codes(str(stage2.get('shock_level') or '-'))})"
+        )
+    posture = str(stage1.get("action_posture") or regime.get("action_posture") or "normal")
+    stress = str(stage1.get("stress_flags") or regime.get("stress_flags") or "").strip()
+    guide = str(regime.get("guide_text") or "").strip()
+    posture_ko = {"defensive": "방어", "cautious": "주의", "aggressive": "공격", "normal": "중립"}.get(str(posture).lower(), posture)
+    lines.append(f"- 시장 행동강도: {posture_ko}")
+    if stress:
+        lines.append(f"- 스트레스 신호: {_humanize_codes(stress)}")
+    if guide:
+        lines.append(f"- 가이드: {_humanize_codes(guide)}")
+    if market_summary:
+        lines.append(f"- 해석: {market_summary}")
+    lines.append("")
+
+    lines.append("내일 유망주 분석 (섹터별)")
+    lines.append("🟢 상승 유력 — 상대강세/우선 관찰")
+    if greens:
+        for c in greens[: max(2, int(top_candidates))]:
+            lines.extend(_candidate_block(c))
+            lines.append("")
+    else:
+        lines.append("- 해당 없음")
+        lines.append("")
+
+    lines.append("🟡 관망/선별 — 조건 확인 후 대응")
+    if yellows:
+        for c in yellows[: max(2, int(top_candidates // 2 or 1))]:
+            lines.extend(_candidate_block(c))
+            lines.append("")
+    else:
+        lines.append("- 해당 없음")
+        lines.append("")
+
+    lines.append("🔴 주의/회피")
+    if reds:
+        for c in reds[: max(2, int(top_candidates // 2 or 1))]:
+            lines.extend(_candidate_block(c))
+            lines.append("")
+    else:
+        lines.append("- 해당 없음")
+        lines.append("")
+
+    lines.append("종합 판단")
+    if final_judgment:
+        lines.append(final_judgment)
+    else:
+        lines.append(f"현재 총점 {_f(run.get('total_score')):.2f} 기준으로 신규 매수는 보수적으로 접근하는 것이 적절합니다.")
+    if sector_summary:
+        lines.append(f"- 섹터 요약: {sector_summary}")
+    if abs_blocks:
+        lines.append(f"- 시스템 제약: {', '.join(_label_codes(abs_blocks))}")
+    if trade_note:
+        lines.append(f"- 실행 노트: {trade_note}")
+    lines.append(f"- 기준 decision_id: {did}")
+    if llm_err:
+        lines.append(f"- LLM 요약 상태: 실패({llm_err}) → 규칙 기반 요약 사용")
+
+    raw = {
+        "mode": "pipeline_claude",
+        "decision_id": did,
+        "top_candidates": max(1, int(top_candidates)),
+        "clusters": max(1, int(clusters)),
+        "macro_digest": digest_rows,
+        "llm_summary": llm_obj or {},
+    }
+    return _humanize_codes("\n".join(lines).strip()), raw
+
+
+def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clusters: int = 3):
+    style = os.environ.get("DOORAY_PIPELINE_STYLE", "claude").strip().lower()
+    if style in {"legacy", "old", "v1"}:
+        return _build_pipeline_message_legacy(
+            decision_id=decision_id,
+            top_candidates=top_candidates,
+            clusters=clusters,
+        )
+    return _build_pipeline_message_claude_style(
+        decision_id=decision_id,
+        top_candidates=top_candidates,
+        clusters=clusters,
+    )
 
 
 def _short(s: str, n: int = 96) -> str:
