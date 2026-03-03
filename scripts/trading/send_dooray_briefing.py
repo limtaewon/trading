@@ -21,6 +21,7 @@ import time
 import sys
 import shutil
 import tempfile
+import shlex
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -218,6 +219,106 @@ def _run_briefing_llm(context: dict, timeout_sec: int = 80) -> tuple[dict | None
         return obj, ""
     except Exception as e:
         return None, f"llm_error:{type(e).__name__}:{e}"
+    finally:
+        if schema_path:
+            try:
+                Path(schema_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _resolve_prompt_template(kind: str, default_prompt: str) -> str:
+    key = str(kind or "").strip().upper()
+    inline = os.environ.get(f"DOORAY_{key}_PROMPT", "").strip()
+    file_path = os.environ.get(f"DOORAY_{key}_PROMPT_FILE", "").strip()
+    if file_path:
+        p = Path(os.path.expanduser(file_path))
+        if p.exists():
+            try:
+                txt = p.read_text(encoding="utf-8").strip()
+                if txt:
+                    return txt
+            except Exception:
+                pass
+    if inline:
+        return inline
+    return default_prompt
+
+
+def _run_briefing_llm_text(context: dict, kind: str, timeout_sec: int = 100) -> tuple[str, str]:
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        from codex_exec_guard import run_codex_cached  # type: ignore
+    except Exception as e:
+        return "", f"import_failed:{type(e).__name__}:{e}"
+
+    codex_bin = os.getenv("CODEX_BIN", os.getenv("OPENCLAW_BIN", "openclaw")).strip() or "openclaw"
+    resolved = shutil.which(codex_bin) or codex_bin
+    if not shutil.which(resolved) and not Path(resolved).exists():
+        return "", f"codex_not_found:{resolved}"
+
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "report_text": {"type": "string"},
+        },
+        "required": ["report_text"],
+    }
+    default_prompt = (
+        "너는 한국 주식 자동매매 시스템 브리핑 작성자다.\n"
+        "반드시 입력 JSON의 사실/숫자만 사용하고, 없는 데이터는 추정하지 말라.\n"
+        "출력 형식은 아래 섹션 순서를 정확히 지켜라.\n"
+        "1) 현재 시장 상황 요약\n"
+        "2) 내일 유망주 분석 (섹터별)\n"
+        "3) 종합 판단\n"
+        "문체 규칙:\n"
+        "- 한국어로 작성\n"
+        "- 숫자/단위(원, 억, %, 포인트) 임의 변경 금지\n"
+        "- 코드명/내부키(cluster_id, decision_id, fail_codes) 직접 노출 금지\n"
+        "- 과도한 장식/이모지 금지(섹터 헤더의 🟢🟡🔴만 허용)\n"
+        "- 실행 불가 사유(HARD_RISK_OFF, 데이터 누락 등)는 한국어 의미로 명확히 설명\n"
+        "- 후보 종목은 최대 5개, 각 종목 4~6줄\n"
+        "출력은 JSON만 반환하고 report_text에 전체 본문을 넣어라.\n\n"
+        "[INPUT_JSON]\n"
+        + json.dumps(context, ensure_ascii=False, indent=2)
+    )
+    prompt = _resolve_prompt_template(kind, default_prompt)
+    if "[INPUT_JSON]" not in prompt:
+        prompt = prompt.rstrip() + "\n\n[INPUT_JSON]\n" + json.dumps(context, ensure_ascii=False, indent=2)
+    else:
+        prompt = prompt.replace("[INPUT_JSON]", json.dumps(context, ensure_ascii=False, indent=2))
+
+    schema_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as sf:
+            schema_path = sf.name
+            json.dump(schema, sf, ensure_ascii=False)
+        raw = run_codex_cached(
+            prompt=prompt,
+            codex_bin=resolved,
+            model=os.getenv("DOORAY_BRIEF_LLM_MODEL", os.getenv("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark")),
+            workdir=None,
+            timeout_sec=max(40, int(timeout_sec)),
+            base_args=["--skip-git-repo-check", "--full-auto"],
+            output_schema_path=schema_path,
+            cache_dir=os.getenv("CODEX_EXEC_CACHE_DIR", os.path.expanduser("~/.openclaw/cache/codex-exec")),
+            cache_ttl_sec=int(os.getenv("STOCK_REPORT_CODEX_CACHE_TTL", os.getenv("CODEX_EXEC_CACHE_TTL", "180"))),
+            cache_lock_wait_sec=int(
+                os.getenv("STOCK_REPORT_CODEX_CACHE_LOCK_WAIT", os.getenv("CODEX_EXEC_CACHE_LOCK_WAIT", "20"))
+            ),
+        )
+        obj = _parse_first_json_object(raw)
+        if not obj:
+            return "", "llm_json_parse_failed"
+        txt = str(obj.get("report_text") or "").strip()
+        if not txt:
+            return "", "llm_empty_report_text"
+        return txt, ""
+    except Exception as e:
+        return "", f"llm_error:{type(e).__name__}:{e}"
     finally:
         if schema_path:
             try:
@@ -451,14 +552,44 @@ LIMIT 1
     idx_rows = ch_query(
         """
 SELECT
-  (SELECT close_price FROM trading.market_index WHERE index_code='KOSPI' ORDER BY date DESC LIMIT 1) AS kospi,
-  (SELECT change_pct FROM trading.market_index WHERE index_code='KOSPI' ORDER BY date DESC LIMIT 1) AS kospi_chg,
-  (SELECT toString(date) FROM trading.market_index WHERE index_code='KOSPI' ORDER BY date DESC LIMIT 1) AS kospi_dt,
-  (SELECT close_price FROM trading.market_index WHERE index_code='KOSDAQ' ORDER BY date DESC LIMIT 1) AS kosdaq,
-  (SELECT change_pct FROM trading.market_index WHERE index_code='KOSDAQ' ORDER BY date DESC LIMIT 1) AS kosdaq_chg,
-  (SELECT toString(date) FROM trading.market_index WHERE index_code='KOSDAQ' ORDER BY date DESC LIMIT 1) AS kosdaq_dt,
-  (SELECT close_price FROM trading.market_index WHERE index_code='VIX' ORDER BY date DESC LIMIT 1) AS vix,
-  (SELECT close_rate FROM trading.exchange_rate WHERE currency_pair='USDKRW' ORDER BY date DESC LIMIT 1) AS usdkrw
+  (SELECT toString(max(date)) FROM trading.market_index WHERE index_code='KOSPI') AS kospi_dt,
+  (
+    SELECT argMax(close_price, collected_at)
+    FROM trading.market_index
+    WHERE index_code='KOSPI'
+      AND date = (SELECT max(date) FROM trading.market_index WHERE index_code='KOSPI')
+  ) AS kospi,
+  (
+    SELECT argMax(change_pct, collected_at)
+    FROM trading.market_index
+    WHERE index_code='KOSPI'
+      AND date = (SELECT max(date) FROM trading.market_index WHERE index_code='KOSPI')
+  ) AS kospi_chg,
+  (SELECT toString(max(date)) FROM trading.market_index WHERE index_code='KOSDAQ') AS kosdaq_dt,
+  (
+    SELECT argMax(close_price, collected_at)
+    FROM trading.market_index
+    WHERE index_code='KOSDAQ'
+      AND date = (SELECT max(date) FROM trading.market_index WHERE index_code='KOSDAQ')
+  ) AS kosdaq,
+  (
+    SELECT argMax(change_pct, collected_at)
+    FROM trading.market_index
+    WHERE index_code='KOSDAQ'
+      AND date = (SELECT max(date) FROM trading.market_index WHERE index_code='KOSDAQ')
+  ) AS kosdaq_chg,
+  (
+    SELECT argMax(close_price, collected_at)
+    FROM trading.market_index
+    WHERE index_code='VIX'
+      AND date = (SELECT max(date) FROM trading.market_index WHERE index_code='VIX')
+  ) AS vix,
+  (
+    SELECT argMax(close_rate, collected_at)
+    FROM trading.exchange_rate
+    WHERE currency_pair='USDKRW'
+      AND date = (SELECT max(date) FROM trading.exchange_rate WHERE currency_pair='USDKRW')
+  ) AS usdkrw
 """
     )
     idx = idx_rows[0] if idx_rows else {}
@@ -558,6 +689,47 @@ GROUP BY cluster_id
     stage1 = stage_debug.get("stage1") if isinstance(stage_debug.get("stage1"), dict) else {}
     abs_blocks = [str(x) for x in (run.get("absolute_block_reason") or []) if str(x).strip()]
 
+    llm_candidates = []
+    for r in cand_rows[:15]:
+        tk = _norm_ticker(r.get("ticker"))
+        if not tk:
+            continue
+        n_rows = news_map.get(tk, []) or []
+        llm_candidates.append(
+            {
+                "ticker": tk,
+                "name": str(r.get("ticker_name") or ""),
+                "action": str(r.get("action") or ""),
+                "score": round(_f(r.get("total_score")), 2),
+                "signal": str(r.get("signal") or ""),
+                "rsi": round(_f(r.get("rsi14")), 2),
+                "vol_ratio": round(_f(r.get("vol_ratio")), 2),
+                "close_price": _f(r.get("close_price")),
+                "ma20": _f(r.get("ma20")),
+                "ma60": _f(r.get("ma60")),
+                "rel_score": round(_f(r.get("rel_score")), 3),
+                "rel_bias": str(r.get("rel_bias") or "neutral"),
+                "flow": {"foreign": _f(r.get("foreign_flow")), "inst": _f(r.get("inst_flow"))},
+                "exec_multiplier": round(_f(r.get("stage5_exec_multiplier"), 1.0), 2),
+                "abs_blocks": [str(x) for x in (r.get("absolute_block_reason") or []) if str(x).strip()],
+                "fail_codes": [str(x) for x in (r.get("stage5_fail_codes") or []) if str(x).strip()]
+                if isinstance(r.get("stage5_fail_codes"), list)
+                else [],
+                "cluster_storyline": str(
+                    (cluster_meta.get(str(r.get("primary_cluster_id") or "").strip(), {}) or {}).get("storyline") or ""
+                ).strip(),
+                "top_news": [
+                    {
+                        "title": str(n.get("title") or ""),
+                        "sentiment": str(n.get("sentiment") or ""),
+                        "importance": int(n.get("importance") or 0),
+                        "source_url": str(n.get("source_url") or ""),
+                    }
+                    for n in n_rows[:2]
+                ],
+            }
+        )
+
     llm_context = {
         "decision_id": did,
         "decision_time": str(run.get("decision_time_s") or ""),
@@ -591,21 +763,29 @@ GROUP BY cluster_id
             "inst_ratio_pct_5d": _f(stage2.get("inst_net_pct_turnover_5d")),
         },
         "macro_digest": digest_rows,
-        "candidates": [
-            {
-                "ticker": _norm_ticker(r.get("ticker")),
-                "name": str(r.get("ticker_name") or ""),
-                "action": str(r.get("action") or ""),
-                "score": round(_f(r.get("total_score")), 2),
-                "rsi": round(_f(r.get("rsi14")), 2),
-                "vol_ratio": round(_f(r.get("vol_ratio")), 2),
-                "rel_score": round(_f(r.get("rel_score")), 3),
-                "flow": {"foreign": _f(r.get("foreign_flow")), "inst": _f(r.get("inst_flow"))},
-            }
-            for r in cand_rows[:15]
-        ],
+        "candidates": llm_candidates,
     }
-    llm_obj, llm_err = _run_briefing_llm(llm_context, timeout_sec=int(os.getenv("DOORAY_BRIEF_LLM_TIMEOUT", "80")))
+    report_text, llm_err = _run_briefing_llm_text(
+        llm_context,
+        kind="BRIEFING_MAIN",
+        timeout_sec=int(os.getenv("DOORAY_BRIEF_LLM_TIMEOUT", "110")),
+    )
+    require_llm = os.getenv("DOORAY_BRIEF_REQUIRE_LLM", "1") == "1"
+    if report_text:
+        raw = {
+            "mode": "pipeline_claude_llm_full",
+            "decision_id": did,
+            "top_candidates": max(1, int(top_candidates)),
+            "clusters": max(1, int(clusters)),
+            "macro_digest": digest_rows,
+            "llm_error": "",
+        }
+        return _humanize_codes(str(report_text).strip()), raw
+    if require_llm:
+        raise RuntimeError(f"브리핑 LLM 생성 실패: {llm_err}")
+
+    # LLM 실패 허용 모드에서만 규칙 템플릿 폴백
+    llm_obj, _ = _run_briefing_llm(llm_context, timeout_sec=40)
     key_event = str((llm_obj or {}).get("key_event") or "").strip()
     market_summary = str((llm_obj or {}).get("market_summary") or "").strip()
     sector_summary = str((llm_obj or {}).get("sector_summary") or "").strip()
@@ -1050,8 +1230,138 @@ GROUP BY cluster_id
 
 
 def refresh_market_data():
-    run_cmd("python3 ~/.openclaw/scripts/trading/collect_market_data.py --only index --days 2")
-    run_cmd("python3 ~/.openclaw/scripts/trading/collect_market_data.py --only fx --days 2")
+    script = _resolve_collect_market_data_script()
+    run_cmd(f"python3 {shlex.quote(script)} --only index --days 2")
+    run_cmd(f"python3 {shlex.quote(script)} --only fx --days 2")
+    _upsert_realtime_market_snapshot()
+    _verify_market_freshness()
+
+
+def _resolve_collect_market_data_script() -> str:
+    local = str((Path(__file__).resolve().parent / "collect_market_data.py"))
+    runtime = os.path.expanduser("~/.openclaw/scripts/trading/collect_market_data.py")
+    if os.path.exists(local):
+        return local
+    return runtime
+
+
+def _verify_market_freshness() -> None:
+    """브리핑 직전 핵심 시세 최신성 확인 실패 시 중단."""
+    max_age_min = max(5, int(os.environ.get("DOORAY_MARKET_FRESH_MAX_AGE_MIN", "45")))
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    rows = ch_query(
+        """
+        SELECT 'KOSPI' AS metric, toString(max(date)) AS d, toString(max(collected_at)) AS ts
+        FROM trading.market_index
+        WHERE index_code='KOSPI'
+        UNION ALL
+        SELECT 'KOSDAQ' AS metric, toString(max(date)) AS d, toString(max(collected_at)) AS ts
+        FROM trading.market_index
+        WHERE index_code='KOSDAQ'
+        UNION ALL
+        SELECT 'USDKRW' AS metric, toString(max(date)) AS d, toString(max(collected_at)) AS ts
+        FROM trading.exchange_rate
+        WHERE currency_pair='USDKRW'
+        """
+    )
+    bad: list[str] = []
+    for r in rows:
+        metric = str(r.get("metric", "") or "")
+        d = str(r.get("d", "") or "")
+        ts = str(r.get("ts", "") or "")
+        if not d or not ts:
+            bad.append(f"{metric}:missing")
+            continue
+        if d != today:
+            bad.append(f"{metric}:date={d}")
+            continue
+        try:
+            dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            bad.append(f"{metric}:ts={ts}")
+            continue
+        age_min = (now - dt).total_seconds() / 60.0
+        if age_min > max_age_min:
+            bad.append(f"{metric}:age={age_min:.1f}m")
+    if bad:
+        raise RuntimeError(
+            "시장 데이터 최신성 검증 실패: "
+            + ", ".join(bad)
+            + f" (max_age={max_age_min}m)"
+        )
+
+
+def _upsert_realtime_market_snapshot() -> None:
+    """브리핑 직전 실시간 지수/환율을 오늘 날짜로 DB에 강제 반영."""
+    try:
+        rt_idx = fetch_naver_realtime_indices(timeout_sec=8) or {}
+        rt_fx = fetch_naver_usdkrw(timeout_sec=8) or {}
+    except Exception:
+        rt_idx = {}
+        rt_fx = {}
+
+    now = datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    idx_rows: list[tuple[str, str, str, float, float, int, float, float, float, float]] = []
+    for code, name in (("KOSPI", "코스피"), ("KOSDAQ", "코스닥")):
+        info = rt_idx.get(code) or {}
+        px = _f(info.get("price"), 0.0)
+        if px <= 0:
+            continue
+        chg = _f(info.get("change_pct"), 0.0)
+        idx_rows.append((date_str, ts_str, code, name, px, chg, 0, 0.0, 0.0, 0.0))
+
+    fx_px = _f(rt_fx.get("price"), 0.0)
+    fx_chg = _f(rt_fx.get("change_pct"), 0.0)
+    fx_rows: list[tuple[str, str, str, float, float, float, float]] = []
+    if fx_px > 0:
+        fx_rows.append((date_str, ts_str, "USDKRW", fx_px, fx_chg, 0.0, 0.0))
+
+    # market_index upsert(today)
+    if idx_rows:
+        codes = ",".join(sql_quote(r[2]) for r in idx_rows)
+        ch_query(
+            "ALTER TABLE trading.market_index "
+            f"DELETE WHERE date = {sql_quote(date_str)} AND index_code IN ({codes})"
+        )
+        values = []
+        for r in idx_rows:
+            values.append(
+                "("
+                f"{sql_quote(r[0])}, {sql_quote(r[1])}, {sql_quote(r[2])}, {sql_quote(r[3])}, "
+                f"{r[4]}, {r[5]}, {r[6]}, {r[7]}, {r[8]}, {r[9]}, 0"
+                ")"
+            )
+        q = (
+            "INSERT INTO trading.market_index "
+            "(date, collected_at, index_code, index_name, close_price, change_pct, volume, high, low, open_price, traded_value_krw) "
+            f"VALUES {','.join(values)}"
+        )
+        ch_query(q)
+
+    # exchange_rate upsert(today)
+    if fx_rows:
+        ch_query(
+            "ALTER TABLE trading.exchange_rate "
+            f"DELETE WHERE date = {sql_quote(date_str)} AND currency_pair='USDKRW'"
+        )
+        values = []
+        for r in fx_rows:
+            values.append(
+                "("
+                f"{sql_quote(r[0])}, {sql_quote(r[1])}, {sql_quote(r[2])}, "
+                f"{r[3]}, {r[4]}, {r[5]}, {r[6]}"
+                ")"
+            )
+        q = (
+            "INSERT INTO trading.exchange_rate "
+            "(date, collected_at, currency_pair, close_rate, change_pct, high, low) "
+            f"VALUES {','.join(values)}"
+        )
+        ch_query(q)
 
 
 def ch_query(sql: str):

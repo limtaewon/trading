@@ -1362,6 +1362,13 @@ def main() -> int:
         "balanced": {"buy_threshold": 65.0, "stage2_min": 45.0, "s2_unknown_s3": 65.0, "s2_unknown_s4": 60.0},
         "neutral": {"buy_threshold": 60.0, "stage2_min": 40.0, "s2_unknown_s3": 60.0, "s2_unknown_s4": 58.0},
     }[mode]
+    # 요청 정책: Stage0만 하드 차단으로 사용, Stage1~5는 점수 참고용
+    stage0_only_constraints = os.getenv("DECISION_STAGE0_ONLY_CONSTRAINTS", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if args.universe != "watchlist":
         _log(f"--universe {args.universe} 무시: watchlist로 강제")
         args.universe = "watchlist"
@@ -1407,9 +1414,9 @@ def main() -> int:
     run_abs_blocks: list[str] = []
     if not stage0.passed:
         run_abs_blocks.append("STAGE0_FAIL")
-    if stage1.hard_riskoff:
+    if (not stage0_only_constraints) and stage1.hard_riskoff:
         run_abs_blocks.append("HARD_RISK_OFF")
-    if market_stage2.shock_level == "EXTREME":
+    if (not stage0_only_constraints) and market_stage2.shock_level == "EXTREME":
         run_abs_blocks.append("FLOW_SHOCK_EXTREME")
 
     candidates: list[dict[str, Any]] = []
@@ -1499,7 +1506,7 @@ def main() -> int:
         stage2_score = _clamp(market_stage2_score + s2_stock - s2_penalty, 0, 100)
         distribution_block = foreign_pct <= -6.0 and inst_pct <= -3.0
         # Stage2는 보조지표. 실행 차단은 EXTREME 충격에서만 적용.
-        stage2_pass = market_stage2.shock_level != "EXTREME"
+        stage2_pass = True if stage0_only_constraints else (market_stage2.shock_level != "EXTREME")
         if not market_stage2.valid:
             explain_codes.append("FLOW_DENOM_INVALID")
         if market_stage2.shock_level == "WARN":
@@ -1557,12 +1564,14 @@ def main() -> int:
         redflag = False
         if _is_event_redflag(event_type, event_imp_max):
             redflag = True
-            abs_blocks.append("EVENT_REDFLAG")
+            if not stage0_only_constraints:
+                abs_blocks.append("EVENT_REDFLAG")
         dart_imp = _to_float(dart.get("importance_max"), 0.0)
         dart_nm = str(dart.get("report_nm", "") or "")
         if _is_dart_redflag(dart_nm, dart_imp):
             redflag = True
-            abs_blocks.append("DART_REDFLAG")
+            if not stage0_only_constraints:
+                abs_blocks.append("DART_REDFLAG")
         stage3_size_multiplier = 1.0
         if mode == "strict":
             # strict: TE 우선, TE 부재시 CE 고강도 + 타이밍 강도 필요
@@ -1656,7 +1665,7 @@ def main() -> int:
                 stage4_pass = stage4_score >= 53 and (p1 or p2)
             else:
                 stage4_pass = stage4_score >= 60 and p1_riskoff
-        if rsi > 75 and rsi_overheat_block_enabled:
+        if rsi > 75 and rsi_overheat_block_enabled and (not stage0_only_constraints):
             abs_blocks.append("TECH_OVERHEAT_RSI")
         if close > ma20 > ma60 > 0:
             explain_codes.append("TREND_STRUCTURE_UP")
@@ -1671,9 +1680,10 @@ def main() -> int:
         stage5_exec_multiplier = 1.0
         if liquidity <= 0:
             stage5_score = 20.0
-            stage5_exec_multiplier = 0.0
+            stage5_exec_multiplier = 1.0 if stage0_only_constraints else 0.0
             stage5_fail_codes.append("MISSING_LIQUIDITY_SNAPSHOT")
-            abs_blocks.append("MISSING_LIQUIDITY_SNAPSHOT")
+            if not stage0_only_constraints:
+                abs_blocks.append("MISSING_LIQUIDITY_SNAPSHOT")
             stage5_missing_snapshot_cnt += 1
         elif liquidity >= STAGE5_LIQ_THRESH_50B:
             stage5_score = 100.0
@@ -1689,21 +1699,24 @@ def main() -> int:
             stage5_exec_multiplier = 0.2
         else:
             stage5_score = 20.0
-            stage5_exec_multiplier = 0.0
+            stage5_exec_multiplier = 1.0 if stage0_only_constraints else 0.0
             stage5_fail_codes.append("LOW_LIQUIDITY_REAL")
-            abs_blocks.append("LOW_LIQUIDITY_REAL")
+            if not stage0_only_constraints:
+                abs_blocks.append("LOW_LIQUIDITY_REAL")
             stage5_liq_real_cnt += 1
         if spread_bp > STAGE5_SPREAD_BLOCK_BP:
             stage5_score = 0.0
             stage5_fail_codes.append("SPREAD_TOO_WIDE")
-            stage5_exec_multiplier = 0.0
-            abs_blocks.append("SPREAD_TOO_WIDE")
+            stage5_exec_multiplier = 1.0 if stage0_only_constraints else 0.0
+            if not stage0_only_constraints:
+                abs_blocks.append("SPREAD_TOO_WIDE")
         elif spread_bp > STAGE5_SPREAD_WARN_BP:
             stage5_score = max(0.0, stage5_score - 15.0)
             stage5_fail_codes.append("SPREAD_WIDE")
-            stage5_exec_multiplier = min(stage5_exec_multiplier, 0.6)
+            if not stage0_only_constraints:
+                stage5_exec_multiplier = min(stage5_exec_multiplier, 0.6)
         # Step5는 기본적으로 사이징 엔진: 하드 차단은 극단 저유동/초광스프레드만 적용.
-        stage5_pass = stage5_exec_multiplier > 0.0
+        stage5_pass = True if stage0_only_constraints else (stage5_exec_multiplier > 0.0)
         if not stage5_pass:
             if (
                 "LOW_LIQUIDITY_REAL" not in stage5_fail_codes
@@ -1719,16 +1732,17 @@ def main() -> int:
                 stage5_exec_zero_counter.update(stage5_fail_codes)
 
         penalty = 0.0
-        if redflag:
-            penalty += 30.0
-        if distribution_block:
-            penalty += 15.0
-        if market_stage2.shock_level == "ALERT":
-            penalty += 10.0
-        if market_stage2.shock_level == "EXTREME":
-            penalty += 20.0
-        if rsi > 75:
-            penalty += 10.0
+        if not stage0_only_constraints:
+            if redflag:
+                penalty += 30.0
+            if distribution_block:
+                penalty += 15.0
+            if market_stage2.shock_level == "ALERT":
+                penalty += 10.0
+            if market_stage2.shock_level == "EXTREME":
+                penalty += 20.0
+            if rsi > 75:
+                penalty += 10.0
 
         total = (
             weights["s1"] * stage1.score
@@ -1741,7 +1755,10 @@ def main() -> int:
 
         # BUY 하드게이트: Stage0/1/2(EXTREME only)/5
         # Stage3/4는 점수와 설명에는 반영하되 차단 게이트로는 사용하지 않는다.
-        all_pass = stage0.passed and stage1.passed_for_buy and stage2_pass and stage5_pass
+        if stage0_only_constraints:
+            all_pass = stage0.passed
+        else:
+            all_pass = stage0.passed and stage1.passed_for_buy and stage2_pass and stage5_pass
         has_block = len(abs_blocks) > 0
         action = "HOLD"
         if not has_block and all_pass and total >= mode_cfg["buy_threshold"]:
@@ -1751,15 +1768,21 @@ def main() -> int:
 
         target_weight = 0.0
         if action == "BUY":
-            buy_mult = _clamp((stage1.score - 45.0) / 25.0, 0.0, 1.0)
-            if market_stage2.shock_level == "EXTREME":
-                m_shock = 0.0
-            elif market_stage2.shock_level == "ALERT":
-                m_shock = 0.35
-            elif market_stage2.shock_level == "WARN":
-                m_shock = 0.70
-            else:
+            if stage0_only_constraints:
+                buy_mult = 1.0
                 m_shock = 1.0
+                stage3_size_multiplier = 1.0
+                stage5_exec_multiplier = 1.0
+            else:
+                buy_mult = _clamp((stage1.score - 45.0) / 25.0, 0.0, 1.0)
+                if market_stage2.shock_level == "EXTREME":
+                    m_shock = 0.0
+                elif market_stage2.shock_level == "ALERT":
+                    m_shock = 0.35
+                elif market_stage2.shock_level == "WARN":
+                    m_shock = 0.70
+                else:
+                    m_shock = 1.0
             base = 0.03 + max(0.0, total - mode_cfg["buy_threshold"]) / 200.0
             target_weight = _clamp(base * buy_mult * m_shock * stage5_exec_multiplier * stage3_size_multiplier, 0.0, 0.10)
 
@@ -1845,6 +1868,7 @@ def main() -> int:
             "overridden": mode_overridden,
             "buy_threshold": mode_cfg["buy_threshold"],
             "stage2_min": mode_cfg["stage2_min"],
+            "stage0_only_constraints": stage0_only_constraints,
             "universe_forced_watchlist": True,
             "watchlist_active_source": os.getenv("WATCHLIST_ACTIVE_SOURCE", "enrich_data"),
             "stage2_extreme_only_block": True,
@@ -1934,15 +1958,15 @@ def main() -> int:
         "universe": "watchlist",
         "stage0_pass": 1 if stage0.passed else 0,
         "stage0_score": round(stage0.score, 2),
-        "stage1_pass": 1 if stage1.passed_for_buy else 0,
+        "stage1_pass": 1 if stage0_only_constraints else (1 if stage1.passed_for_buy else 0),
         "stage1_score": round(stage1.score, 2),
-        "stage2_pass": 1 if (market_stage2.shock_level != "EXTREME") else 0,
+        "stage2_pass": 1 if stage0_only_constraints else (1 if (market_stage2.shock_level != "EXTREME") else 0),
         "stage2_score": stage2_run,
-        "stage3_pass": 1 if stage3_run >= 50 else 0,
+        "stage3_pass": 1 if stage0_only_constraints else (1 if stage3_run >= 50 else 0),
         "stage3_score": stage3_run,
-        "stage4_pass": 1 if stage4_run >= 55 else 0,
+        "stage4_pass": 1 if stage0_only_constraints else (1 if stage4_run >= 55 else 0),
         "stage4_score": stage4_run,
-        "stage5_pass": 1 if stage5_run >= 40 else 0,
+        "stage5_pass": 1 if stage0_only_constraints else (1 if stage5_run >= 40 else 0),
         "stage5_score": stage5_run,
         "total_score": total_run,
         "penalty_score": 0.0,
