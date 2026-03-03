@@ -59,6 +59,8 @@ CLICKHOUSE_HTTP, CH_USER, CH_PASSWORD = _resolve_clickhouse()
 CH_DB = os.environ.get("CLICKHOUSE_DB", "trading").strip() or "trading"
 
 WEBHOOK = os.environ.get("DOORAY_WEBHOOK_URL", "").strip()
+WEBHOOK_EXTRA = os.environ.get("DOORAY_WEBHOOK_URL_EXTRA", "").strip()
+WEBHOOKS_RAW = os.environ.get("DOORAY_WEBHOOK_URLS", "").strip()
 STATE_PATH = os.path.expanduser("~/.openclaw/state/dooray_briefing_state.json")
 STOCKS_CSV = os.path.expanduser("~/.openclaw/workspace/STOCKS.csv")
 PUBLIC_BASE_URL = os.environ.get("STOCK_REPORT_PUBLIC_BASE_URL", "").strip().rstrip("/")
@@ -526,6 +528,40 @@ def _beautify_pipeline_text(msg: str) -> str:
 def _action_label(action: str) -> str:
     a = str(action or "").strip().upper()
     return ACTION_LABELS.get(a, a or "-")
+
+
+def _resolve_dooray_webhooks() -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    primary = str(WEBHOOK or "").strip()
+    if primary and primary not in seen:
+        out.append(primary)
+        seen.add(primary)
+    extra = str(WEBHOOK_EXTRA or "").strip()
+    if extra and extra not in seen:
+        out.append(extra)
+        seen.add(extra)
+    if WEBHOOKS_RAW:
+        for token in WEBHOOKS_RAW.split(","):
+            u = str(token or "").strip()
+            if not u or u in seen:
+                continue
+            out.append(u)
+            seen.add(u)
+    return out
+
+
+def _post_text_to_webhooks(webhooks: list[str], text: str, timeout_sec: int = 10, label: str = "main") -> tuple[int, list[str]]:
+    ok = 0
+    errs: list[str] = []
+    for i, url in enumerate(webhooks, 1):
+        try:
+            resp = requests.post(url, json={"text": text}, timeout=timeout_sec)
+            resp.raise_for_status()
+            ok += 1
+        except Exception as e:
+            errs.append(f"[{label}][{i}] {type(e).__name__}: {e}")
+    return ok, errs
 
 
 def _build_pipeline_message_legacy(decision_id: str = "", top_candidates: int = 5, clusters: int = 3):
@@ -2278,8 +2314,9 @@ def main():
     ap.add_argument("--legacy-format", action="store_true", help="기존 도레이 브리핑 포맷 사용")
     ap.add_argument("--relation-plus-a", action="store_true", help="+A 연관관계 브리핑도 함께 전송")
     args = ap.parse_args()
-    if not WEBHOOK and not args.dry_run:
-        raise SystemExit("DOORAY_WEBHOOK_URL 환경변수가 없습니다.")
+    webhooks = _resolve_dooray_webhooks()
+    if not webhooks and not args.dry_run:
+        raise SystemExit("DOORAY_WEBHOOK_URL(또는 DOORAY_WEBHOOK_URL_EXTRA/DOORAY_WEBHOOK_URLS) 환경변수가 없습니다.")
 
     refresh_market_data()
     use_pipeline = os.environ.get("DOORAY_USE_PIPELINE_BRIEFING", "1") == "1" and not args.legacy_format
@@ -2334,15 +2371,21 @@ def main():
     if state.get("last_digest") == digest:
         return
 
-    resp = requests.post(WEBHOOK, json={"text": msg}, timeout=10)
-    resp.raise_for_status()
+    ok_main, errs_main = _post_text_to_webhooks(webhooks, msg, timeout_sec=10, label="main")
+    if ok_main <= 0:
+        raise RuntimeError("모든 Dooray 웹훅 전송 실패: " + " | ".join(errs_main))
+    if errs_main:
+        print("[WARN] 일부 Dooray 웹훅 전송 실패:", " | ".join(errs_main), file=sys.stderr)
 
     if relation_msg and relation_digest:
         if state.get("last_relation_digest") != relation_digest:
             if plus_a_delay > 0:
                 time.sleep(plus_a_delay)
-            r2 = requests.post(WEBHOOK, json={"text": relation_msg}, timeout=10)
-            r2.raise_for_status()
+            ok_rel, errs_rel = _post_text_to_webhooks(webhooks, relation_msg, timeout_sec=10, label="relation")
+            if ok_rel <= 0:
+                raise RuntimeError("모든 Dooray +A 웹훅 전송 실패: " + " | ".join(errs_rel))
+            if errs_rel:
+                print("[WARN] 일부 Dooray +A 웹훅 전송 실패:", " | ".join(errs_rel), file=sys.stderr)
 
     next_state = dict(state)
     next_state.update({
