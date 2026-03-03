@@ -131,6 +131,100 @@ def _humanize_codes(s: str) -> str:
     return out
 
 
+def _label_codes(codes) -> list[str]:
+    out = []
+    for c in (codes or []):
+        k = str(c or "").strip()
+        if not k:
+            continue
+        out.append(CODE_LABELS.get(k, k))
+    return out
+
+
+def _build_pipeline_reason_lines(decision_id: str) -> list[str]:
+    did = str(decision_id or "").strip()
+    if not did:
+        return []
+    rows = ch_query(
+        f"""
+SELECT
+  decision_id,
+  stage0_pass,
+  stage1_pass,
+  stage2_pass,
+  stage5_pass,
+  absolute_block_reason,
+  stage_debug_json
+FROM trading.decision_run
+WHERE decision_id = {sql_quote(did)}
+LIMIT 1
+"""
+    )
+    if not rows:
+        return []
+    row = rows[0]
+    try:
+        stage_debug = json.loads(str(row.get("stage_debug_json") or "{}"))
+    except Exception:
+        stage_debug = {}
+
+    abs_blocks = row.get("absolute_block_reason") or []
+    if not isinstance(abs_blocks, list):
+        abs_blocks = []
+
+    s1 = stage_debug.get("stage1") if isinstance(stage_debug, dict) else {}
+    s2 = stage_debug.get("stage2") if isinstance(stage_debug, dict) else {}
+    s5 = stage_debug.get("stage5") if isinstance(stage_debug, dict) else {}
+
+    lines = ["🧾 결론 사유"]
+    if abs_blocks:
+        lines.append(f"- 전역 제약: {', '.join(_label_codes(abs_blocks[:3]))}")
+
+    if isinstance(s1, dict):
+        hard = bool(s1.get("hard_riskoff"))
+        posture = str(s1.get("action_posture") or "").strip()
+        stress = str(s1.get("stress_flags") or "").strip()
+        if hard:
+            if stress:
+                lines.append(f"- 시장 리스크: {CODE_LABELS.get('HARD_RISK_OFF','전역 위험차단')} ({_humanize_codes(stress)})")
+            else:
+                lines.append(f"- 시장 리스크: {CODE_LABELS.get('HARD_RISK_OFF','전역 위험차단')}")
+        elif posture:
+            lines.append(f"- 시장 행동강도: {posture}")
+
+    if isinstance(s2, dict):
+        shock = str(s2.get("shock_level") or "").strip().upper()
+        if shock in {"WARN", "ALERT", "EXTREME"}:
+            ratio = float(s2.get("shock_abs_ratio_pct") or 0.0)
+            lines.append(f"- 수급 상태: {CODE_LABELS.get(shock, shock)} (충격 {ratio:.2f}%)")
+
+    if isinstance(s5, dict):
+        fail_summary = s5.get("fail_summary") if isinstance(s5.get("fail_summary"), dict) else {}
+        if fail_summary:
+            top = sorted(fail_summary.items(), key=lambda kv: int(kv[1]), reverse=True)[:2]
+            pretty = []
+            for k, v in top:
+                pretty.append(f"{CODE_LABELS.get(str(k), str(k))}:{int(v)}")
+            lines.append(f"- 집행 제약: {', '.join(pretty)}")
+
+    # 사유가 너무 빈약하면 섹션 생략
+    if len(lines) <= 1:
+        return []
+    return lines
+
+
+def _insert_reason_section(msg: str, reason_lines: list[str]) -> str:
+    if not reason_lines:
+        return msg
+    src = str(msg or "")
+    marker = "📈 시장 방향"
+    if marker in src:
+        head, tail = src.split(marker, 1)
+        reason_block = "\n".join(reason_lines).rstrip() + "\n\n"
+        return head.rstrip() + "\n\n" + reason_block + marker + tail
+    return src.rstrip() + "\n\n" + "\n".join(reason_lines)
+
+
 def _beautify_pipeline_text(msg: str) -> str:
     lines = []
     for raw in str(msg or "").splitlines():
@@ -173,6 +267,8 @@ def build_pipeline_message(decision_id: str = "", top_candidates: int = 5, clust
         clusters_n=max(1, int(clusters)),
     )
     msg = _beautify_pipeline_text(_dooray_text_from_html(html_msg))
+    reason_lines = _build_pipeline_reason_lines(did)
+    msg = _insert_reason_section(msg, reason_lines)
     digest_rows = build_macro_digest_rows(hours=24, top_n=3)
     if digest_rows:
         msg = msg + "\n\n🌍 매크로 24h Digest"

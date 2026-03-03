@@ -484,6 +484,19 @@
       "source": "legacy-crontab"
     },
     {
+      "name": "data-market-regime-10m",
+      "enabled": true,
+      "schedule": {
+        "expr": "2-59/10 9-16 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/market_regime.py >> $HOME/.openclaw/logs/market_regime.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
       "name": "data-morning-briefing-0800",
       "enabled": true,
       "schedule": {

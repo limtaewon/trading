@@ -118,6 +118,18 @@ def _to_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _is_kst_premarket(now_utc: dt.datetime | None = None) -> bool:
+    """Return True for Korea premarket window on weekdays (before 09:00 KST)."""
+    if now_utc is None:
+        now_utc = dt.datetime.now(dt.timezone.utc)
+    try:
+        kst = now_utc.astimezone(dt.timezone(dt.timedelta(hours=9)))
+    except Exception:
+        return False
+    # weekday: Mon=0 ... Sun=6
+    return (kst.weekday() <= 4) and (kst.hour < 9)
+
+
 def _to_int(v: Any, default: int = 0) -> int:
     try:
         return int(float(v))
@@ -269,10 +281,15 @@ class Stage0Result:
 
 def compute_stage0() -> Stage0Result:
     feature_lookback_hours = max(24, int(os.getenv("STAGE0_FEATURE_LOOKBACK_HOURS", "72")))
+    default_feature_stale_min = int(os.getenv("STAGE0_MAX_STALE_FEATURE_MIN", "30"))
+    premarket_feature_stale_min = int(
+        os.getenv("STAGE0_MAX_STALE_FEATURE_PREMARKET_MIN", str(max(180, default_feature_stale_min)))
+    )
+    feature_stale_limit_min = premarket_feature_stale_min if _is_kst_premarket() else default_feature_stale_min
     freshness_cfg = {
         "feature_snapshot": (
             "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(ts), now()), 0)) AS stale FROM trading.feature_snapshot",
-            int(os.getenv("STAGE0_MAX_STALE_FEATURE_MIN", "30")),
+            feature_stale_limit_min,
             True,
         ),
         "technical_signals": (
