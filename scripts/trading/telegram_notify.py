@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import html
 import importlib.util
 import os
 import sys
@@ -37,7 +38,7 @@ def _resolve_creds() -> tuple[str, str]:
     return token, chat_id
 
 
-def _load_shared_notify():
+def _load_shared_notify(func_name: str = "notify"):
     shared = Path.home() / ".openclaw" / "scripts" / "telegram_notify.py"
     if not shared.exists():
         return None
@@ -47,8 +48,12 @@ def _load_shared_notify():
             return None
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        fn = getattr(mod, "notify", None)
-        return fn if callable(fn) else None
+        fn = getattr(mod, func_name, None)
+        if callable(fn):
+            return fn
+        # 하위 호환: 요청 함수가 없으면 notify로 대체
+        fallback = getattr(mod, "notify", None)
+        return fallback if callable(fallback) else None
     except Exception:
         return None
 
@@ -58,9 +63,13 @@ def _send(text: str, parse_mode: str | None = "HTML") -> bool:
         return True
     token, chat_id = _resolve_creds()
     if not token or not chat_id:
-        shared_notify = _load_shared_notify()
+        shared_notify = _load_shared_notify("notify")
         if shared_notify:
-            return bool(shared_notify(str(text)))
+            shared_text = str(text)
+            # shared notify는 HTML 모드 고정인 경우가 있어 plain 요청 시 이스케이프해서 안전 전송한다.
+            if not parse_mode:
+                shared_text = html.escape(shared_text, quote=False)
+            return bool(shared_notify(shared_text))
         print("[TG] skip: TG_BOT_TOKEN/TG_CHAT_ID not configured")
         return False
 

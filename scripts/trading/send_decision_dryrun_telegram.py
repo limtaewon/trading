@@ -1679,10 +1679,22 @@ def _load_telegram_notify():
     if parent not in sys.path:
         sys.path.insert(0, parent)
     try:
-        from telegram_notify import notify  # type: ignore
+        from telegram_notify import notify, notify_plain  # type: ignore
     except Exception as e:
         raise RuntimeError(f"telegram_notify import 실패: {e}") from e
-    return notify
+    return notify, notify_plain
+
+
+def _strip_html_for_plain(text: str) -> str:
+    s = str(text or "")
+    # 링크는 라벨(URL) 형태로 평문화
+    s = re.sub(r'<a href="([^"]+)">([^<]+)</a>', r"\2 (\1)", s)
+    # 기본 태그 제거
+    s = s.replace("<b>", "").replace("</b>", "")
+    s = s.replace("<code>", "").replace("</code>", "")
+    # 남은 태그 안전 제거
+    s = re.sub(r"</?[^>]+>", "", s)
+    return s
 
 
 def resolve_decision_id(decision_id: str) -> str:
@@ -1717,11 +1729,19 @@ def main() -> int:
         _log("dry-run 모드: 텔레그램 전송 스킵")
         return 0
 
-    notify = _load_telegram_notify()
-    ok = bool(notify(msg))
+    notify_html, notify_plain = _load_telegram_notify()
+    ok = bool(notify_html(msg))
     if ok:
-        _log("텔레그램 전송 성공")
+        _log("텔레그램 전송 성공(HTML)")
         return 0
+
+    # HTML 파싱 오류(예: '<', '<=' 등) 시 평문으로 자동 재시도
+    plain_msg = _strip_html_for_plain(msg)
+    ok_plain = bool(notify_plain(plain_msg))
+    if ok_plain:
+        _log("텔레그램 전송 성공(plain fallback)")
+        return 0
+
     _log("텔레그램 전송 실패")
     return 2
 
