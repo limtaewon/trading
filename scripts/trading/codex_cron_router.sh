@@ -42,11 +42,19 @@ LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-openclaw}}"
 CODEX_BIN="${CODEX_BIN:-openclaw}"
 CODEX_MODEL="${CODEX_MODEL:-openai-codex/gpt-5.3-codex-spark}"
 CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-}"
+CODEX_FALLBACK_ON_ANY_ERROR="${CODEX_FALLBACK_ON_ANY_ERROR:-}"
 if [[ -z "$CODEX_FALLBACK_MODEL" ]]; then
     if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
         CODEX_FALLBACK_MODEL="gpt-5.3-codex"
     else
         CODEX_FALLBACK_MODEL="$CODEX_MODEL"
+    fi
+fi
+if [[ -z "$CODEX_FALLBACK_ON_ANY_ERROR" ]]; then
+    if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
+        CODEX_FALLBACK_ON_ANY_ERROR="1"
+    else
+        CODEX_FALLBACK_ON_ANY_ERROR="0"
     fi
 fi
 OPENCLAW_SESSION_ID="${OPENCLAW_SESSION_ID:-openclaw-codex-router}"
@@ -243,13 +251,14 @@ if [[ "$PAYLOAD_KIND" == "systemEvent" ]]; then
                 echo "- 지시사항의 줄수 제한 준수"
             } > "$TMP_PROMPT"
 
-            if python3 - "$CODEX_BIN" "$OPENCLAW_SESSION_ID" "$TMP_PROMPT" "$TMP_OUT" "$CODEX_MODEL" "$CODEX_FALLBACK_MODEL" <<'PY' >> "$LOG_FILE" 2>&1; then
+            if python3 - "$CODEX_BIN" "$OPENCLAW_SESSION_ID" "$TMP_PROMPT" "$TMP_OUT" "$CODEX_MODEL" "$CODEX_FALLBACK_MODEL" "$CODEX_FALLBACK_ON_ANY_ERROR" <<'PY' >> "$LOG_FILE" 2>&1; then
 import json
 import pathlib
 import subprocess
 import sys
 
-agent_bin, session_id, prompt_path, out_path, model, fallback_model = sys.argv[1:7]
+agent_bin, session_id, prompt_path, out_path, model, fallback_model, fallback_on_any = sys.argv[1:8]
+fallback_on_any = str(fallback_on_any).strip() == "1"
 prompt = pathlib.Path(prompt_path).read_text(encoding="utf-8")
 
 def is_recoverable(text: str) -> bool:
@@ -289,7 +298,7 @@ def run_agent(model_name: str):
     return raw, ""
 
 raw, err = run_agent(model)
-if raw is None and is_recoverable(err) and fallback_model and fallback_model != model:
+if raw is None and (fallback_on_any or is_recoverable(err)) and fallback_model and fallback_model != model:
     raw, err = run_agent(fallback_model)
 if raw is None:
     raise SystemExit(err or "openclaw agent failed")

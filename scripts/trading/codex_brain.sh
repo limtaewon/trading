@@ -37,7 +37,7 @@ OPENCLAW_ERR_LOG="/tmp/openclaw_agent_stderr.log"
 OPENCLAW_AGENT_RETRY_MAX="${OPENCLAW_AGENT_RETRY_MAX:-2}"
 OPENCLAW_AGENT_RETRY_DELAY_SEC="${OPENCLAW_AGENT_RETRY_DELAY_SEC:-1}"
 ENABLE_CODEX_EXEC_FALLBACK="${ENABLE_CODEX_EXEC_FALLBACK:-1}"
-CODEX_FALLBACK_ON_ANY_ERROR="${CODEX_FALLBACK_ON_ANY_ERROR:-0}"
+CODEX_FALLBACK_ON_ANY_ERROR="${CODEX_FALLBACK_ON_ANY_ERROR:-}"
 CODEX_FALLBACK_BIN="${CODEX_FALLBACK_BIN:-codex}"
 CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-}"
 if [[ -z "$CODEX_FALLBACK_MODEL" ]]; then
@@ -48,6 +48,15 @@ if [[ -z "$CODEX_FALLBACK_MODEL" ]]; then
     fi
 fi
 CODEX_FALLBACK_TIMEOUT_SEC="${CODEX_FALLBACK_TIMEOUT_SEC:-240}"
+
+if [[ -z "$CODEX_FALLBACK_ON_ANY_ERROR" ]]; then
+    # Spark 계열은 quota/rate-limit 오류가 비정형 문자열로 떨어져도 폴백을 타도록 기본 ON.
+    if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
+        CODEX_FALLBACK_ON_ANY_ERROR="1"
+    else
+        CODEX_FALLBACK_ON_ANY_ERROR="0"
+    fi
+fi
 
 # npm/homebrew global bin 경로 추가 (macOS 호환)
 export PATH="/opt/homebrew/bin:$HOME/.npm-global/bin:$HOME/.openclaw/bin:/usr/local/bin:$PATH"

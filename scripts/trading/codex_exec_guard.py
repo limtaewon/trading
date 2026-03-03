@@ -27,6 +27,7 @@ DEFAULT_OPENCLAW_RETRY_MAX = max(0, int(os.environ.get("OPENCLAW_AGENT_RETRY_MAX
 DEFAULT_OPENCLAW_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("OPENCLAW_AGENT_RETRY_DELAY_SEC", "1.0")))
 DEFAULT_ENABLE_CODEX_EXEC_FALLBACK = os.environ.get("ENABLE_CODEX_EXEC_FALLBACK", "1") == "1"
 DEFAULT_CODEX_FALLBACK_ON_ANY_ERROR = os.environ.get("CODEX_FALLBACK_ON_ANY_ERROR", "0") == "1"
+DEFAULT_SPARK_FALLBACK_ON_ANY_ERROR = os.environ.get("CODEX_SPARK_FALLBACK_ON_ANY_ERROR", "1") == "1"
 
 
 RECOVERABLE_OPENCLAW_ERROR_PATTERNS = (
@@ -97,6 +98,13 @@ def _normalize_fallback_model(model: str) -> str:
     if "codex-spark" in m or m.startswith("openai-codex/"):
         return "gpt-5.3-codex"
     return m
+
+
+def _is_spark_like_model(model: str) -> bool:
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    return ("codex-spark" in m) or m.startswith("openai-codex/")
 
 
 def _is_recoverable_openclaw_error(msg: str) -> bool:
@@ -411,8 +419,11 @@ def _run_with_recovery(
                 continue
             break
 
+    fallback_on_any = DEFAULT_CODEX_FALLBACK_ON_ANY_ERROR or (
+        DEFAULT_SPARK_FALLBACK_ON_ANY_ERROR and _is_spark_like_model(model)
+    )
     fallback_allowed = DEFAULT_ENABLE_CODEX_EXEC_FALLBACK and (
-        DEFAULT_CODEX_FALLBACK_ON_ANY_ERROR or _is_recoverable_openclaw_error(last_err)
+        fallback_on_any or _is_recoverable_openclaw_error(last_err)
     )
     if fallback_allowed:
         return _run_codex_exec_fallback(
