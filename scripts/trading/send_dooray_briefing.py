@@ -1089,6 +1089,7 @@ GROUP BY cluster_id
         )
         cluster_map = {str(r.get("cluster_id") or ""): r for r in c_rows}
 
+    min_conf = _f(os.getenv("DOORAY_RELATION_MIN_CONFIDENCE", "0.60"), 0.60)
     top_cards = []
     for r in cand_rows:
         tk = str(r.get("ticker") or "").strip()
@@ -1099,6 +1100,9 @@ GROUP BY cluster_id
         fail_codes = [x.strip().strip("'\"") for x in str(r.get("fail_codes_s") or "").strip("[]").split(",") if x.strip()]
         exec_possible = _classify_exec_possible(action, abs_blocks, fail_codes)
         reason = pick_reasoning(tk, str(r.get("primary_reasoning_id") or ""))
+        conf = float(reason.get("confidence") or 0.0)
+        if conf < min_conf:
+            continue
         cid = str(r.get("primary_cluster_id") or "").strip()
         cmeta = cluster_map.get(cid, {})
         evidence_titles = reason.get("evidence_titles", [])
@@ -1114,7 +1118,7 @@ GROUP BY cluster_id
                 "delta": _action_delta(action, exec_possible, fail_codes, abs_blocks),
                 "summary": str(reason.get("summary") or "").strip(),
                 "causal_chain": str(reason.get("causal_chain") or "").strip(),
-                "confidence": float(reason.get("confidence") or 0.0),
+                "confidence": conf,
                 "time_horizon": str(reason.get("time_horizon") or "").strip(),
                 "source_cluster": str(reason.get("source_cluster") or cid),
                 "evidence_titles": [str(x) for x in evidence_titles[:2]],
