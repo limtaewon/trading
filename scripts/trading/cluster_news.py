@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env_bootstrap import bootstrap_openclaw_env
 
 bootstrap_openclaw_env()
+CLUSTER_TELEGRAM_ENABLED = os.getenv("CLUSTER_TELEGRAM_ENABLED", "0") == "1"
 
 
 def _log(msg: str) -> None:
@@ -44,6 +45,8 @@ def _log(msg: str) -> None:
 
 
 def _notify(text: str) -> None:
+    if not CLUSTER_TELEGRAM_ENABLED:
+        return
     try:
         from telegram_notify import notify
     except Exception:

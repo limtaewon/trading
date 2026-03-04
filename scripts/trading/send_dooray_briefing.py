@@ -22,9 +22,10 @@ import sys
 import shutil
 import tempfile
 import shlex
+import uuid
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -34,25 +35,34 @@ from market_realtime import fetch_naver_realtime_indices, fetch_naver_usdkrw
 bootstrap_openclaw_env()
 
 def _resolve_clickhouse():
-    raw_url = (
+    raw = (
         os.environ.get("CLICKHOUSE_URL", "").strip()
         or os.environ.get("CLICKHOUSE_HOST", "").strip()
         or "http://localhost:8123"
     )
     user = os.environ.get("CLICKHOUSE_USER", "").strip()
     pw = os.environ.get("CLICKHOUSE_PASS", os.environ.get("CLICKHOUSE_PASSWORD", "")).strip()
-    sp = urlsplit(raw_url)
-    if sp.username and not user:
-        user = sp.username
-        pw = sp.password or pw
-    if sp.username:
-        netloc = sp.hostname or "localhost"
-        if sp.port:
-            netloc = f"{netloc}:{sp.port}"
-        raw_url = urlunsplit((sp.scheme or "http", netloc, sp.path or "", sp.query, sp.fragment))
+
+    sp = urlsplit(raw)
+    # 1) user/pass 추출 우선순위: env > url userinfo > query string
+    query_pairs = parse_qsl(sp.query, keep_blank_values=True)
+    query_dict = dict(query_pairs)
+    if not user:
+        user = (sp.username or query_dict.get("user") or "").strip()
+    if not pw:
+        pw = (sp.password or query_dict.get("password") or "").strip()
+
+    # 2) URL 정규화: userinfo 제거 + user/password query 제거
+    netloc = sp.netloc or sp.path
+    if "@" in netloc:
+        netloc = netloc.split("@", 1)[1]
+    clean_pairs = [(k, v) for (k, v) in query_pairs if k.lower() not in {"user", "password"}]
+    clean_query = urlencode(clean_pairs, doseq=True)
+    clean_url = urlunsplit((sp.scheme or "http", netloc, sp.path if sp.netloc else "", clean_query, sp.fragment))
+
     if not user:
         user = "default"
-    return raw_url, user, pw
+    return clean_url, user, pw
 
 
 CLICKHOUSE_HTTP, CH_USER, CH_PASSWORD = _resolve_clickhouse()
@@ -61,6 +71,11 @@ CH_DB = os.environ.get("CLICKHOUSE_DB", "trading").strip() or "trading"
 WEBHOOK = os.environ.get("DOORAY_WEBHOOK_URL", "").strip()
 WEBHOOK_EXTRA = os.environ.get("DOORAY_WEBHOOK_URL_EXTRA", "").strip()
 WEBHOOKS_RAW = os.environ.get("DOORAY_WEBHOOK_URLS", "").strip()
+MCPORTER_BIN = os.environ.get("MCPORTER_BIN", "mcporter").strip() or "mcporter"
+MCPORTER_CONFIG = os.environ.get(
+    "MCPORTER_CONFIG",
+    str(Path.home() / ".openclaw" / "config" / "mcporter.json"),
+).strip()
 STATE_PATH = os.path.expanduser("~/.openclaw/state/dooray_briefing_state.json")
 STOCKS_CSV = os.path.expanduser("~/.openclaw/workspace/STOCKS.csv")
 PUBLIC_BASE_URL = os.environ.get("STOCK_REPORT_PUBLIC_BASE_URL", "").strip().rstrip("/")
@@ -154,6 +169,7 @@ def _norm_ticker(v: object) -> str:
     s = str(v or "").strip()
     m = re.search(r"(\d{6})", s)
     return m.group(1) if m else ""
+
 
 
 def _fmt_eok(v_krw: float) -> str:
@@ -307,9 +323,10 @@ def _run_briefing_llm_text(context: dict, kind: str, timeout_sec: int = 100) -> 
     default_prompt = (
         "너는 한국 주식 자동매매 시스템 브리핑 작성자다.\n"
         "반드시 입력 JSON의 사실/숫자만 사용하고, 없는 데이터는 추정하지 말라.\n"
+        "시장/뉴스/수급/기술/연관/이벤트를 교차검증하는 심화 분석으로 작성하라.\n"
         "출력 형식은 아래 섹션 순서를 정확히 지켜라.\n"
         "1) 현재 시장 상황 요약\n"
-        "2) 내일 유망주 분석 (섹터별)\n"
+        "2) 오늘 유망주 분석 (섹터별)\n"
         "3) 종합 판단\n"
         "문체 규칙:\n"
         "- 한국어로 작성\n"
@@ -687,7 +704,7 @@ LIMIT 1
     cand_rows = ch_query(
         f"""
 WITH
-  latest_ts AS (SELECT max(date) AS d FROM trading.technical_signals),
+  latest_tech AS (SELECT max(date) AS d FROM trading.technical_signals),
   latest_rel AS (SELECT max(asof_ts) AS ts FROM trading.hidden_relation_signals)
 SELECT
   c.ticker AS ticker,
@@ -715,7 +732,7 @@ SELECT
 FROM trading.decision_candidate c
 LEFT JOIN trading.technical_signals ts
   ON ts.ticker = c.ticker
- AND ts.date = (SELECT d FROM latest_ts)
+ AND ts.date = (SELECT d FROM latest_tech)
 LEFT JOIN trading.v_feature_snapshot vfs
   ON vfs.symbol = c.ticker
  AND vfs.ts >= now() - INTERVAL 2 DAY
@@ -727,7 +744,7 @@ GROUP BY
   c.ticker, c.action, c.total_score, c.stage2_stock_flow_score, c.stage3_event_score, c.stage4_timing_score,
   c.absolute_block_reason, c.stage5_fail_codes, c.stage5_exec_multiplier
 ORDER BY c.total_score DESC
-LIMIT {max(5, int(top_candidates) * 5)}
+LIMIT {max(5, int(top_candidates))}
 """
     )
     cand_tickers = []
@@ -736,6 +753,11 @@ LIMIT {max(5, int(top_candidates) * 5)}
         if is_valid_ticker(tk):
             cand_tickers.append(tk)
     news_map = get_candidate_news_map(cand_tickers, per_ticker=2) if cand_tickers else {}
+    sector_map = get_ticker_sector_map(cand_tickers) if cand_tickers else {}
+    earnings_rows = get_earnings_for_tickers(cand_tickers, days_after=30) if cand_tickers else []
+    outcome_rows = get_outcome_summary_for_tickers(cand_tickers, lookback_days=45) if cand_tickers else []
+    replay_health_rows = get_replay_health(lookback_days=30)
+    position_snapshot_rows: list[dict] = []
 
     cluster_ids = sorted(
         {
@@ -831,10 +853,18 @@ LIMIT 120
     web_signals = _load_web_market_signals(limit=12)
     stage2 = stage_debug.get("stage2") if isinstance(stage_debug.get("stage2"), dict) else {}
     stage1 = stage_debug.get("stage1") if isinstance(stage_debug.get("stage1"), dict) else {}
+    scenarios = build_market_scenarios(regime, stage2, web_signals)
     abs_blocks = [str(x) for x in (run.get("absolute_block_reason") or []) if str(x).strip()]
+    outcome_map = {str(r.get("ticker") or "").strip(): r for r in outcome_rows}
+    earnings_map: dict[str, list[dict]] = {}
+    for er in earnings_rows:
+        tk = str(er.get("ticker") or "").strip()
+        if not is_valid_ticker(tk):
+            continue
+        earnings_map.setdefault(tk, []).append(er)
 
     llm_candidates = []
-    for r in cand_rows[:15]:
+    for r in cand_rows[: max(5, int(top_candidates))]:
         tk = _norm_ticker(r.get("ticker"))
         if not tk:
             continue
@@ -843,6 +873,9 @@ LIMIT 120
             {
                 "ticker": tk,
                 "name": str(r.get("ticker_name") or ""),
+                "sector": str((sector_map.get(tk) or {}).get("sector") or ""),
+                "sub_sector": str((sector_map.get(tk) or {}).get("sub_sector") or ""),
+                "themes": (sector_map.get(tk) or {}).get("theme_tags") or [],
                 "action": str(r.get("action") or ""),
                 "score": round(_f(r.get("total_score")), 2),
                 "signal": str(r.get("signal") or ""),
@@ -871,6 +904,22 @@ LIMIT 120
                     }
                     for n in n_rows[:2]
                 ],
+                "earnings_events": [
+                    {
+                        "event_date": str(e.get("event_date_s") or ""),
+                        "dday": int(_f(e.get("dday"), 0)),
+                        "event_name": str(e.get("event_name") or ""),
+                        "importance": int(_f(e.get("importance"), 0)),
+                        "confidence": round(_f(e.get("confidence"), 0.0), 2),
+                    }
+                    for e in (earnings_map.get(tk) or [])[:2]
+                ],
+                "outcome_feedback": {
+                    "buy_n": int(_f((outcome_map.get(tk) or {}).get("buy_n"), 0)),
+                    "avg_buy_ret_pct": round(_f((outcome_map.get(tk) or {}).get("avg_buy_ret_pct"), 0.0), 4),
+                    "avg_buy_mdd_pct": round(_f((outcome_map.get(tk) or {}).get("avg_buy_mdd_pct"), 0.0), 4),
+                    "avg_buy_vol_pct": round(_f((outcome_map.get(tk) or {}).get("avg_buy_vol_pct"), 0.0), 4),
+                },
             }
         )
 
@@ -908,8 +957,14 @@ LIMIT 120
         },
         "macro_digest": digest_rows,
         "web_market_signals": web_signals,
+        "market_scenarios": scenarios,
+        "decision_replay_health": replay_health_rows,
         "recent_news": recent_news_rows,
         "news_research": recent_research_rows,
+        "outcome_summary": outcome_rows,
+        "earnings_calendar": earnings_rows,
+        "position_snapshot": position_snapshot_rows,
+        "ticker_sector": list(sector_map.values()),
         "relation_signals": relation_signal_rows,
         "relation_reasonings": relation_reasoning_rows,
         "candidates": llm_candidates,
@@ -1022,7 +1077,7 @@ LIMIT 120
         lines.append(f"- 해석: {market_summary}")
     lines.append("")
 
-    lines.append("내일 유망주 분석 (섹터별)")
+    lines.append("오늘 유망주 분석 (섹터별)")
     lines.append("🟢 상승 유력 — 상대강세/우선 관찰")
     if greens:
         for c in greens[: max(2, int(top_candidates))]:
@@ -1072,6 +1127,8 @@ LIMIT 120
         "clusters": max(1, int(clusters)),
         "macro_digest": digest_rows,
         "llm_summary": llm_obj or {},
+        "prediction_candidates": llm_candidates,
+        "scenarios": scenarios,
     }
     return _humanize_codes("\n".join(lines).strip()), raw
 
@@ -1518,17 +1575,66 @@ def _upsert_realtime_market_snapshot() -> None:
 
 
 def ch_query(sql: str):
-    auth = (CH_USER, CH_PASSWORD) if CH_USER else None
+    params = {"database": CH_DB, "default_format": "JSON"}
+    if CH_USER:
+        params["user"] = CH_USER
+    if CH_PASSWORD:
+        params["password"] = CH_PASSWORD
     resp = requests.post(
         CLICKHOUSE_HTTP,
-        params={"database": CH_DB, "default_format": "JSON"},
+        params=params,
         data=(sql + "\n").encode("utf-8"),
         timeout=30,
-        auth=auth,
     )
     resp.raise_for_status()
     payload = resp.json() if resp.text else {}
     return payload.get("data", [])
+
+
+def ch_execute(sql: str) -> None:
+    params = {"database": CH_DB}
+    if CH_USER:
+        params["user"] = CH_USER
+    if CH_PASSWORD:
+        params["password"] = CH_PASSWORD
+    resp = requests.post(
+        CLICKHOUSE_HTTP,
+        params=params,
+        data=(str(sql or "").strip() + "\n").encode("utf-8"),
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
+def ensure_report_prediction_table() -> None:
+    try:
+        ch_execute(
+            """
+CREATE TABLE IF NOT EXISTS trading.report_prediction
+(
+    report_id             UUID,
+    report_time           DateTime,
+    decision_id           UUID,
+    ticker                String,
+    ticker_name           String,
+    tier                  LowCardinality(String),
+    predicted_direction   LowCardinality(String),
+    predicted_action      LowCardinality(String),
+    confidence            Float32,
+    context_note          String,
+    source                LowCardinality(String),
+    actual_1d_return_pct  Nullable(Float32),
+    actual_3d_return_pct  Nullable(Float32),
+    actual_5d_return_pct  Nullable(Float32),
+    hit_1d                Nullable(UInt8),
+    created_at            DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (report_time, report_id, ticker)
+"""
+        )
+    except Exception:
+        pass
 
 
 def _news_has_column(col: str) -> bool:
@@ -1698,8 +1804,11 @@ def fmt_tickers_with_name(raw, tmap):
 
 def get_sector_by_kis(ticker: str):
     try:
-        cmd = f'mcporter call "kis-trading.inquery-stock-price(symbol: \\\"{ticker}\\\")" --output json'
-        r = run_cmd(cmd)
+        cmd = [MCPORTER_BIN]
+        if MCPORTER_CONFIG:
+            cmd.extend(["--config", MCPORTER_CONFIG])
+        cmd.extend(["call", f'kis-trading.inquery-stock-price(symbol: "{ticker}")', "--output", "json"])
+        r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             return "-"
         data = json.loads(r.stdout)
@@ -1802,6 +1911,164 @@ def sql_in_strings(items):
     if not vals:
         return "('')"
     return "(" + ",".join(vals) + ")"
+
+
+def get_ticker_sector_map(tickers: list[str]) -> dict[str, dict]:
+    clean = [str(t).strip() for t in (tickers or []) if is_valid_ticker(str(t))]
+    if not clean:
+        return {}
+    try:
+        rows = ch_query(
+            f"""
+SELECT
+  ticker,
+  argMax(ticker_name, updated_at) AS ticker_name,
+  argMax(sector, updated_at) AS sector,
+  argMax(sub_sector, updated_at) AS sub_sector,
+  argMax(theme_tags, updated_at) AS theme_tags,
+  argMax(confidence, updated_at) AS confidence
+FROM trading.ticker_sector
+WHERE ticker IN {sql_in_strings(clean)}
+GROUP BY ticker
+"""
+        )
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    for r in rows:
+        tk = str(r.get("ticker") or "").strip()
+        if not tk:
+            continue
+        out[tk] = {
+            "ticker_name": str(r.get("ticker_name") or "").strip(),
+            "sector": str(r.get("sector") or "").strip(),
+            "sub_sector": str(r.get("sub_sector") or "").strip(),
+            "theme_tags": r.get("theme_tags", []) if isinstance(r.get("theme_tags"), list) else [],
+            "confidence": _f(r.get("confidence"), 0.0),
+        }
+    return out
+
+
+def get_earnings_for_tickers(tickers: list[str], days_after: int = 30) -> list[dict]:
+    clean = [str(t).strip() for t in (tickers or []) if is_valid_ticker(str(t))]
+    if not clean:
+        return []
+    try:
+        return ch_query(
+            f"""
+SELECT
+  toString(event_date) AS event_date_s,
+  ticker,
+  ticker_name,
+  event_name,
+  event_source,
+  importance,
+  sentiment_hint,
+  confidence,
+  dateDiff('day', today(), event_date) AS dday
+FROM trading.earnings_calendar
+WHERE ticker IN {sql_in_strings(clean)}
+  AND event_date >= today() - INTERVAL 7 DAY
+  AND event_date <= today() + INTERVAL {max(1, int(days_after))} DAY
+ORDER BY abs(dday) ASC, importance DESC
+LIMIT 120
+"""
+        )
+    except Exception:
+        return []
+
+
+def get_outcome_summary_for_tickers(tickers: list[str], lookback_days: int = 45) -> list[dict]:
+    clean = [str(t).strip() for t in (tickers or []) if is_valid_ticker(str(t))]
+    if not clean:
+        return []
+    try:
+        return ch_query(
+            f"""
+SELECT
+  ticker,
+  count() AS n_records,
+  countIf(action='BUY') AS buy_n,
+  round(avgIf(action_return_pct, action='BUY' AND resolved=1), 4) AS avg_buy_ret_pct,
+  round(avgIf(max_drawdown_pct, action='BUY' AND resolved=1), 4) AS avg_buy_mdd_pct,
+  round(avgIf(realized_vol_pct, action='BUY' AND resolved=1), 4) AS avg_buy_vol_pct,
+  max(toString(decision_time)) AS last_decision_time
+FROM trading.decision_outcome
+WHERE decision_time >= now() - INTERVAL {max(7, int(lookback_days))} DAY
+  AND ticker IN {sql_in_strings(clean)}
+GROUP BY ticker
+ORDER BY buy_n DESC, avg_buy_ret_pct DESC
+LIMIT 120
+"""
+        )
+    except Exception:
+        return []
+
+
+def get_replay_health(lookback_days: int = 30) -> list[dict]:
+    try:
+        return ch_query(
+            f"""
+SELECT
+  replay_status,
+  count() AS n,
+  round(avg(abs(diff_total_score)), 4) AS avg_abs_total_diff,
+  max(toString(replay_time)) AS latest_replay_time
+FROM trading.decision_replay
+WHERE replay_time >= now() - INTERVAL {max(7, int(lookback_days))} DAY
+GROUP BY replay_status
+ORDER BY n DESC
+"""
+        )
+    except Exception:
+        return []
+
+
+def get_position_snapshot(limit: int = 50) -> list[dict]:
+    try:
+        return ch_query(
+            f"""
+SELECT
+  toString(snapshot_time) AS snapshot_time_s,
+  ticker,
+  ticker_name,
+  qty,
+  pnl_rate,
+  eval_amount,
+  take_profit_pct,
+  stop_loss_pct,
+  pm_confidence,
+  thesis_status,
+  source
+FROM trading.position_snapshot
+ORDER BY snapshot_time DESC
+LIMIT {max(1, int(limit))}
+"""
+        )
+    except Exception:
+        return []
+
+
+def build_market_scenarios(regime: dict, stage2: dict, web_signals: list[dict]) -> list[dict]:
+    posture = str(regime.get("action_posture", "normal") or "normal").lower()
+    stress_txt = str(regime.get("stress_flags", "") or "")
+    stress_cnt = len([x for x in stress_txt.split(",") if x.strip()])
+    shock = str(stage2.get("shock_level", "") or "").upper()
+    has_geo = any(str(x.get("topic", "")).lower() in {"geopolitics", "war", "oil", "shipping", "sanctions"} for x in (web_signals or []))
+    out: list[dict] = []
+    if posture in {"defensive", "cautious"} or shock in {"ALERT", "EXTREME"} or stress_cnt >= 3:
+        out.append({"name": "bear_case", "probability": 0.35, "playbook": "신규진입 최소화, 현금/리스크 관리 우선"})
+        out.append({"name": "base_case", "probability": 0.45, "playbook": "분할 접근, 수급 반전 확인 후 제한적 진입"})
+        out.append({"name": "bull_case", "probability": 0.20, "playbook": "리스크 완화 시 낙폭과대 반등 추종"})
+    else:
+        out.append({"name": "bull_case", "probability": 0.35, "playbook": "상대강도 상위 종목 중심 추세 추종"})
+        out.append({"name": "base_case", "probability": 0.45, "playbook": "테마 순환 대응, 손절 규칙 엄수"})
+        out.append({"name": "bear_case", "probability": 0.20, "playbook": "급변 시 방어모드 전환"})
+    if has_geo:
+        for item in out:
+            if item["name"] in {"base_case", "bear_case"}:
+                item["playbook"] += " (지정학 변수 반영)"
+    return out
 
 
 def news_fingerprint(item: dict) -> tuple:
@@ -2303,10 +2570,81 @@ def build_message(urgent_context=None):
     return "\n".join(lines), raw
 
 
+def save_report_predictions(raw: dict, source: str = "dooray_briefing") -> int:
+    if not isinstance(raw, dict):
+        return 0
+    did = str(raw.get("decision_id") or "").strip()
+    if not did:
+        return 0
+    candidates = raw.get("prediction_candidates", [])
+    if not isinstance(candidates, list) or not candidates:
+        return 0
+
+    ensure_report_prediction_table()
+    report_id = str(uuid.uuid4())
+    report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    values = []
+
+    for idx, c in enumerate(candidates[:15]):
+        tk = _norm_ticker(c.get("ticker"))
+        if not is_valid_ticker(tk):
+            continue
+        nm = str(c.get("name") or tk).strip()
+        action = str(c.get("action") or "HOLD").upper()
+        score = _f(c.get("score"), 0.0)
+        confidence = max(0.30, min(0.95, score / 100.0))
+        if idx < 3:
+            tier = "tier1"
+        elif idx < 8:
+            tier = "tier2"
+        else:
+            tier = "caution"
+        if action == "BUY":
+            direction = "bullish"
+        elif action in {"SELL", "REDUCE"}:
+            direction = "bearish"
+        else:
+            direction = "neutral"
+        note = (
+            f"signal={str(c.get('signal') or '')}, "
+            f"score={score:.1f}, rel={_f(c.get('rel_score'), 0.0):+.2f}, "
+            f"exec={_f(c.get('exec_multiplier'), 0.0):.2f}"
+        )
+        values.append(
+            "("
+            f"toUUID({sql_quote(report_id)}), "
+            f"{sql_quote(report_time)}, "
+            f"toUUID({sql_quote(did)}), "
+            f"{sql_quote(tk)}, "
+            f"{sql_quote(nm)}, "
+            f"{sql_quote(tier)}, "
+            f"{sql_quote(direction)}, "
+            f"{sql_quote(action)}, "
+            f"{confidence:.4f}, "
+            f"{sql_quote(note)}, "
+            f"{sql_quote(source)}, "
+            "NULL, NULL, NULL, NULL"
+            ")"
+        )
+
+    if not values:
+        return 0
+
+    sql = (
+        "INSERT INTO trading.report_prediction "
+        "(report_id, report_time, decision_id, ticker, ticker_name, tier, predicted_direction, "
+        "predicted_action, confidence, context_note, source, actual_1d_return_pct, actual_3d_return_pct, actual_5d_return_pct, hit_1d) "
+        f"VALUES {', '.join(values)}"
+    )
+    ch_execute(sql)
+    return len(values)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Dooray 브리핑 전송기")
     ap.add_argument("--dry-run", action="store_true", help="웹훅 전송 없이 메시지만 출력")
     ap.add_argument("--breaking", action="store_true", help="속보 기반 매매 해석 브리핑 모드")
+    ap.add_argument("--force-send", action="store_true", help="08:00 1회 제한을 무시하고 즉시 전송")
     ap.add_argument("--context-file", default=URGENT_CONTEXT_PATH, help="속보 컨텍스트 JSON 경로")
     ap.add_argument("--decision-id", default="", help="파이프라인 브리핑 decision_id(기본: 최신)")
     ap.add_argument("--top-candidates", type=int, default=5, help="유망주 표시 개수")
@@ -2314,6 +2652,20 @@ def main():
     ap.add_argument("--legacy-format", action="store_true", help="기존 도레이 브리핑 포맷 사용")
     ap.add_argument("--relation-plus-a", action="store_true", help="+A 연관관계 브리핑도 함께 전송")
     args = ap.parse_args()
+    # 운영 기본값: 정기 도레이 브리핑은 평일 08:00 1회만 전송
+    # (장중 호출 라인이 남아있어도 자동 차단)
+    only_0800 = os.environ.get("DOORAY_ONLY_0800", "1") == "1"
+    if only_0800 and (not args.dry_run) and (not args.breaking) and (not args.force_send):
+        now = datetime.now()
+        is_weekday = now.weekday() < 5
+        is_0800_window = now.hour == 8 and now.minute < 10
+        if not (is_weekday and is_0800_window):
+            print(
+                f"[dooray] skip: DOORAY_ONLY_0800=1 "
+                f"(now={now.strftime('%Y-%m-%d %H:%M')}, use --force-send to override)"
+            )
+            return
+
     webhooks = _resolve_dooray_webhooks()
     if not webhooks and not args.dry_run:
         raise SystemExit("DOORAY_WEBHOOK_URL(또는 DOORAY_WEBHOOK_URL_EXTRA/DOORAY_WEBHOOK_URLS) 환경변수가 없습니다.")
@@ -2322,7 +2674,7 @@ def main():
     use_pipeline = os.environ.get("DOORAY_USE_PIPELINE_BRIEFING", "1") == "1" and not args.legacy_format
     plus_a_enabled = (
         args.relation_plus_a
-        or (os.environ.get("DOORAY_SEND_RELATION_PLUS_A", "1") == "1")
+        or (os.environ.get("DOORAY_SEND_RELATION_PLUS_A", "0") == "1")
     )
     plus_a_delay = max(0, int(os.environ.get("DOORAY_RELATION_PLUS_A_DELAY_SEC", "2")))
     plus_a_top = max(1, int(os.environ.get("DOORAY_RELATION_PLUS_A_TOP", "3")))
@@ -2386,6 +2738,13 @@ def main():
                 raise RuntimeError("모든 Dooray +A 웹훅 전송 실패: " + " | ".join(errs_rel))
             if errs_rel:
                 print("[WARN] 일부 Dooray +A 웹훅 전송 실패:", " | ".join(errs_rel), file=sys.stderr)
+
+    try:
+        saved_n = save_report_predictions(raw, source="dooray_pipeline")
+        if saved_n > 0:
+            print(f"[INFO] report_prediction 저장 {saved_n}건", file=sys.stderr)
+    except Exception as e:
+        print(f"[WARN] report_prediction 저장 실패: {type(e).__name__}: {e}", file=sys.stderr)
 
     next_state = dict(state)
     next_state.update({

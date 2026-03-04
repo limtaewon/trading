@@ -521,13 +521,13 @@
     {
       "id": "3ec7ae18-3b4c-49f5-91fc-0d12a022077f",
       "agentId": "main",
-      "name": "dooray-briefing-hourly",
-      "enabled": false,
+      "name": "dooray-briefing-daily-0800",
+      "enabled": true,
       "createdAtMs": 1771550556934,
       "updatedAtMs": 1772167428959,
       "schedule": {
         "kind": "cron",
-        "expr": "0 9,12,15 * * 1-5",
+        "expr": "0 8 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "sessionTarget": "main",

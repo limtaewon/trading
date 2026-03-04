@@ -315,10 +315,10 @@
       "source": "openclaw-jobs"
     },
     {
-      "name": "dooray-briefing-hourly",
+      "name": "dooray-briefing-daily-0800",
       "enabled": true,
       "schedule": {
-        "expr": "0 9,12,15 * * 1-5",
+        "expr": "0 8 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {

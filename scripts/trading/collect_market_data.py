@@ -65,6 +65,7 @@ if MCPORTER_PATH and os.path.isfile(MCPORTER_PATH) and os.access(MCPORTER_PATH, 
     MCPORTER = MCPORTER_PATH
 else:
     MCPORTER = shutil.which("mcporter")
+MCPORTER_CONFIG = os.getenv("MCPORTER_CONFIG", os.path.expanduser("~/.openclaw/config/mcporter.json"))
 FLOW_SYMBOL_LIMIT = int(os.getenv("INVESTOR_FLOW_SYMBOL_LIMIT", "80"))
 FLOW_WATCHLIST_MULTIPLIER = max(1, int(os.getenv("INVESTOR_FLOW_WATCHLIST_MULTIPLIER", "3")))
 FLOW_QUOTE_RETRY = max(1, int(os.getenv("INVESTOR_FLOW_QUOTE_RETRY", "3")))
@@ -403,13 +404,17 @@ def _run_kis_stock_quote(symbol: str):
     """inquery-stock-price 호출 결과를 dict로 반환."""
     if not MCPORTER:
         return None
-    cmd = [
-        MCPORTER,
-        "call",
-        f'kis-trading.inquery-stock-price(symbol: "{symbol}")',
-        "--output",
-        "json",
-    ]
+    cmd = [MCPORTER]
+    if MCPORTER_CONFIG:
+        cmd.extend(["--config", MCPORTER_CONFIG])
+    cmd.extend(
+        [
+            "call",
+            f'kis-trading.inquery-stock-price(symbol: "{symbol}")',
+            "--output",
+            "json",
+        ]
+    )
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if result.returncode != 0:

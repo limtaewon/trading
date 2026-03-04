@@ -84,6 +84,9 @@ PROMPT_EVENT_MEMORY_LIMIT = max(12, int(os.getenv("PROMPT_EVENT_MEMORY_LIMIT", "
 PROMPT_REL_SIGNALS_LIMIT = max(15, int(os.getenv("PROMPT_REL_SIGNALS_LIMIT", "80")))
 PROMPT_REL_REASONINGS_LIMIT = max(8, int(os.getenv("PROMPT_REL_REASONINGS_LIMIT", "60")))
 PROMPT_NEWS_RESEARCH_LIMIT = max(20, int(os.getenv("PROMPT_NEWS_RESEARCH_LIMIT", "120")))
+PROMPT_DECISION_OUTCOME_LIMIT = max(10, int(os.getenv("PROMPT_DECISION_OUTCOME_LIMIT", "60")))
+PROMPT_EARNINGS_CALENDAR_LIMIT = max(10, int(os.getenv("PROMPT_EARNINGS_CALENDAR_LIMIT", "80")))
+PROMPT_POSITION_SNAPSHOT_LIMIT = max(10, int(os.getenv("PROMPT_POSITION_SNAPSHOT_LIMIT", "40")))
 PROMPT_JSON_BLOCK_MAX_CHARS = max(10_000, int(os.getenv("PROMPT_JSON_BLOCK_MAX_CHARS", "120000")))
 PROMPT_WEB_SIGNALS_LIMIT = max(5, int(os.getenv("PROMPT_WEB_SIGNALS_LIMIT", "20")))
 SHARED_FRAMEWORK_PATH = (
@@ -96,6 +99,10 @@ MCPORTER_CANDIDATES = [
     "/opt/homebrew/bin/mcporter",
     "/usr/local/bin/mcporter",
 ]
+MCPORTER_CONFIG = os.getenv(
+    "MCPORTER_CONFIG",
+    os.path.expanduser("~/.openclaw/config/mcporter.json"),
+)
 
 def _find_mcporter() -> str | None:
     """mcporter 바이너리 경로를 찾는다."""
@@ -264,7 +271,10 @@ def mcporter_call(tool: str, args: str = "") -> dict | None:
     if args:
         cmd_str += f"({args})"
 
-    cmd = [MCPORTER, "call", cmd_str, "--output", "json"]
+    cmd = [MCPORTER]
+    if MCPORTER_CONFIG:
+        cmd.extend(["--config", MCPORTER_CONFIG])
+    cmd.extend(["call", cmd_str, "--output", "json"])
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=30
@@ -937,6 +947,269 @@ def get_news_research_recent(hours: int = 72, limit: int = 120) -> list[dict]:
     )
 
 
+def get_decision_outcome_recent(
+    tickers: list[str],
+    lookback_days: int = 45,
+    limit: int = 60,
+) -> list[dict]:
+    clean = []
+    for t in tickers:
+        t = str(t or "").strip()
+        if len(t) == 6 and t.isdigit() and t not in clean:
+            clean.append(t)
+    if not clean:
+        return []
+    in_sql = ", ".join(_sql_quote(t) for t in clean)
+    return ch_query(
+        f"""
+        SELECT
+            ticker,
+            anyLast(action) AS action_last,
+            count() AS n_records,
+            countIf(action='BUY') AS buy_n,
+            round(avgIf(action_return_pct, action='BUY' AND resolved=1), 4) AS avg_buy_ret_pct,
+            round(avgIf(max_drawdown_pct, action='BUY' AND resolved=1), 4) AS avg_buy_mdd_pct,
+            round(avgIf(realized_vol_pct, action='BUY' AND resolved=1), 4) AS avg_buy_vol_pct,
+            round(avgIf(action_return_pct, resolved=1), 4) AS avg_all_ret_pct,
+            max(toString(decision_time)) AS last_decision_time
+        FROM trading.decision_outcome
+        WHERE decision_time >= now() - INTERVAL {max(7, int(lookback_days))} DAY
+          AND ticker IN ({in_sql})
+        GROUP BY ticker
+        ORDER BY buy_n DESC, avg_buy_ret_pct DESC
+        LIMIT {max(1, int(limit))}
+    """
+    )
+
+
+def get_decision_replay_health(lookback_days: int = 30) -> list[dict]:
+    return ch_query(
+        f"""
+        SELECT
+            replay_status,
+            count() AS n,
+            round(avg(abs(diff_total_score)), 4) AS avg_abs_total_diff,
+            max(toString(replay_time)) AS latest_replay_time
+        FROM trading.decision_replay
+        WHERE replay_time >= now() - INTERVAL {max(7, int(lookback_days))} DAY
+        GROUP BY replay_status
+        ORDER BY n DESC
+    """
+    )
+
+
+def get_ticker_sector_map(tickers: list[str]) -> dict[str, dict[str, Any]]:
+    clean = []
+    for t in tickers:
+        t = str(t or "").strip()
+        if len(t) == 6 and t.isdigit() and t not in clean:
+            clean.append(t)
+    if not clean:
+        return {}
+    in_sql = ", ".join(_sql_quote(t) for t in clean)
+    rows = ch_query(
+        f"""
+        SELECT
+            ticker,
+            argMax(ticker_name, updated_at) AS ticker_name,
+            argMax(sector, updated_at) AS sector,
+            argMax(sub_sector, updated_at) AS sub_sector,
+            argMax(theme_tags, updated_at) AS theme_tags,
+            argMax(confidence, updated_at) AS confidence
+        FROM trading.ticker_sector
+        WHERE ticker IN ({in_sql})
+        GROUP BY ticker
+    """
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        tk = str(r.get("ticker", "")).strip()
+        if not tk:
+            continue
+        out[tk] = {
+            "ticker_name": str(r.get("ticker_name", "") or "").strip(),
+            "sector": str(r.get("sector", "") or "").strip(),
+            "sub_sector": str(r.get("sub_sector", "") or "").strip(),
+            "theme_tags": r.get("theme_tags", []) if isinstance(r.get("theme_tags"), list) else [],
+            "confidence": safe_float(r.get("confidence", 0.0), 0.0),
+        }
+    return out
+
+
+def apply_sector_map(rows: list[dict], sector_map: dict[str, dict[str, Any]]) -> None:
+    if not rows:
+        return
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        ticker = str(r.get("ticker", "")).strip()
+        sec = sector_map.get(ticker, {})
+        r["sector"] = str(sec.get("sector", "") or "")
+        r["sub_sector"] = str(sec.get("sub_sector", "") or "")
+        themes = sec.get("theme_tags", [])
+        if not isinstance(themes, list):
+            themes = []
+        r["theme_tags"] = themes[:5]
+        r["sector_confidence"] = safe_float(sec.get("confidence", 0.0), 0.0)
+
+
+def get_earnings_calendar_rows(
+    tickers: list[str],
+    days_before: int = 7,
+    days_after: int = 30,
+    limit: int = 80,
+) -> list[dict]:
+    clean = []
+    for t in tickers:
+        t = str(t or "").strip()
+        if len(t) == 6 and t.isdigit() and t not in clean:
+            clean.append(t)
+    if not clean:
+        return []
+    in_sql = ", ".join(_sql_quote(t) for t in clean)
+    return ch_query(
+        f"""
+        SELECT
+            toString(event_date) AS event_date_s,
+            ticker,
+            ticker_name,
+            event_name,
+            event_source,
+            importance,
+            sentiment_hint,
+            confidence,
+            dateDiff('day', today(), event_date) AS dday
+        FROM trading.earnings_calendar
+        WHERE event_date >= today() - INTERVAL {max(0, int(days_before))} DAY
+          AND event_date <= today() + INTERVAL {max(1, int(days_after))} DAY
+          AND ticker IN ({in_sql})
+        ORDER BY abs(dday) ASC, importance DESC
+        LIMIT {max(1, int(limit))}
+    """
+    )
+
+
+def get_position_snapshot_rows(limit: int = 40) -> list[dict]:
+    return ch_query(
+        f"""
+        SELECT
+            toString(snapshot_time) AS snapshot_time_s,
+            ticker,
+            ticker_name,
+            qty,
+            avg_price,
+            current_price,
+            pnl_rate,
+            eval_amount,
+            take_profit_pct,
+            stop_loss_pct,
+            pm_confidence,
+            thesis_status,
+            source
+        FROM trading.position_snapshot
+        ORDER BY snapshot_time DESC
+        LIMIT {max(1, int(limit))}
+    """
+    )
+
+
+def get_latest_decision_debug() -> dict[str, Any]:
+    rows = ch_query(
+        """
+        SELECT
+            toString(decision_time) AS decision_time_s,
+            stage_debug_json
+        FROM trading.decision_run
+        ORDER BY decision_time DESC
+        LIMIT 1
+    """
+    )
+    if not rows:
+        return {}
+    raw = rows[0]
+    out: dict[str, Any] = {"decision_time": str(raw.get("decision_time_s", "") or "")}
+    try:
+        obj = json.loads(str(raw.get("stage_debug_json") or "{}"))
+        if isinstance(obj, dict):
+            out["stage_debug"] = obj
+    except Exception:
+        out["stage_debug"] = {}
+    return out
+
+
+def build_market_scenarios(
+    regime: dict[str, Any],
+    latest_decision_debug: dict[str, Any],
+    web_market_signals: list[dict],
+) -> list[dict]:
+    posture = str(regime.get("action_posture", "normal") or "normal").lower()
+    stress_txt = str(regime.get("stress_flags", "") or "")
+    stress_cnt = len([x for x in stress_txt.split(",") if x.strip()])
+    stage_debug = latest_decision_debug.get("stage_debug", {})
+    s2 = stage_debug.get("stage2", {}) if isinstance(stage_debug, dict) else {}
+    shock = str(s2.get("shock_level", "") or "").upper()
+    has_geopolitics = any(str(x.get("topic", "")).lower() in {"geopolitics", "war", "oil", "shipping", "sanctions"} for x in web_market_signals)
+    if "geopolitical" in stress_txt.lower():
+        has_geopolitics = True
+
+    scenarios: list[dict] = []
+    if posture in {"defensive", "cautious"} or shock in {"ALERT", "EXTREME"} or stress_cnt >= 3:
+        scenarios.append(
+            {
+                "name": "bear_case",
+                "probability": 0.35,
+                "trigger": "스트레스 플래그 다수/수급 충격 지속",
+                "playbook": "신규진입 최소화, 손절/현금비중 유지, 방어주 중심",
+            }
+        )
+        scenarios.append(
+            {
+                "name": "base_case",
+                "probability": 0.45,
+                "trigger": "충격 완화 전 박스권 변동",
+                "playbook": "분할 접근, 수급 반전 확인 후 진입, 포지션 사이즈 축소",
+            }
+        )
+        scenarios.append(
+            {
+                "name": "bull_case",
+                "probability": 0.20,
+                "trigger": "지정학 완화 + 외인 수급 반전",
+                "playbook": "낙폭과대/성장주 반등 추종, 단계적 비중 확대",
+            }
+        )
+    else:
+        scenarios.append(
+            {
+                "name": "bull_case",
+                "probability": 0.35,
+                "trigger": "레짐 안정 + 리스크 플래그 제한",
+                "playbook": "상대강도 상위 종목 중심 추세 추종",
+            }
+        )
+        scenarios.append(
+            {
+                "name": "base_case",
+                "probability": 0.45,
+                "trigger": "혼조 수급/테마 순환",
+                "playbook": "watchlist 상위 선별 매매 + 빠른 리스크 관리",
+            }
+        )
+        scenarios.append(
+            {
+                "name": "bear_case",
+                "probability": 0.20,
+                "trigger": "외부 변수 재확대",
+                "playbook": "신규진입 축소 + 방어적 포지션 전환",
+            }
+        )
+    if has_geopolitics:
+        for sc in scenarios:
+            if sc["name"] in {"base_case", "bear_case"}:
+                sc["trigger"] += " (지정학 변수 포함)"
+    return scenarios
+
+
 def get_market_session_info(now: datetime) -> dict[str, str]:
     """KRX/NXT 세션 문맥 정보를 생성."""
     dow = now.weekday()  # 0=Mon
@@ -1157,8 +1430,8 @@ def format_candidates(rows: list[dict], label: str = "매수 후보") -> str:
     if not rows:
         return f"({label} 없음)"
 
-    lines = [f"| 종목코드 | 종목명 | 종가 | 등락% | RSI | MACD_H | BB% | 거래량비 | 시그널 | 점수 | 외국인보유비중 | 외국인순매수 | 기관순매수 | Research(건/유효/충돌/conf) |",
-             "|---------|--------|------|-------|-----|--------|-----|---------|--------|------|----------------|---------------|----------------|---------------------------|"]
+    lines = [f"| 종목코드 | 종목명 | 섹터 | 종가 | 등락% | RSI | MACD_H | BB% | 거래량비 | 시그널 | 점수 | 외국인보유비중 | 외국인순매수 | 기관순매수 | Research(건/유효/충돌/conf) |",
+             "|---------|--------|------|------|-------|-----|--------|-----|---------|--------|------|----------------|---------------|----------------|---------------------------|"]
 
     for r in rows:
         foreign = safe_float(r.get("foreign_ownership", 0), 0.0)
@@ -1168,8 +1441,10 @@ def format_candidates(rows: list[dict], label: str = "매수 후보") -> str:
         rs_valid = int(r.get("research_valid_cnt", 0) or 0)
         rs_conflict = int(r.get("research_conflict_cnt", 0) or 0)
         rs_conf = safe_float(r.get("research_avg_conf", 0), 0.0)
+        sector = str(r.get("sector", "") or "-")
         lines.append(
             f"| {r.get('ticker','')} | {r.get('ticker_name','')} | "
+            f"{sector} | "
             f"{format_krw(safe_float(r.get('close_price',0)))} | "
             f"{safe_float(r.get('pct',0)):.2f}% | "
             f"{safe_float(r.get('rsi',0)):.1f} | "
@@ -1181,6 +1456,86 @@ def format_candidates(rows: list[dict], label: str = "매수 후보") -> str:
             f"{rs_direct}/{rs_valid}/{rs_conflict}/{rs_conf:.2f} |"
         )
 
+    return "\n".join(lines)
+
+
+def format_decision_outcome(rows: list[dict]) -> str:
+    if not rows:
+        return "(최근 의사결정 성과 요약 없음)"
+    lines = [
+        "| ticker | 기록수 | BUY횟수 | BUY평균수익% | BUY평균MDD% | BUY평균변동성% | 최근결정시각 |",
+        "|--------|------:|--------:|-------------:|------------:|---------------:|-------------|",
+    ]
+    for r in rows:
+        lines.append(
+            f"| {r.get('ticker','')} | {int(r.get('n_records', 0) or 0)} | {int(r.get('buy_n', 0) or 0)} | "
+            f"{safe_float(r.get('avg_buy_ret_pct', 0), 0.0):.3f} | "
+            f"{safe_float(r.get('avg_buy_mdd_pct', 0), 0.0):.3f} | "
+            f"{safe_float(r.get('avg_buy_vol_pct', 0), 0.0):.3f} | "
+            f"{r.get('last_decision_time','')} |"
+        )
+    return "\n".join(lines)
+
+
+def format_decision_replay_health(rows: list[dict]) -> str:
+    if not rows:
+        return "(decision_replay 데이터 없음)"
+    lines = [
+        "| replay_status | 건수 | 평균 total diff | 최신 리플레이 시각 |",
+        "|---------------|----:|----------------:|-------------------|",
+    ]
+    for r in rows:
+        lines.append(
+            f"| {r.get('replay_status','')} | {int(r.get('n', 0) or 0)} | "
+            f"{safe_float(r.get('avg_abs_total_diff', 0), 0.0):.4f} | "
+            f"{r.get('latest_replay_time','')} |"
+        )
+    return "\n".join(lines)
+
+
+def format_earnings_calendar(rows: list[dict]) -> str:
+    if not rows:
+        return "(가까운 실적/이벤트 일정 없음)"
+    lines = [
+        "| D-day | ticker | 종목명 | 이벤트 | 중요도 | 힌트 | conf | 출처 |",
+        "|------:|--------|--------|--------|-------:|------|-----:|------|",
+    ]
+    for r in rows:
+        lines.append(
+            f"| {int(r.get('dday', 0) or 0):+d} | {r.get('ticker','')} | {r.get('ticker_name','')} | "
+            f"{str(r.get('event_name',''))[:28]} | {int(r.get('importance',0) or 0)} | "
+            f"{r.get('sentiment_hint','')} | {safe_float(r.get('confidence', 0), 0.0):.2f} | {r.get('event_source','')} |"
+        )
+    return "\n".join(lines)
+
+
+def format_position_snapshot(rows: list[dict]) -> str:
+    if not rows:
+        return "(포지션 스냅샷 없음)"
+    lines = [
+        "| 시각 | ticker | 종목명 | 수량 | 손익률% | 평가금액 | TP% | SL% | PM conf | thesis |",
+        "|------|--------|--------|----:|-------:|---------:|----:|----:|--------:|--------|",
+    ]
+    for r in rows[:80]:
+        lines.append(
+            f"| {str(r.get('snapshot_time_s',''))[:16]} | {r.get('ticker','')} | {r.get('ticker_name','')} | "
+            f"{int(safe_float(r.get('qty', 0), 0))} | {safe_float(r.get('pnl_rate',0), 0.0):.2f} | "
+            f"{safe_float(r.get('eval_amount',0), 0.0):,.0f} | "
+            f"{safe_float(r.get('take_profit_pct',0),0.0)*100:.2f} | {safe_float(r.get('stop_loss_pct',0),0.0)*100:.2f} | "
+            f"{safe_float(r.get('pm_confidence',0), 0.0):.2f} | {r.get('thesis_status','')} |"
+        )
+    return "\n".join(lines)
+
+
+def format_scenarios(rows: list[dict]) -> str:
+    if not rows:
+        return "(시나리오 없음)"
+    lines = ["| 시나리오 | 확률 | 트리거 | 대응전략 |", "|----------|-----:|--------|----------|"]
+    for r in rows:
+        lines.append(
+            f"| {r.get('name','')} | {safe_float(r.get('probability', 0), 0.0)*100:.1f}% | "
+            f"{str(r.get('trigger',''))[:48]} | {str(r.get('playbook',''))[:56]} |"
+        )
     return "\n".join(lines)
 
 
@@ -1487,6 +1842,22 @@ def build_prompt() -> str:
     investor_snapshot = get_symbol_investor_snapshot(snapshot_tickers)
     apply_investor_snapshot(top_candidates, investor_snapshot)
     apply_investor_snapshot(bottom_warnings, investor_snapshot)
+    sector_map = get_ticker_sector_map(snapshot_tickers)
+    apply_sector_map(top_candidates, sector_map)
+    apply_sector_map(bottom_warnings, sector_map)
+    earnings_calendar_rows = get_earnings_calendar_rows(
+        snapshot_tickers,
+        days_before=7,
+        days_after=30,
+        limit=PROMPT_EARNINGS_CALENDAR_LIMIT,
+    )
+    decision_outcome_rows = get_decision_outcome_recent(
+        snapshot_tickers,
+        lookback_days=45,
+        limit=PROMPT_DECISION_OUTCOME_LIMIT,
+    )
+    decision_replay_rows = get_decision_replay_health(lookback_days=30)
+    position_snapshot_rows = get_position_snapshot_rows(limit=PROMPT_POSITION_SNAPSHOT_LIMIT)
 
     # 5. 뉴스
     log.info("[5/9] 최근 뉴스 조회...")
@@ -1500,6 +1871,8 @@ def build_prompt() -> str:
     hidden_relation_reasonings = get_hidden_relation_reasonings(PROMPT_REL_REASONINGS_LIMIT, 0.20)
     news_research_recent = get_news_research_recent(72, PROMPT_NEWS_RESEARCH_LIMIT)
     web_market_signals = get_web_market_signals(PROMPT_WEB_SIGNALS_LIMIT)
+    latest_decision_debug = get_latest_decision_debug()
+    market_scenarios = build_market_scenarios(regime, latest_decision_debug, web_market_signals)
 
     # 6. DART
     log.info("[6/9] DART 공시 조회...")
@@ -1587,6 +1960,9 @@ def build_prompt() -> str:
 {dynamic_exit_table}
 - 이번 실행에서 risk_targets 작성 대상: {risk_target_tickers}
 
+## 포지션 스냅샷 (ClickHouse 동기화 최근값)
+{format_position_snapshot(position_snapshot_rows)}
+
 ## 미체결 주문
 {pending_table}
 
@@ -1595,6 +1971,12 @@ def build_prompt() -> str:
 
 ## 매도 경고 (watchList 하위 {PROMPT_WATCHLIST_BOTTOM_LIMIT}종목)
 {format_candidates(bottom_warnings, "매도 경고")}
+
+## 의사결정 성과 피드백 (최근 45일)
+{format_decision_outcome(decision_outcome_rows)}
+
+## 리플레이 일치성 헬스 (최근 30일)
+{format_decision_replay_health(decision_replay_rows)}
 
 ## 투자자 수급 보조 지표 (최근 수집 기준)
 - 종목 스냅샷 외국인 보유비중(%): v_feature_snapshot.foreign_ownership_pct
@@ -1629,6 +2011,12 @@ def build_prompt() -> str:
 ## 뉴스 심층 연구 결과 (최근 72시간)
 {_format_json_block(news_research_recent)}
 
+## 실적/이벤트 캘린더 (D-day 기준)
+{format_earnings_calendar(earnings_calendar_rows)}
+
+## 내일 대응 시나리오 (Bull/Base/Bear)
+{format_scenarios(market_scenarios)}
+
 ## 웹 보강 신호 (DB 결손 시 참고, 최근 48시간)
 {format_web_market_signals(web_market_signals)}
 
@@ -1651,6 +2039,20 @@ def build_prompt() -> str:
 {_format_json_block(hidden_relation_signals)}
 - hidden_relation_reasonings_raw:
 {_format_json_block(hidden_relation_reasonings)}
+- decision_outcome_raw:
+{_format_json_block(decision_outcome_rows)}
+- decision_replay_health_raw:
+{_format_json_block(decision_replay_rows)}
+- earnings_calendar_raw:
+{_format_json_block(earnings_calendar_rows)}
+- position_snapshot_raw:
+{_format_json_block(position_snapshot_rows)}
+- sector_map_raw:
+{_format_json_block(sector_map)}
+- market_scenarios_raw:
+{_format_json_block(market_scenarios)}
+- latest_decision_debug_raw:
+{_format_json_block(latest_decision_debug)}
 - web_market_signals_raw:
 {_format_json_block(web_market_signals)}
 - dart_alerts_raw:

@@ -130,4 +130,9 @@ def bootstrap_openclaw_env(override: bool = False) -> int:
         elif not codex_model:
             os.environ["CODEX_FALLBACK_MODEL"] = "gpt-5.3-codex"
 
+    # Force a single mcporter config path so scripts never fall back to
+    # an unintended default profile (e.g., mock account in ~/config).
+    if not (os.environ.get("MCPORTER_CONFIG", "") or "").strip():
+        os.environ["MCPORTER_CONFIG"] = str(home / ".openclaw" / "config" / "mcporter.json")
+
     return total

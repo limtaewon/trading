@@ -1697,6 +1697,51 @@ def _strip_html_for_plain(text: str) -> str:
     return s
 
 
+def _build_compact_message(decision_id: str) -> str:
+    run_rows = ch_select(
+        f"""
+SELECT
+  total_score,
+  stage0_pass,
+  stage1_pass,
+  stage2_score,
+  stage5_score,
+  absolute_block_reason
+FROM trading.decision_run
+WHERE decision_id = '{decision_id}'
+LIMIT 1
+"""
+    )
+    cand_rows = ch_select(
+        f"""
+SELECT action, count() AS n
+FROM trading.decision_candidate
+WHERE decision_id = '{decision_id}'
+GROUP BY action
+ORDER BY action
+"""
+    )
+    if not run_rows:
+        return f"📌 매매판단 요약\n- decision_id: {decision_id}\n- 상태: 데이터 조회 실패"
+
+    r = run_rows[0]
+    blocks = [str(x).strip() for x in (r.get("absolute_block_reason") or []) if str(x).strip()]
+    block_txt = ", ".join(blocks) if blocks else "-"
+    action_txt = " / ".join(
+        f"{str(x.get('action') or '-')} {int(float(x.get('n') or 0))}" for x in cand_rows
+    ) or "-"
+    return "\n".join(
+        [
+            "📌 매매판단 요약",
+            f"- decision_id: {decision_id}",
+            f"- 총점: {float(r.get('total_score') or 0):.2f}",
+            f"- Stage: S0={int(r.get('stage0_pass') or 0)} S1={int(r.get('stage1_pass') or 0)} S2={float(r.get('stage2_score') or 0):.1f} S5={float(r.get('stage5_score') or 0):.1f}",
+            f"- 후보 집계: {action_txt}",
+            f"- Absolute Block: {block_txt}",
+        ]
+    )
+
+
 def resolve_decision_id(decision_id: str) -> str:
     if decision_id:
         return decision_id
@@ -1740,6 +1785,12 @@ def main() -> int:
     ok_plain = bool(notify_plain(plain_msg))
     if ok_plain:
         _log("텔레그램 전송 성공(plain fallback)")
+        return 0
+
+    compact_msg = _build_compact_message(decision_id)
+    ok_compact = bool(notify_plain(compact_msg))
+    if ok_compact:
+        _log("텔레그램 전송 성공(compact fallback)")
         return 0
 
     _log("텔레그램 전송 실패")

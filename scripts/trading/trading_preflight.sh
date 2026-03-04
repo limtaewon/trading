@@ -5,6 +5,7 @@ set -uo pipefail
 TS="$(date '+%Y%m%d_%H%M%S')"
 LOG_DIR="$HOME/.openclaw/logs"
 LOG_FILE="$LOG_DIR/trading_preflight_${TS}.log"
+MCP_CONFIG_PATH="${MCPORTER_CONFIG:-$HOME/.openclaw/config/mcporter.json}"
 mkdir -p "$LOG_DIR"
 CODEX_CANDIDATES=(
   "openclaw"
@@ -61,7 +62,7 @@ run_kis_check() {
 
   for n in $(seq 1 "$tries"); do
     tmp_file="$(mktemp)"
-    if mcporter call "$@" --output json >"$tmp_file" 2>>"$LOG_FILE"; then
+    if mcporter --config "$MCP_CONFIG_PATH" call "$@" --output json >"$tmp_file" 2>>"$LOG_FILE"; then
       cat "$tmp_file" >>"$LOG_FILE"
       rt_cd="$(jq -r 'if type=="object" and has("rt_cd") then (.rt_cd|tostring) else "" end' "$tmp_file" 2>/dev/null || true)"
       if [ -z "$rt_cd" ] || [ "$rt_cd" = "0" ]; then
@@ -114,8 +115,8 @@ else
   ng "mcporter config missing"
 fi
 
-if mcporter list >>"$LOG_FILE" 2>&1; then
-  if mcporter list 2>/dev/null | rg -q "kis-trading" && mcporter list 2>/dev/null | rg -q "mcp-clickhouse"; then
+if mcporter --config "$MCP_CONFIG_PATH" list >>"$LOG_FILE" 2>&1; then
+  if mcporter --config "$MCP_CONFIG_PATH" list 2>/dev/null | rg -q "kis-trading" && mcporter --config "$MCP_CONFIG_PATH" list 2>/dev/null | rg -q "mcp-clickhouse"; then
     pass "MCP servers (kis-trading, mcp-clickhouse)"
   else
     ng "MCP servers (kis-trading, mcp-clickhouse)"
@@ -124,7 +125,7 @@ else
   ng "mcporter list"
 fi
 
-if mcporter call mcp-clickhouse.run_select_query query="SELECT count() FROM trading.news_raw WHERE toDate(collected_at)=today()" --output json >>"$LOG_FILE" 2>&1; then
+if mcporter --config "$MCP_CONFIG_PATH" call mcp-clickhouse.run_select_query query="SELECT count() FROM trading.news_raw WHERE toDate(collected_at)=today()" --output json >>"$LOG_FILE" 2>&1; then
   pass "ClickHouse query (news_raw today)"
 else
   ng "ClickHouse query (news_raw today)"

@@ -23,6 +23,7 @@ LOG_DIR="$HOME/.openclaw/logs"
 mkdir -p "$LOG_DIR"
 
 MODE="${1:-all}"
+ENRICH_TELEGRAM_ENABLED="${ENRICH_TELEGRAM_ENABLED:-0}"
 TG_NOTIFY_SCRIPT=""
 for candidate in \
     "$SCRIPT_DIR/telegram_notify.py" \
@@ -221,6 +222,21 @@ if [[ "$MODE" == "all" || "$MODE" == "--quick" ]]; then
     echo "  완료"
 
     echo ""
+    echo "▸ 섹터/테마 분류 보강..."
+    python3 "$SCRIPT_DIR/sync_ticker_sector.py" --limit 260 2>&1 | tail -8
+    echo "  완료"
+
+    echo ""
+    echo "▸ 포지션 스냅샷 동기화..."
+    python3 "$SCRIPT_DIR/sync_position_snapshot.py" 2>&1 | tail -8
+    echo "  완료"
+
+    echo ""
+    echo "▸ 실적 이벤트 캘린더 보강..."
+    python3 "$SCRIPT_DIR/collect_earnings_calendar.py" --days 45 2>&1 | tail -8
+    echo "  완료"
+
+    echo ""
     echo "▸ 의사결정 파이프라인(P0) 실행..."
     python3 "$SCRIPT_DIR/decision_operating_pipeline.py" --horizon INTRADAY --universe watchlist --limit 30 2>&1 | tail -10
     echo "  완료"
@@ -241,10 +257,10 @@ echo "  SELECT * FROM trading.decision_candidate WHERE decision_id='...'"
 echo "============================================================"
 
 # ─── 9. 텔레그램 요약 ─────────────────────────────────────────────
-if [[ -n "$TG_NOTIFY_SCRIPT" ]]; then
+if [[ "$ENRICH_TELEGRAM_ENABLED" == "1" && -n "$TG_NOTIFY_SCRIPT" ]]; then
     python3 "$TG_NOTIFY_SCRIPT" "📊 <b>보조 데이터 강화 완료</b> (${MODE})
 $(date '+%H:%M') | 시장데이터+기술지표+레짐+DART
 → gpt-5.2 HEARTBEAT 준비 완료" >/dev/null 2>&1 || echo "  텔레그램 요약: 전송 실패(비치명)"
-else
+elif [[ "$ENRICH_TELEGRAM_ENABLED" == "1" ]]; then
     echo "  텔레그램 요약: telegram_notify 스크립트 미발견(스킵)"
 fi

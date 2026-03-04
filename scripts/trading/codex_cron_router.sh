@@ -367,8 +367,15 @@ if [[ "$STATUS" == "ok" && "$PAYLOAD_KIND" == "systemEvent" && "$JOB_NAME" != co
 fi
 
 # 매매 판단 결과를 텔레그램에 남긴다(실패해도 본잡은 유지).
-if [[ "$STATUS" == "ok" && "$PAYLOAD_KIND" == "systemEvent" && "$JOB_NAME" != coin-* ]]; then
-    send_decision_telegram_brief || true
+# - 성공: 항상 전송
+# - 실패: order execution 단계 실패일 때도 최신 판단 브리핑을 전송해 운영자가 판단 내용을 추적 가능하게 한다.
+if [[ "$PAYLOAD_KIND" == "systemEvent" && "$JOB_NAME" != coin-* ]]; then
+    if [[ "$STATUS" == "ok" ]]; then
+        send_decision_telegram_brief || true
+    elif [[ "${TELEGRAM_DECISION_ON_ERROR:-1}" == "1" && "$ERROR_MSG" == "order execution stage failed" ]]; then
+        log "decision telegram on error path (reason='$ERROR_MSG')"
+        send_decision_telegram_brief || true
+    fi
 fi
 
 # 긴급 뉴스 트리거는 1회 처리 후 컨텍스트를 삭제해 재처리를 방지한다.

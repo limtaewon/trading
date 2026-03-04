@@ -83,6 +83,9 @@
 ### 4-1. `enrich_data.sh`
 - `collect_market_data.py`, `technical_indicators.py`, `market_regime.py`, `collect_dart.py`를 오케스트레이션한다.
 - `sync_normalized_flow_daily.py`로 `stock_flow_daily`/`market_flow_daily`를 정규화 갱신한다.
+- `sync_ticker_sector.py`로 섹터/테마 스냅샷(`ticker_sector`)을 갱신한다.
+- `sync_position_snapshot.py`로 KIS 잔고+포지션매니저 상태를 `position_snapshot`에 동기화한다.
+- `collect_earnings_calendar.py`로 DART/뉴스 기반 실적·이벤트 캘린더(`earnings_calendar`)를 갱신한다.
 - 장전 시간대(09:00 이전)에는 뉴스 신선도 보장을 위해 `cluster_news.py -> hidden_relation_scorer.py -> llm_relation_reasoner.py` 체인을 선행 실행한다.
 - 장전 신선도 체인은 `FORCE_RELATION_CHAIN=1`로 강제 실행 가능하며, `PREMARKET_RELATION_CHAIN_STRICT=1`(기본)일 때 실패 시 파이프라인을 중단한다.
 - `hidden_relation_scorer.py`로 최신 연관 점수 스냅샷(`hidden_relation_signals`)을 watchlist 산출 직전에 갱신한다.
@@ -253,6 +256,11 @@ python3 ~/.openclaw/scripts/trading/build_decision_outcome.py --lookback-days 45
 
 # 8) Outcome A/B 비교(적용 전후 구간 성능 비교)
 python3 ~/.openclaw/scripts/trading/report_decision_outcome_ab.py --lookback-days 30 --horizon 3
+
+# 9) 보고서 확장 데이터 동기화(수동)
+python3 ~/.openclaw/scripts/trading/sync_ticker_sector.py --limit 260
+python3 ~/.openclaw/scripts/trading/sync_position_snapshot.py
+python3 ~/.openclaw/scripts/trading/collect_earnings_calendar.py --days 45
 ```
 
 ## 9) 보안 운영
@@ -275,11 +283,13 @@ python3 ~/.openclaw/scripts/trading/report_decision_outcome_ab.py --lookback-day
 | `decision_candidate` | 티커별 행동(BUY/HOLD/REDUCE) 및 근거코드 | `decision_operating_pipeline.py`(INSERT) | 운영 점검/전략 튜닝 |
 | `decision_replay` | `decision_run` 재집계 일치성(PASS/FAIL) 검증 로그 | `replay_decision.py`(INSERT) | 운영 감사/리플레이 검증 |
 | `decision_outcome` | 후보별 사후 성과(N일 수익률/MDD/변동성) 로그 | `build_decision_outcome.py`(INSERT) | 성과분석/가중치 튜닝 |
+| `report_prediction` | 브리핑 시점 추천 종목/방향 스냅샷 | `send_dooray_briefing.py`(INSERT) | 브리핑 적중률/사후 검증 |
 | `order_log` | 주문 시도/성공/스킵 사유 감사 로그 | `execute_gpt_orders.py`(INSERT) | `stock_rag_report_api.py` |
 | `execution_pred` | 체결확률/슬리피지 추정치 기록 | `execute_gpt_orders.py`(INSERT) | 운영 감사/분석 |
 | `kill_switch_event` | kill-switch/가드레일 발동 이력 | `execute_gpt_orders.py`(INSERT) | 운영 감사/리스크 추적 |
 | `position_review_run` | 포지션 매니저 실행 단위 리뷰 로그 | `manage_positions.py`(INSERT) | 보유관리 회고/튜닝 |
 | `position_review_action` | 포지션 매니저 티커별 액션 로그 | `manage_positions.py`(INSERT) | 보유관리 회고/튜닝 |
+| `position_snapshot` | 보유 종목 수량/손익/TP·SL 시점 스냅샷 | `sync_position_snapshot.py`(INSERT) | 프롬프트/브리핑/운영 점검 |
 | `session_calendar` | 장 세션(정규/경매/NXT) 판정 기준 | 운영 기준 테이블 | `execute_gpt_orders.py` |
 
 ### 10-2. 뉴스/이벤트 파이프라인
@@ -301,6 +311,7 @@ python3 ~/.openclaw/scripts/trading/report_decision_outcome_ab.py --lookback-day
 | `hidden_relation_signals` | 종목 간 숨은 연관성 점수/바이어스/품질(`relation_quality`) | 연관성 파이프라인 산출물 | `prepare_gpt_prompt.py`, `refresh_interest_watchlist.py`, `send_dooray_briefing.py`, `execute_gpt_orders.py` |
 | `hidden_relation_reasoning` | 연관성 인과체인 텍스트 추론 결과 | `llm_relation_reasoner.py`(CREATE/INSERT) | `prepare_gpt_prompt.py`, `execute_gpt_orders.py`(뷰 경유 포함) |
 | `interest_watchlist` | 점수 기반 관심종목 스냅샷 | `refresh_interest_watchlist.py` | 운영 모니터링/브리핑 |
+| `ticker_sector` | 티커별 섹터/서브섹터/테마 태그 스냅샷 | `sync_ticker_sector.py`(INSERT) | 프롬프트/브리핑/섹터 분석 |
 
 ### 10-4. 시장/기술/거시 데이터
 | 테이블 | 역할 | 주 생성/갱신 스크립트 | 주 사용 스크립트 |
@@ -316,6 +327,7 @@ python3 ~/.openclaw/scripts/trading/report_decision_outcome_ab.py --lookback-day
 | `market_flow_daily` | 시장 일별 정규화 수급(시장/전체 집계) | `sync_normalized_flow_daily.py` | `decision_operating_pipeline.py` |
 | `investor_flow` | 레거시 투자주체 수급(브리핑 호환) | 외부 수집 또는 `sync_normalized_flow_daily.py --sync-legacy-investor-flow` | `market_briefing.py` |
 | `dart_disclosure` | DART 공시 원천/정규화 저장 | `collect_dart.py` | `prepare_gpt_prompt.py`, `technical_indicators.py` |
+| `earnings_calendar` | 실적발표/실적 관련 이벤트 캘린더(D-day) | `collect_earnings_calendar.py`(INSERT) | 프롬프트/브리핑/이벤트 대응 |
 
 `feature_snapshot` 컬럼 의미(운영 기준):
 - `foreign_flow`: 외국인 보유비중(%)
