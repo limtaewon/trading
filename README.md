@@ -5,7 +5,7 @@
 
 ## 1) 시스템 목적
 - 장중/장전 스케줄에 맞춰 자동으로 시장 데이터를 수집한다.
-- OpenClaw Agent(`gpt-5.3-codex-spark`)로 매매 판단 JSON을 생성한다.
+- OpenClaw Agent(`gpt-5.3-codex-spark`, `gpt-5.3-codex` )로 매매 판단 JSON을 생성한다.
 - JSON 주문안을 규칙 기반 검증 후 KIS MCP로 실제 주문한다.
 - 긴급 속보 발생 시 즉시 판단 루프를 재트리거한다.
 
