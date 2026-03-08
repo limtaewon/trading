@@ -87,6 +87,15 @@ def _join_str_list(value: Any, sep: str = ", ") -> str:
     return str(value).strip()
 
 
+def _public_name(value: Any, fallback: str = "해당 종목") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    if text.isdigit():
+        return fallback
+    return text
+
+
 def _relation_strength_label(score: float) -> str:
     if score >= 7.0:
         return "매우 강한 편"
@@ -281,7 +290,7 @@ def _build_watchlist_block(as_of: date) -> dict[str, Any]:
         watch_items.append(
             {
                 "ticker": code,
-                "name": stock_names.get(code, code),
+                "name": _public_name(stock_names.get(code, "")),
                 "action": str(row.get("action") or "").strip(),
                 "rank": int(float(row.get("rank") or 0)),
             }
@@ -293,7 +302,7 @@ def _build_watchlist_block(as_of: date) -> dict[str, Any]:
         top_buy_items.append(
             {
                 "ticker": code,
-                "name": stock_names.get(code, code),
+                "name": _public_name(stock_names.get(code, "")),
                 "action": str(row.get("action") or "").strip(),
                 "score": _to_float(row.get("total_score")),
                 "target_weight_pct": _to_float(row.get("target_weight")) * 100.0,
@@ -708,7 +717,7 @@ def _build_external_research(
                 "cluster_summaries": bucket["cluster_summaries"][:2],
                 "relation_summaries": bucket["reasoning_summaries"][:2],
                 "related_tickers": sorted(bucket["relation_tickers"])[:6],
-                "related_ticker_names": [stock_names.get(code, code) for code in sorted(bucket["relation_tickers"])[:6]],
+                "related_ticker_names": [_public_name(stock_names.get(code, "")) for code in sorted(bucket["relation_tickers"])[:6]],
                 "freshest_relation_source_at": bucket["freshest_relation_source_at"],
             }
         )
@@ -796,7 +805,7 @@ def _build_relation_context(
         top_signals.append(
             {
                 "ticker": code,
-                "name": str(row.get("ticker_name") or "").strip(),
+                "name": _public_name(row.get("ticker_name")),
                 "effective_relation_score": effective,
                 "relation_quality": quality,
                 "relation_bias": bias,
@@ -814,7 +823,7 @@ def _build_relation_context(
                 "freshness_text": freshness_text,
                 "channel_reason": channel_reason,
                 "why_candidate": _relation_why_candidate(
-                    str(row.get("ticker_name") or code).strip(),
+                    _public_name(row.get("ticker_name")),
                     bias=bias,
                     strength_label=strength_label,
                     quality_label=quality_label,

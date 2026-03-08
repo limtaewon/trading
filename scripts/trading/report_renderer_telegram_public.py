@@ -10,6 +10,15 @@ def _ctx(payload: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _public_name(value: Any, fallback: str = "해당 종목") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    if text.isdigit():
+        return fallback
+    return text
+
+
 def _fmt_num(value: float, digits: int = 2) -> str:
     return f"{value:,.{digits}f}"
 
@@ -188,7 +197,7 @@ def render_public_market_message(payload: dict[str, Any]) -> str:
         for candidate in top_candidates[:2]:
             if not isinstance(candidate, dict):
                 continue
-            name = str(candidate.get("name") or candidate.get("ticker") or "-").strip()
+            name = _public_name(candidate.get("name"))
             reason = _candidate_public_reason(candidate)
             watch_lines.append(f"- {name}: {reason} 지금은 바로 추격하기보다 흐름이 이어지는지 확인이 먼저입니다.")
             watch_lines.append("")
@@ -196,7 +205,7 @@ def render_public_market_message(payload: dict[str, Any]) -> str:
         for relation in top_relations[:2]:
             if not isinstance(relation, dict):
                 continue
-            name = str(relation.get("name") or relation.get("ticker") or "-").strip()
+            name = _public_name(relation.get("name"))
             why = str(relation.get("why_candidate") or "").strip()
             if why:
                 watch_lines.append(f"- {name}: {why} 지금은 신규 진입보다 확인과 관찰이 우선입니다.")

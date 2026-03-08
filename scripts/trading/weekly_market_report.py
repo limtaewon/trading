@@ -61,6 +61,13 @@ def pct_change(start: float | None, end: float | None) -> float | None:
     return (float(end) / float(start) - 1.0) * 100.0
 
 
+def public_name(value: Any, fallback: str = "해당 종목") -> str:
+    text = str(value or "").strip()
+    if not text or text.isdigit():
+        return fallback
+    return text
+
+
 def load_stock_names() -> dict[str, str]:
     mapping: dict[str, str] = {}
     if not STOCKS_CSV.exists():
@@ -458,7 +465,7 @@ def build_report(as_of: date) -> tuple[str, Path]:
         lines.append("5) 우선 감시 리스트")
         for row in latest_watchlist[:5]:
             code = str(row.get("ticker") or "").strip()
-            name = stock_names.get(code, code)
+            name = public_name(stock_names.get(code, ""))
             action = str(row.get("action") or "").strip()
             lines.append(f"- {name} | {action}")
             lines.append("")
@@ -469,7 +476,7 @@ def build_report(as_of: date) -> tuple[str, Path]:
         reasoning_map = {str(r.get("ticker") or "").strip(): r for r in relation_reasonings}
         for row in relation_rows[:5]:
             code = str(row.get("ticker") or "").strip()
-            name = stock_names.get(code, str(row.get("ticker_name") or code))
+            name = public_name(stock_names.get(code, row.get("ticker_name") or ""))
             quality = float(row.get("relation_quality") or 0.0)
             eff = float(row.get("effective_relation_score") or 0.0)
             support_events = int(float(row.get("support_events") or 0))
@@ -507,7 +514,7 @@ def build_report(as_of: date) -> tuple[str, Path]:
         lines.append("7) 금요일 기준 내부 BUY 상위")
         for row in top_decisions[:5]:
             code = str(row.get("ticker") or "").strip()
-            name = stock_names.get(code, code)
+            name = public_name(stock_names.get(code, ""))
             score = float(row.get("total_score") or 0.0)
             weight = float(row.get("target_weight") or 0.0) * 100.0
             lines.append(f"- {name} | score {score:.1f} | target {weight:.1f}%")

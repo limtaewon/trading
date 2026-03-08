@@ -86,6 +86,13 @@ def _to_str(v: Any, default: str = "") -> str:
     return s if s else default
 
 
+def _public_name(v: Any, fallback: str = "해당 종목") -> str:
+    s = str(v or "").strip()
+    if not s or s.isdigit():
+        return fallback
+    return s
+
+
 def _parse_json_obj(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return raw
@@ -611,7 +618,7 @@ def _build_candidate_context(candidate_rows: list[dict[str, Any]], mode_context:
         score = _to_float(row.get("total_score"))
         item = {
             "ticker": _normalize_ticker_field(row),
-            "name": _to_str(row.get("ticker_name"), "-"),
+            "name": _public_name(row.get("ticker_name")),
             "sector_bucket": _to_str(row.get("rel_bias"), "neutral"),
             "decision_score": score,
             "signal_grade": _score_band(score),
@@ -830,7 +837,7 @@ def _build_relation_context(
             _to_str(reason.get("source_max_published_at")),
             _to_str(reason.get("source_max_cluster_asof_ts")),
         )
-        name = _to_str(row.get("ticker_name"), code)
+        name = _public_name(row.get("ticker_name"))
         channels = row.get("top_channels") or []
         channel_text = _relation_channel_text(channels)
         channel_reason = _relation_channel_reason(channels, bias)
