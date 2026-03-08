@@ -234,12 +234,22 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "data-execution-mode-3m",
+            "enabled": True,
+            "schedule": {"expr": "*/3 8-15 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/market_execution_mode.py >> {logs}/execution-mode.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "position-manager-20m",
             "enabled": True,
             "schedule": {"expr": "*/20 9-15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
-                "command": f'{env} && {py} {trading_scripts}/manage_positions.py --execute >> {logs}/position-manager.log 2>&1',
+                "command": f'{env} && {py} {trading_scripts}/market_execution_mode.py >> {logs}/execution-mode.log 2>&1 && {py} {trading_scripts}/manage_positions.py --execute >> {logs}/position-manager.log 2>&1',
             },
             "source": "legacy-crontab",
         },
@@ -251,6 +261,7 @@ def data_jobs() -> list[dict]:
                 "kind": "command",
                 "command": (
                     f'{env} && '
+                    f'{py} {trading_scripts}/market_execution_mode.py >> {logs}/execution-mode.log 2>&1 && '
                     'DECISION_STAGE0_ONLY_CONSTRAINTS="${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}" '
                     f'{py} {trading_scripts}/decision_operating_pipeline.py --horizon INTRADAY --universe watchlist --limit 30 '
                     f'>> {logs}/decision-operating.log 2>&1 && '

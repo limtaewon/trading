@@ -45,6 +45,9 @@ STATE_DIR = HOME / ".openclaw" / "state" / "codex_brain"
 KILL_STATE_FILE = HOME / ".openclaw" / "state" / "kill_switch_state.json"
 ADAPTIVE_POLICY_FILE = HOME / ".openclaw" / "state" / "adaptive_policy.json"
 EXIT_STATE_FILE = HOME / ".openclaw" / "state" / "stock_dynamic_exits.json"
+EXECUTION_MODE_FILE = HOME / ".openclaw" / "state" / "market_execution_mode.json"
+PENDING_EXIT_FILE = HOME / ".openclaw" / "state" / "pending_exit_orders.json"
+EXEC_RETRY_STATE_FILE = HOME / ".openclaw" / "state" / "execution_retry_state.json"
 EXEC_DIR = STATE_DIR / "executions"
 JOURNAL_FILE = STATE_DIR / "events.jsonl"
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://localhost:8123")
@@ -78,6 +81,10 @@ ENABLE_DYNAMIC_EXIT_ENFORCEMENT = os.getenv("ENABLE_DYNAMIC_EXIT_ENFORCEMENT", "
 DYNAMIC_EXIT_COOLDOWN_MIN = max(1, int(os.getenv("DYNAMIC_EXIT_COOLDOWN_MIN", "120")))
 DYNAMIC_EXIT_MAX_TP = float(os.getenv("DYNAMIC_EXIT_MAX_TP", "0.60"))
 DYNAMIC_EXIT_MAX_SL_ABS = float(os.getenv("DYNAMIC_EXIT_MAX_SL_ABS", "0.60"))
+EXECUTION_MODE_STALE_MIN = max(3, int(os.getenv("EXECUTION_MODE_STALE_MIN", "20")))
+PENDING_EXIT_TTL_HOURS = max(1, int(os.getenv("PENDING_EXIT_TTL_HOURS", "72")))
+PENDING_EXIT_MAX_REPLAY_PER_RUN = max(1, int(os.getenv("PENDING_EXIT_MAX_REPLAY_PER_RUN", "8")))
+PENDING_EXIT_MAX_ATTEMPTS = max(1, int(os.getenv("PENDING_EXIT_MAX_ATTEMPTS", "12")))
 TP_PARTIAL_SELL_RATIO = float(os.getenv("TP_PARTIAL_SELL_RATIO", "0.50"))
 _HARD_STOP_LOSS_ENV = os.getenv("HARD_EMERGENCY_STOP_LOSS_PCT", "-0.08").strip()
 try:
@@ -224,6 +231,21 @@ def _normalize_exit_pair(tp_raw: Any, sl_raw: Any) -> tuple[float, float] | None
     return round(tp, 6), round(sl, 6)
 
 
+def load_json_file(path: Path, default: Any) -> Any:
+    try:
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return raw
+    except Exception:
+        pass
+    return default
+
+
+def save_json_file(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def load_exit_state() -> dict[str, Any]:
     base = {"updated_at": "", "positions": {}}
     try:
@@ -237,6 +259,211 @@ def load_exit_state() -> dict[str, Any]:
     except Exception:
         pass
     return base
+
+
+def load_execution_mode() -> dict[str, Any]:
+    default = {
+        "execution_mode": "normal",
+        "allowed_universe": "watchlist",
+        "allowed_tickers": [],
+        "max_new_positions": 3,
+        "max_buys_per_run": 3,
+        "avg_down_block": True,
+        "sell_urgency": "normal",
+        "llm_style": "stock_selection",
+        "updated_at": "",
+        "shock_level": "UNKNOWN",
+        "hard_riskoff": False,
+    }
+    raw = load_json_file(EXECUTION_MODE_FILE, default)
+    if not isinstance(raw, dict):
+        raw = dict(default)
+    mode = {**default, **raw}
+    updated = parse_kst_dt(str(mode.get("updated_at", "") or ""))
+    if updated is not None:
+        age_min = max(0.0, (now_kst() - updated).total_seconds() / 60.0)
+        mode["stale"] = age_min > EXECUTION_MODE_STALE_MIN
+        mode["age_min"] = round(age_min, 2)
+    else:
+        mode["stale"] = True
+        mode["age_min"] = None
+    allowed = mode.get("allowed_tickers", [])
+    if not isinstance(allowed, list):
+        allowed = []
+    mode["allowed_tickers"] = [str(x).strip() for x in allowed if is_six_digit_ticker(str(x).strip())]
+    return mode
+
+
+def load_pending_exit_orders() -> list[dict[str, Any]]:
+    rows = load_json_file(PENDING_EXIT_FILE, [])
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, Any]] = []
+    now_dt = now_kst()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        queued_at = parse_kst_dt(str(row.get("queued_at", "") or ""))
+        attempts = to_int(row.get("replay_attempts", 0), 0)
+        if queued_at is not None:
+            age_h = max(0.0, (now_dt - queued_at).total_seconds() / 3600.0)
+            if age_h > PENDING_EXIT_TTL_HOURS:
+                continue
+        if attempts >= PENDING_EXIT_MAX_ATTEMPTS:
+            continue
+        out.append(row)
+    return out
+
+
+def save_pending_exit_orders(rows: list[dict[str, Any]]) -> None:
+    save_json_file(PENDING_EXIT_FILE, rows)
+
+
+def pending_exit_signature(item: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(item.get("action", "") or ""),
+            str(item.get("ticker", "") or ""),
+            str(item.get("quantity", "") or ""),
+            str(item.get("strategy_family", "") or ""),
+            str(item.get("event_type", "") or ""),
+            str(item.get("reasoning", "") or "")[:80],
+        ]
+    )
+
+
+def enqueue_pending_exit(item: dict[str, Any], reason: str) -> int:
+    queued = load_pending_exit_orders()
+    sig = pending_exit_signature(item)
+    existing = {str(r.get("queue_signature", "") or "") for r in queued if isinstance(r, dict)}
+    if sig not in existing:
+        queued.append(
+            {
+                **item,
+                "queued_at": _now_kst_str(),
+                "queue_reason": reason,
+                "queue_signature": sig,
+                "replay_attempts": 0,
+            }
+        )
+        save_pending_exit_orders(queued)
+    return len(queued)
+
+
+def merge_pending_exit_orders(orders: list[dict[str, Any]], session_id: str) -> tuple[list[dict[str, Any]], int]:
+    queued = load_pending_exit_orders()
+    if not queued:
+        return orders, 0
+    if session_id not in ACTIVE_SESSIONS:
+        return orders, len(queued)
+    existing_sig = {pending_exit_signature(o) for o in orders if isinstance(o, dict)}
+    replay: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    replay_count = 0
+    for row in queued:
+        if not isinstance(row, dict):
+            continue
+        sig = str(row.get("queue_signature", "") or pending_exit_signature(row))
+        if sig in existing_sig:
+            kept.append(row)
+            continue
+        if replay_count >= PENDING_EXIT_MAX_REPLAY_PER_RUN:
+            kept.append(row)
+            continue
+        replay.append({k: v for k, v in row.items() if k not in {"queued_at", "queue_reason", "queue_signature", "replay_attempts", "last_replayed_at"}})
+        row["replay_attempts"] = to_int(row.get("replay_attempts", 0), 0) + 1
+        row["last_replayed_at"] = _now_kst_str()
+        kept.append(row)
+        replay_count += 1
+    if replay:
+        orders = replay + orders
+    save_pending_exit_orders(kept)
+    return orders, len(replay)
+
+
+def load_retry_state() -> dict[str, Any]:
+    raw = load_json_file(EXEC_RETRY_STATE_FILE, {"orders": {}})
+    if isinstance(raw, dict):
+        orders = raw.get("orders", {})
+        if isinstance(orders, dict):
+            return {"orders": orders}
+    return {"orders": {}}
+
+
+def save_retry_state(state: dict[str, Any]) -> None:
+    save_json_file(EXEC_RETRY_STATE_FILE, state)
+
+
+def record_retry_state(state: dict[str, Any], item: dict[str, Any], reason: str) -> None:
+    orders = state.setdefault("orders", {})
+    if not isinstance(orders, dict):
+        orders = {}
+        state["orders"] = orders
+    sig = pending_exit_signature(item)
+    row = orders.get(sig, {})
+    if not isinstance(row, dict):
+        row = {}
+    row["ticker"] = str(item.get("ticker", "") or "")
+    row["action"] = str(item.get("action", "") or "")
+    row["reason"] = reason
+    row["attempts"] = to_int(row.get("attempts", 0), 0) + 1
+    row["updated_at"] = _now_kst_str()
+    orders[sig] = row
+
+
+def refresh_live_holding(holdings: dict[str, "Holding"], ticker: str) -> "Holding":
+    try:
+        _, _, rows = load_balance(max_retries=1)
+        latest = build_holdings_map(rows)
+        holdings.clear()
+        holdings.update(latest)
+    except Exception:
+        pass
+    return holdings.get(ticker, Holding(qty=0, eval_amt=0.0))
+
+
+def allowed_buy_in_mode(mode_state: dict[str, Any], ticker: str) -> bool:
+    mode = str(mode_state.get("execution_mode", "normal") or "normal")
+    allowed = set(mode_state.get("allowed_tickers", []) or [])
+    if mode == "close_only":
+        return False
+    if mode in {"shock", "recovery"}:
+        return ticker in allowed
+    return True
+
+
+def compute_order_priority(item: dict[str, Any]) -> int:
+    action = str(item.get("action", "") or "").upper()
+    event_type = str(item.get("event_type", "") or "").lower()
+    strategy_family = str(item.get("strategy_family", "") or "").lower()
+    explicit = to_int(item.get("priority", 0), 0)
+    if explicit > 0:
+        return explicit
+    if action == "SELL" and event_type == "hard_exit":
+        return 100
+    if action == "SELL" and event_type == "dynamic_exit":
+        return 95
+    if action == "SELL" and strategy_family == "forced_exit":
+        return 90
+    if action == "SELL":
+        return 70
+    if strategy_family in {"shock_hedge", "index_etf"}:
+        return 50
+    return 30
+
+
+def order_strategy_family(item: dict[str, Any], mode_state: dict[str, Any], action: str) -> str:
+    family = str(item.get("strategy_family", "") or "").strip()
+    if family:
+        return family
+    mode = str(mode_state.get("execution_mode", "normal") or "normal")
+    if action == "SELL":
+        return "forced_exit" if str(item.get("event_type", "") or "") in {"hard_exit", "dynamic_exit"} else "core_defensive"
+    if mode == "shock":
+        return "shock_hedge"
+    if mode == "recovery":
+        return "shock_rebound"
+    return "stock_selection"
 
 
 def collect_existing_sell_tickers(existing_orders: list[dict[str, Any]]) -> set[str]:
@@ -1397,6 +1624,56 @@ def resolve_order_price(ticker: str, action: str, price_type: str, raw_price: in
     return int(raw_price)
 
 
+def build_order_attempt_specs(
+    *,
+    ticker: str,
+    action: str,
+    qty: int,
+    order_type: str,
+    price_type: str,
+    raw_price: int,
+    venue: str,
+    is_hard_exit: bool,
+) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = [
+        {
+            "label": "primary",
+            "order_type": order_type,
+            "price_type": price_type,
+            "raw_price": raw_price,
+        }
+    ]
+    if action == "SELL":
+        if order_type == "LIMIT" and price_type != "bidp1":
+            specs.append(
+                {
+                    "label": "sell_limit_bidp1_retry",
+                    "order_type": "LIMIT",
+                    "price_type": "bidp1",
+                    "raw_price": 0,
+                }
+            )
+        if order_type != "MARKET":
+            specs.append(
+                {
+                    "label": "sell_market_retry",
+                    "order_type": "MARKET",
+                    "price_type": "bidp1",
+                    "raw_price": 0,
+                }
+            )
+    elif is_hard_exit and order_type != "MARKET":
+        specs.append(
+            {
+                "label": "hard_exit_market_fallback",
+                "order_type": "MARKET",
+                "price_type": "bidp1" if action == "SELL" else "askp1",
+                "raw_price": 0,
+            }
+        )
+    return specs
+
+
 def resolve_quantity(order: dict[str, Any]) -> int:
     q = to_int(order.get("quantity", 0), 0)
     if q > 0:
@@ -1660,6 +1937,7 @@ def main() -> int:
         print(json.dumps({"status": "error", "reason": "invalid_total_asset"}))
         return 1
     adaptive_policy = load_adaptive_policy()
+    execution_mode = load_execution_mode()
     min_cash = total_asset * to_float(adaptive_policy.get("min_cash_ratio", 0.15), 0.15)
     base_per_order_cap = float(BASE_PER_ORDER_CAP_KRW)
     per_order_cap = 0.0
@@ -1707,6 +1985,12 @@ def main() -> int:
     if protection_orders:
         # 보호매도는 일반 주문보다 우선순위를 높인다.
         orders = protection_orders + orders
+    orders, replayed_pending_exit_count = merge_pending_exit_orders(orders, session_id=detect_market_session())
+    orders = sorted(
+        orders,
+        key=lambda row: compute_order_priority(row if isinstance(row, dict) else {}),
+        reverse=True,
+    )
     decision_id = now_kst().strftime("%Y%m%d_%H%M%S")
     kill_state = load_kill_state()
     kill_name = str(kill_state.get("state", "NORMAL")).upper()
@@ -1741,6 +2025,12 @@ def main() -> int:
     attempted: list[dict[str, Any]] = []
     executed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    retry_state = load_retry_state()
+    mode_name = str(execution_mode.get("execution_mode", "normal") or "normal")
+    max_buys_per_run = max(0, to_int(execution_mode.get("max_buys_per_run", 3), 3))
+    max_new_positions = max(0, to_int(execution_mode.get("max_new_positions", 3), 3))
+    buy_count_this_run = 0
+    new_position_buy_count = 0
 
     for idx, o in enumerate(orders, start=1):
         action = str(o.get("action", "")).upper().strip()
@@ -1763,6 +2053,8 @@ def main() -> int:
         order_type = str(o.get("order_type", "LIMIT")).upper().strip() or "LIMIT"
         event_signature = str(o.get("event_signature", "") or "").strip()[:64]
         event_type = str(o.get("event_type", "") or "").strip()[:40]
+        strategy_family = order_strategy_family(o, execution_mode, action)
+        close_only = bool(o.get("close_only", False))
         time_horizon = str(o.get("time_horizon", "") or "").strip()[:16].lower()
         lag_hours = max(0, min(336, to_int(o.get("lag_hours", 0), 0)))
         channels = normalize_text_list(o.get("channels", []), max_items=8, max_len=24)
@@ -1844,12 +2136,20 @@ def main() -> int:
             "relation_reasoning_chain": (relation_reasoning.get("causal_chain", "") if relation_reasoning else "")[:120],
             "relation_reasoning_summary": (relation_reasoning.get("summary", "") if relation_reasoning else "")[:160],
             "rule_reason": rule_reason,
+            "execution_mode": mode_name,
+            "strategy_family": strategy_family,
+            "close_only": close_only,
         }
         attempted.append(item)
 
         # 기본 검증
         if action not in {"BUY", "SELL"}:
             skipped.append({**item, "reason": "invalid_action"})
+            continue
+        if action == "SELL" and session_id not in ACTIVE_SESSIONS and not args.dry_run:
+            queued_count = enqueue_pending_exit(item, f"market_closed:{session_id}")
+            skipped.append({**item, "reason": f"queued_exit_market_closed:{session_id}", "queue_depth": queued_count})
+            record_retry_state(retry_state, item, f"queued_exit_market_closed:{session_id}")
             continue
         if session_id not in ACTIVE_SESSIONS:
             skipped.append({**item, "reason": f"market_closed:{session_id}"})
@@ -1866,6 +2166,9 @@ def main() -> int:
         if action == "BUY" and kill_name in {"HALT_NEW", "CLOSE_ONLY", "PANIC_FLATTEN"}:
             skipped.append({**item, "reason": f"kill_switch_state:{kill_name}"})
             continue
+        if action == "BUY" and (close_only or mode_name == "close_only"):
+            skipped.append({**item, "reason": "execution_mode_close_only"})
+            continue
         if not is_six_digit_ticker(ticker):
             skipped.append({**item, "reason": "invalid_ticker"})
             continue
@@ -1874,6 +2177,9 @@ def main() -> int:
             continue
         if conf < min_confidence:
             skipped.append({**item, "reason": "low_confidence"})
+            continue
+        if action == "BUY" and not allowed_buy_in_mode(execution_mode, ticker):
+            skipped.append({**item, "reason": f"execution_mode_universe_block:{mode_name}"})
             continue
         if action == "BUY" and STAGE2_EXTREME_BLOCK_ENABLED:
             if str(stage2_market_shock.get("shock_level", "UNKNOWN")) == "EXTREME":
@@ -1907,20 +2213,28 @@ def main() -> int:
             skipped.append({**item, "reason": "daily_order_limit_reached"})
             continue
 
-        # 가격 결정
-        try:
-            order_price = resolve_order_price(ticker, action, price_type, raw_price)
-        except Exception as e:
-            skipped.append({**item, "reason": f"price_resolution_failed:{e}"})
-            continue
-        if order_price <= 0 and order_type != "MARKET":
-            skipped.append({**item, "reason": "invalid_order_price"})
-            continue
-
-        order_value = order_price * qty
         hold = holdings.get(ticker, Holding(qty=0, eval_amt=0.0))
+        if action == "SELL":
+            hold = refresh_live_holding(holdings, ticker)
+            if hold.qty <= 0:
+                skipped.append({**item, "reason": "reconciliation_holding_zero"})
+                record_retry_state(retry_state, item, "reconciliation_holding_zero")
+                continue
+            if hold.qty < qty:
+                qty = hold.qty
+                item["quantity"] = int(qty)
+        if action == "BUY" and hold.qty > 0 and hold.pnl_rate < 0 and bool(execution_mode.get("avg_down_block", True)):
+            skipped.append({**item, "reason": "avg_down_block"})
+            continue
+        order_value_est = max(raw_price, 0) * qty
 
         if action == "BUY":
+            if buy_count_this_run >= max_buys_per_run:
+                skipped.append({**item, "reason": "execution_mode_buy_budget_exceeded"})
+                continue
+            if hold.qty <= 0 and new_position_buy_count >= max_new_positions:
+                skipped.append({**item, "reason": "execution_mode_new_position_limit"})
+                continue
             if kst_time_hhmm() >= 1510:
                 skipped.append({**item, "reason": "buy_cutoff_after_1510"})
                 continue
@@ -1931,61 +2245,66 @@ def main() -> int:
             if eps is not None and eps < 0:
                 skipped.append({**item, "reason": f"negative_eps:{eps}"})
                 continue
-            if per_order_cap > 0 and order_value > per_order_cap:
+            if per_order_cap > 0 and order_value_est > per_order_cap:
                 skipped.append({**item, "reason": "per_order_cap_exceeded"})
                 continue
-            if (cash - order_value) < min_cash:
+            if (cash - order_value_est) < min_cash:
                 skipped.append({**item, "reason": "min_cash_ratio_violation"})
                 continue
-            if total_asset > 0 and ((hold.eval_amt + order_value) / total_asset) > position_weight_limit:
+            if total_asset > 0 and ((hold.eval_amt + order_value_est) / total_asset) > position_weight_limit:
                 skipped.append({**item, "reason": "position_weight_limit_violation"})
                 continue
-        else:
-            if hold.qty < qty:
-                skipped.append({**item, "reason": "insufficient_holding_qty"})
-                continue
-
-        call_expr = build_mcp_order_expression(
-            ticker=ticker,
-            action=action,
-            qty=qty,
-            price=order_price,
-            order_type=order_type,
-            price_type=price_type,
-            venue=venue_pref,
-        )
 
         if args.dry_run:
             executed.append(
-                {**item, "status": "dry_run", "order_price": order_price, "order_value": order_value}
+                {**item, "status": "dry_run", "order_price": raw_price, "order_value": order_value_est}
             )
             continue
 
         try:
             order_attempts: list[tuple[str, str]] = []
-            order_expressions = [("primary", call_expr)]
-            if is_hard_exit and order_type != "MARKET":
-                fallback_price_type = "bidp1" if action == "SELL" else "askp1"
-                order_expressions.append(
-                    (
-                        "hard_exit_market_fallback",
-                        build_mcp_order_expression(
-                            ticker=ticker,
-                            action=action,
-                            qty=qty,
-                            price=0,
-                            order_type="MARKET",
-                            price_type=fallback_price_type,
-                            venue=venue_pref,
-                        ),
-                    )
-                )
+            order_specs = build_order_attempt_specs(
+                ticker=ticker,
+                action=action,
+                qty=qty,
+                order_type=order_type,
+                price_type=price_type,
+                raw_price=raw_price,
+                venue=venue_pref,
+                is_hard_exit=is_hard_exit,
+            )
 
             ok = False
             last_msg = ""
-            for attempt_label, expr in order_expressions:
+            for spec in order_specs:
+                attempt_label = str(spec.get("label", "primary") or "primary")
+                attempt_order_type = str(spec.get("order_type", order_type) or order_type)
+                attempt_price_type = str(spec.get("price_type", price_type) or price_type)
+                attempt_raw_price = to_int(spec.get("raw_price", raw_price), raw_price)
+                try:
+                    attempt_price = 0 if attempt_order_type == "MARKET" else resolve_order_price(
+                        ticker, action, attempt_price_type, attempt_raw_price
+                    )
+                except Exception as e:
+                    last_msg = f"price_resolution_failed:{e}"
+                    if attempt_order_type == "MARKET":
+                        attempt_price = 0
+                    else:
+                        continue
+                if attempt_price <= 0 and attempt_order_type != "MARKET":
+                    last_msg = "invalid_order_price"
+                    continue
+                order_value = attempt_price * qty
+                expr = build_mcp_order_expression(
+                    ticker=ticker,
+                    action=action,
+                    qty=qty,
+                    price=attempt_price,
+                    order_type=attempt_order_type,
+                    price_type=attempt_price_type,
+                    venue=venue_pref,
+                )
                 order_attempts.append((attempt_label, expr))
-                attempt_price = order_price if attempt_label == "primary" else 0
                 try:
                     res = mcporter_call(expr)
                 except Exception as e:
@@ -2020,6 +2339,9 @@ def main() -> int:
                     )
                     day_count[ticker] = day_count.get(ticker, 0) + 1
                     if action == "BUY":
+                        buy_count_this_run += 1
+                        if hold.qty <= 0:
+                            new_position_buy_count += 1
                         cash -= order_value
                         holdings[ticker] = Holding(
                             qty=hold.qty + qty,
@@ -2056,10 +2378,16 @@ def main() -> int:
                             pos = exit_state.get("positions", {})
                             if isinstance(pos, dict):
                                 pos.pop(ticker, None)
+                        queued = load_pending_exit_orders()
+                        if queued:
+                            sig = pending_exit_signature(item)
+                            queued = [r for r in queued if str(r.get("queue_signature", "") or "") != sig]
+                            save_pending_exit_orders(queued)
                     ok = True
                     break
                 last_msg = msg1
             if not ok:
+                record_retry_state(retry_state, item, f"broker_reject:{last_msg}" if last_msg else "broker_reject:unknown")
                 skipped.append(
                     {
                         **item,
@@ -2068,15 +2396,18 @@ def main() -> int:
                     }
                 )
         except Exception as e:
+            record_retry_state(retry_state, item, f"execution_error:{e}")
             skipped.append({**item, "reason": f"execution_error:{e}"})
 
     log_execution_pred_clickhouse(decision_id, session_id, attempted)
     save_exit_state(exit_state)
+    save_retry_state(retry_state)
 
     result = {
         "timestamp": now_kst().isoformat(),
         "decision_id": decision_id,
         "dry_run": args.dry_run,
+        "execution_mode": execution_mode,
         "session_id": session_id,
         "kill_switch_state": kill_name,
         "account_profile": {
@@ -2108,6 +2439,11 @@ def main() -> int:
             "hard_take_profit_min_qty": HARD_TAKE_PROFIT_MIN_QTY,
             "enforcement_enabled": ENABLE_DYNAMIC_EXIT_ENFORCEMENT,
             "cooldown_min": int(DYNAMIC_EXIT_COOLDOWN_MIN),
+        },
+        "pending_exit": {
+            "file": str(PENDING_EXIT_FILE),
+            "replayed_count": replayed_pending_exit_count,
+            "queue_size": len(load_pending_exit_orders()),
         },
         "cash_after_estimate": int(cash),
         "total_asset": int(total_asset),

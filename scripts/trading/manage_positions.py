@@ -45,6 +45,7 @@ POSITION_STATE_FILE = STATE_ROOT / "position_manager_state.json"
 POSITION_REVIEW_DIR = STATE_ROOT / "position_manager" / "reviews"
 POSITION_LATEST_FILE = STATE_ROOT / "position_manager" / "latest_review.json"
 DYNAMIC_EXIT_STATE_FILE = STATE_ROOT / "stock_dynamic_exits.json"
+EXECUTION_MODE_STATE_FILE = STATE_ROOT / "market_execution_mode.json"
 PERSISTENT_MEMORY_PATH = HOME / ".openclaw" / "workspace" / "CODEX_PERSISTENT_MEMORY.md"
 HEARTBEAT_PATH = HOME / ".openclaw" / "workspace" / "HEARTBEAT.md"
 SOUL_PATH = HOME / ".openclaw" / "workspace" / "SOUL.md"
@@ -212,6 +213,24 @@ def normalize_text_list(v: Any, max_items: int = 6, max_len: int = 160) -> list[
         if len(out) >= max_items:
             break
     return out
+
+
+def load_execution_mode_state() -> dict[str, Any]:
+    try:
+        if EXECUTION_MODE_STATE_FILE.exists():
+            raw = json.loads(EXECUTION_MODE_STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return raw
+    except Exception:
+        pass
+    return {
+        "execution_mode": "normal",
+        "allowed_universe": "watchlist",
+        "allowed_tickers": [],
+        "avg_down_block": True,
+        "sell_urgency": "normal",
+        "llm_style": "stock_selection",
+    }
 
 
 def sql_quote(v: str) -> str:
@@ -1164,6 +1183,7 @@ def build_orders_and_targets(
     contexts: list[PositionContext],
     cash_krw: float,
     allow_add: bool,
+    execution_mode: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     ctx_map = {c.holding.ticker: c for c in contexts}
     orders: list[dict[str, Any]] = []
@@ -1198,6 +1218,18 @@ def build_orders_and_targets(
             else:
                 qty = max(POSITION_MANAGER_MIN_ORDER_QTY, int(round(hold.qty * ratio)))
 
+        strategy_family = "core_defensive"
+        if order_action == "BUY":
+            mode_name = str(execution_mode.get("execution_mode", "normal") or "normal")
+            if mode_name == "shock":
+                strategy_family = "shock_hedge"
+            elif mode_name == "recovery":
+                strategy_family = "shock_rebound"
+            else:
+                strategy_family = "stock_selection"
+        elif order_action == "SELL":
+            strategy_family = "forced_exit" if p.action == "EXIT" else "core_defensive"
+
         if order_action and qty > 0:
             orders.append(
                 {
@@ -1209,6 +1241,11 @@ def build_orders_and_targets(
                     "price_type": "askp1" if order_action == "BUY" else "bidp1",
                     "price": 0,
                     "confidence": round(clamp(p.confidence, 0.0, 1.0), 4),
+                    "strategy_family": strategy_family,
+                    "playbook_id": f"pm_{str(execution_mode.get('execution_mode', 'normal') or 'normal')}",
+                    "priority": 9 if p.action == "EXIT" else (7 if p.action == "REDUCE" else 5),
+                    "close_only": str(execution_mode.get("execution_mode", "normal") or "normal") == "close_only",
+                    "expected_holding_window": p.time_horizon,
                     "venue_preference": "SOR",
                     "reasoning": normalize_text(f"position_manager:{p.action} | {p.reasoning}", 280),
                     "event_type": "position_manager",
@@ -1278,9 +1315,11 @@ def build_response_payload(
     orders: list[dict[str, Any]],
     risk_targets: list[dict[str, Any]],
     llm_status: str,
+    execution_mode: str,
 ) -> dict[str, Any]:
     return {
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "execution_mode": execution_mode,
         "market_assessment": normalize_text(market_assessment, 320),
         "regime_action": regime_to_action(regime_label),
         "orders": orders,
@@ -1562,6 +1601,7 @@ def main() -> int:
     tickers = list(holdings.keys())
     state = load_position_state()
     dynamic_exits = load_dynamic_exit_state()
+    execution_mode_state = load_execution_mode_state()
     regime = load_market_regime()
     tech = load_technical(tickers)
     flow = load_flow_snapshot(tickers)
@@ -1578,7 +1618,8 @@ def main() -> int:
     )
 
     max_actions = max(1, int(args.max_actions))
-    allow_add = POSITION_MANAGER_ALLOW_ADD or bool(args.allow_add)
+    mode_name = str(execution_mode_state.get("execution_mode", "normal") or "normal")
+    allow_add = (POSITION_MANAGER_ALLOW_ADD or bool(args.allow_add)) and mode_name not in {"shock", "close_only"}
 
     llm_obj: dict[str, Any] | None = None
     llm_status = "fallback"
@@ -1629,6 +1670,7 @@ def main() -> int:
         contexts=contexts,
         cash_krw=cash_krw,
         allow_add=allow_add,
+        execution_mode=execution_mode_state,
     )
 
     market_line = format_regime_line(regime)
@@ -1638,6 +1680,7 @@ def main() -> int:
         orders=orders,
         risk_targets=risk_targets,
         llm_status=llm_status,
+        execution_mode=mode_name,
     )
 
     response_path = str(args.response)

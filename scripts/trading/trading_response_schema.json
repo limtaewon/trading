@@ -15,6 +15,10 @@
     "next_focus"
   ],
   "properties": {
+    "execution_mode": {
+      "type": "string",
+      "enum": ["normal", "shock", "recovery", "close_only"]
+    },
     "timestamp": { "type": "string" },
     "market_assessment": { "type": "string" },
     "regime_action": {
@@ -45,6 +49,24 @@
           "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
           "reasoning": { "type": "string", "minLength": 1 },
           "event_signature": { "type": "string", "maxLength": 64 },
+          "strategy_family": {
+            "type": "string",
+            "enum": [
+              "stock_selection",
+              "index_etf",
+              "shock_hedge",
+              "shock_rebound",
+              "core_defensive",
+              "forced_exit"
+            ]
+          },
+          "playbook_id": { "type": "string", "maxLength": 64 },
+          "priority": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "close_only": { "type": "boolean" },
+          "expected_holding_window": {
+            "type": "string",
+            "enum": ["intraday", "1d", "1-3d", "1w", "1-2w", "2w+"]
+          },
           "event_type": {
             "type": "string",
             "enum": [

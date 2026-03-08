@@ -14,7 +14,7 @@ REGIME_ACTIONS = {"aggressive", "normal", "cautious", "defensive"}
 ORDER_ACTIONS = {"BUY", "SELL"}
 ORDER_TYPES = {"LIMIT", "MARKET"}
 EVENT_HORIZONS = {"intraday", "1d", "1-3d", "1w", "1-2w", "2w+"}
-ROOT_KEYS = {
+REQUIRED_ROOT_KEYS = {
     "timestamp",
     "market_assessment",
     "regime_action",
@@ -25,6 +25,7 @@ ROOT_KEYS = {
     "self_evaluation",
     "next_focus",
 }
+ALLOWED_ROOT_KEYS = set(REQUIRED_ROOT_KEYS) | {"execution_mode", "missing_fields"}
 ORDER_KEYS = {
     "action",
     "ticker",
@@ -35,6 +36,11 @@ ORDER_KEYS = {
     "confidence",
     "reasoning",
     "event_signature",
+    "strategy_family",
+    "playbook_id",
+    "priority",
+    "close_only",
+    "expected_holding_window",
     "event_type",
     "time_horizon",
     "lag_hours",
@@ -80,11 +86,11 @@ def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
     if not isinstance(data, dict):
         return ["root must be an object"]
 
-    missing = [k for k in ROOT_KEYS if k not in data]
+    missing = [k for k in REQUIRED_ROOT_KEYS if k not in data]
     if missing:
         _append(errors, f"missing root keys: {', '.join(sorted(missing))}", error_limit)
 
-    extra = sorted(set(data.keys()) - ROOT_KEYS)
+    extra = sorted(set(data.keys()) - ALLOWED_ROOT_KEYS)
     if extra:
         _append(errors, f"unexpected root keys: {', '.join(extra)}", error_limit)
 
@@ -140,6 +146,8 @@ def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
             _append(errors, f"{prefix}.reasoning must be non-empty", error_limit)
         if "time_horizon" in order and order.get("time_horizon") not in EVENT_HORIZONS:
             _append(errors, f"{prefix}.time_horizon must be one of {sorted(EVENT_HORIZONS)}", error_limit)
+        if "expected_holding_window" in order and order.get("expected_holding_window") not in EVENT_HORIZONS:
+            _append(errors, f"{prefix}.expected_holding_window must be one of {sorted(EVENT_HORIZONS)}", error_limit)
         if "lag_hours" in order:
             lag = order.get("lag_hours")
             if not isinstance(lag, int) or isinstance(lag, bool) or lag < 0 or lag > 336:
@@ -148,6 +156,21 @@ def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
             _append(errors, f"{prefix}.evidence_refs must be an array", error_limit)
         if "evidence_urls" in order and not isinstance(order.get("evidence_urls"), list):
             _append(errors, f"{prefix}.evidence_urls must be an array", error_limit)
+        if "priority" in order:
+            pr = order.get("priority")
+            if not isinstance(pr, int) or isinstance(pr, bool) or pr < 1 or pr > 10:
+                _append(errors, f"{prefix}.priority must be an integer between 1 and 10", error_limit)
+        if "close_only" in order and not isinstance(order.get("close_only"), bool):
+            _append(errors, f"{prefix}.close_only must be boolean", error_limit)
+        if "strategy_family" in order and order.get("strategy_family") not in {
+            "stock_selection",
+            "index_etf",
+            "shock_hedge",
+            "shock_rebound",
+            "core_defensive",
+            "forced_exit",
+        }:
+            _append(errors, f"{prefix}.strategy_family has invalid value", error_limit)
 
         if order.get("action") == "BUY":
             if order.get("time_horizon") not in EVENT_HORIZONS:
@@ -214,3 +237,6 @@ def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
             _append(errors, f"{prefix}.reason must be non-empty", error_limit)
 
     return errors
+    execution_mode = data.get("execution_mode")
+    if execution_mode is not None and execution_mode not in {"normal", "shock", "recovery", "close_only"}:
+        _append(errors, "execution_mode must be one of ['close_only', 'normal', 'recovery', 'shock']", error_limit)

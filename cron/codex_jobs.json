@@ -323,7 +323,7 @@
       },
       "payload": {
         "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && DECISION_STAGE0_ONLY_CONSTRAINTS=\"${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/decision_operating_pipeline.py --horizon INTRADAY --universe watchlist --limit 30 >> $HOME/.openclaw/logs/decision-operating.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_decision_dryrun_telegram.py >> $HOME/.openclaw/logs/decision-operating.log 2>&1"
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/market_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && DECISION_STAGE0_ONLY_CONSTRAINTS=\"${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/decision_operating_pipeline.py --horizon INTRADAY --universe watchlist --limit 30 >> $HOME/.openclaw/logs/decision-operating.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_decision_dryrun_telegram.py >> $HOME/.openclaw/logs/decision-operating.log 2>&1"
       },
       "source": "legacy-crontab"
     },
@@ -336,7 +336,7 @@
       },
       "payload": {
         "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/market_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
       },
       "source": "legacy-crontab"
     },
@@ -506,6 +506,19 @@
       "payload": {
         "kind": "command",
         "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_news_pipeline_health.py >> $HOME/.openclaw/logs/news-pipeline-health.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-execution-mode-3m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/3 8-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/market_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1"
       },
       "source": "legacy-crontab"
     },
