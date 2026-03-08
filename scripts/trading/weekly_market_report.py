@@ -460,7 +460,8 @@ def build_report(as_of: date) -> tuple[str, Path]:
             code = str(row.get("ticker") or "").strip()
             name = stock_names.get(code, code)
             action = str(row.get("action") or "").strip()
-            lines.append(f"- {name}({code}) | {action}")
+            lines.append(f"- {name} | {action}")
+            lines.append("")
 
     if relation_rows:
         lines.append("")
@@ -483,7 +484,7 @@ def build_report(as_of: date) -> tuple[str, Path]:
             bias_text = relation_bias_text(bias)
             channel_reason = relation_channel_reason(channels, bias)
             if summary:
-                lines.append(f"- {name}({code}): {summary}")
+                lines.append(f"- {name}: {summary}")
                 lines.append(
                     f"  · 내부 데이터 기준으로는 {bias_text} 축에서 이벤트 {support_events}건, 클러스터 {support_clusters}건이 반복 확인됐습니다."
                 )
@@ -492,13 +493,14 @@ def build_report(as_of: date) -> tuple[str, Path]:
                 lines.append(f"  · 신호 해석: 연관 전이 강도는 {strength}, 근거는 {quality_text}입니다.")
             else:
                 lines.append(
-                    f"- {name}({code}): {bias_text} 축에서 이벤트 {support_events}건, 클러스터 {support_clusters}건이 반복 확인된 후보입니다."
+                    f"- {name}: {bias_text} 축에서 이벤트 {support_events}건, 클러스터 {support_clusters}건이 반복 확인된 후보입니다."
                 )
                 if channel_reason:
                     lines.append(f"  · 반복 포착된 내부 축: {channel_reason}.")
                 lines.append(f"  · 신호 해석: 연관 전이 강도는 {strength}, 근거는 {quality_text}입니다.")
             if source_fresh:
                 lines.append(f"  · 근거 최신 시각: {source_fresh}")
+            lines.append("")
 
     if top_decisions:
         lines.append("")
@@ -508,7 +510,8 @@ def build_report(as_of: date) -> tuple[str, Path]:
             name = stock_names.get(code, code)
             score = float(row.get("total_score") or 0.0)
             weight = float(row.get("target_weight") or 0.0) * 100.0
-            lines.append(f"- {name}({code}) | score {score:.1f} | target {weight:.1f}%")
+            lines.append(f"- {name} | score {score:.1f} | target {weight:.1f}%")
+            lines.append("")
 
     lines.append("")
     lines.append("한줄 결론: 다음 주는 공격보다 선별이 먼저다. 월요일 시가 급변동은 확인 후 대응하고, 전쟁 지속 시 방산·방어주, 환율 안정 시 반도체·기술주 순서로 보는 게 맞다.")

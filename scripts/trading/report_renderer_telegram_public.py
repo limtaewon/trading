@@ -191,6 +191,7 @@ def render_public_market_message(payload: dict[str, Any]) -> str:
             name = str(candidate.get("name") or candidate.get("ticker") or "-").strip()
             reason = _candidate_public_reason(candidate)
             watch_lines.append(f"- {name}: {reason} 지금은 바로 추격하기보다 흐름이 이어지는지 확인이 먼저입니다.")
+            watch_lines.append("")
     if not watch_lines and isinstance(top_relations, list):
         for relation in top_relations[:2]:
             if not isinstance(relation, dict):
@@ -199,6 +200,7 @@ def render_public_market_message(payload: dict[str, Any]) -> str:
             why = str(relation.get("why_candidate") or "").strip()
             if why:
                 watch_lines.append(f"- {name}: {why} 지금은 신규 진입보다 확인과 관찰이 우선입니다.")
+                watch_lines.append("")
 
     headline = str(market_phase.get("summary") or "시장 해석 데이터가 부족합니다.").strip()
     event_line = _event_summary(event_context, market_context)
@@ -237,6 +239,8 @@ def render_public_market_message(payload: dict[str, Any]) -> str:
         f"- 요약하면 {conclusion}",
     ]
     if watch_lines:
+        while watch_lines and not str(watch_lines[-1]).strip():
+            watch_lines.pop()
         lines.extend(["", "## 관찰 종목"] + watch_lines)
     lines.extend(
         [

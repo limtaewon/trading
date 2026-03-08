@@ -537,6 +537,7 @@ def _build_external_research(
     top_decisions: list[dict[str, Any]],
     stress_flags: list[str],
 ) -> dict[str, Any]:
+    stock_names = load_stock_names()
     web_rows = fetch_google_news_signals(
         WEEKLY_DISCOVERY_QUERIES,
         limit=28,
@@ -707,6 +708,7 @@ def _build_external_research(
                 "cluster_summaries": bucket["cluster_summaries"][:2],
                 "relation_summaries": bucket["reasoning_summaries"][:2],
                 "related_tickers": sorted(bucket["relation_tickers"])[:6],
+                "related_ticker_names": [stock_names.get(code, code) for code in sorted(bucket["relation_tickers"])[:6]],
                 "freshest_relation_source_at": bucket["freshest_relation_source_at"],
             }
         )
