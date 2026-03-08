@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 from env_bootstrap import bootstrap_openclaw_env
 from llm_model_config import resolve_model
+from response_validator import validate_trading_response
 
 bootstrap_openclaw_env()
 
@@ -1625,6 +1626,19 @@ def main() -> int:
         return 1
 
     data = json.loads(response_path.read_text(encoding="utf-8"))
+    validation_errors = validate_trading_response(data)
+    if validation_errors:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "reason": "invalid_trading_response",
+                    "validation_errors": validation_errors[:20],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1
     missing_fields = data.get("missing_fields", [])
     if isinstance(missing_fields, list) and missing_fields:
         # 데이터 부족이 명시되면 주문 실행 대신 안전 중단.
@@ -2074,6 +2088,7 @@ def main() -> int:
         "stage2_market_flow_shock": stage2_market_shock,
         "data_freshness": freshness,
         "missing_fields": missing_fields if isinstance(missing_fields, list) else [],
+        "validation_errors": [],
         "orders_total": len(orders),
         "attempted": attempted,
         "executed": executed,

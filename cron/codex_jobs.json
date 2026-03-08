@@ -316,16 +316,16 @@
     },
     {
       "name": "trading-decision-10m",
-      "enabled": false,
+      "enabled": true,
       "schedule": {
         "expr": "*/10 9-15 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
-        "kind": "systemEvent",
-        "text": "장중 10분 주기 systemEvent 실행. watchlist 기반 데이터와 하드룰 기준으로 판단하며, 조건 충족 주문만 실행한다."
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && DECISION_STAGE0_ONLY_CONSTRAINTS=\"${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/decision_operating_pipeline.py --horizon INTRADAY --universe watchlist --limit 30 >> $HOME/.openclaw/logs/decision-operating.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_decision_dryrun_telegram.py >> $HOME/.openclaw/logs/decision-operating.log 2>&1"
       },
-      "source": "openclaw-jobs"
+      "source": "legacy-crontab"
     },
     {
       "name": "position-manager-20m",
@@ -480,6 +480,19 @@
       "payload": {
         "kind": "command",
         "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/trading/enrich_data.sh --quick >> $HOME/.openclaw/logs/enrich.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-watchlist-shadow-gpt54-1615",
+      "enabled": false,
+      "schedule": {
+        "expr": "15 16 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/watchlist_shadow_report.py --notify >> $HOME/.openclaw/logs/watchlist-shadow.log 2>&1"
       },
       "source": "legacy-crontab"
     },

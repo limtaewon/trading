@@ -12,6 +12,7 @@ HOME = Path.home()
 BASE = HOME / ".openclaw"
 JOBS_FILE = BASE / "cron" / "jobs.json"
 OUT_FILE = BASE / "cron" / "codex_jobs.json"
+REPO_OUT_FILE = Path(__file__).resolve().parents[1] / "cron" / "codex_jobs.json"
 
 
 def load_openclaw_jobs() -> list[dict]:
@@ -243,6 +244,23 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "trading-decision-10m",
+            "enabled": True,
+            "schedule": {"expr": "*/10 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && '
+                    'DECISION_STAGE0_ONLY_CONSTRAINTS="${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}" '
+                    f'{py} {trading_scripts}/decision_operating_pipeline.py --horizon INTRADAY --universe watchlist --limit 30 '
+                    f'>> {logs}/decision-operating.log 2>&1 && '
+                    f'{py} {trading_scripts}/send_decision_dryrun_telegram.py '
+                    f'>> {logs}/decision-operating.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "data-refresh-stocks-weekly",
             "enabled": True,
             "schedule": {"expr": "0 6 * * 1", "tz": "Asia/Seoul"},
@@ -355,9 +373,14 @@ def main() -> int:
         "jobs": jobs,
     }
 
+    payload = json.dumps(merged, ensure_ascii=False, indent=2)
     OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    OUT_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"wrote {OUT_FILE} ({len(jobs)} jobs)")
+    OUT_FILE.write_text(payload, encoding="utf-8")
+    wrote = [str(OUT_FILE)]
+    if REPO_OUT_FILE.parent.exists():
+        REPO_OUT_FILE.write_text(payload, encoding="utf-8")
+        wrote.append(str(REPO_OUT_FILE))
+    print(f"wrote {', '.join(wrote)} ({len(jobs)} jobs)")
     return 0
 
 

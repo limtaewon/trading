@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Shared validation for trading LLM responses.
+
+The main brain path and executor both consume the same response object.
+This module keeps fail-closed validation logic in one place so the two
+entrypoints cannot drift quietly.
+"""
+from __future__ import annotations
+
+import re
+from typing import Any
+
+REGIME_ACTIONS = {"aggressive", "normal", "cautious", "defensive"}
+ORDER_ACTIONS = {"BUY", "SELL"}
+ORDER_TYPES = {"LIMIT", "MARKET"}
+EVENT_HORIZONS = {"intraday", "1d", "1-3d", "1w", "1-2w", "2w+"}
+ROOT_KEYS = {
+    "timestamp",
+    "market_assessment",
+    "regime_action",
+    "orders",
+    "risk_targets",
+    "watch_list",
+    "portfolio_advice",
+    "self_evaluation",
+    "next_focus",
+}
+ORDER_KEYS = {
+    "action",
+    "ticker",
+    "ticker_name",
+    "quantity",
+    "order_type",
+    "price",
+    "confidence",
+    "reasoning",
+    "event_signature",
+    "event_type",
+    "time_horizon",
+    "lag_hours",
+    "channels",
+    "thesis_path",
+    "evidence_refs",
+    "evidence_urls",
+    "invalidation",
+}
+RISK_TARGET_KEYS = {
+    "ticker",
+    "ticker_name",
+    "take_profit_pct",
+    "stop_loss_pct",
+    "confidence",
+    "time_horizon",
+    "reasoning",
+    "invalidation",
+}
+WATCH_ITEM_KEYS = {"ticker", "ticker_name", "reason"}
+
+
+def _is_nonempty_text(v: Any) -> bool:
+    return isinstance(v, str) and bool(v.strip())
+
+
+def _is_six_digit_ticker(v: Any) -> bool:
+    return isinstance(v, str) and bool(re.fullmatch(r"\d{6}", v.strip()))
+
+
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _append(errors: list[str], msg: str, limit: int) -> None:
+    if len(errors) < limit:
+        errors.append(msg)
+
+
+def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
+    errors: list[str] = []
+
+    if not isinstance(data, dict):
+        return ["root must be an object"]
+
+    missing = [k for k in ROOT_KEYS if k not in data]
+    if missing:
+        _append(errors, f"missing root keys: {', '.join(sorted(missing))}", error_limit)
+
+    extra = sorted(set(data.keys()) - ROOT_KEYS)
+    if extra:
+        _append(errors, f"unexpected root keys: {', '.join(extra)}", error_limit)
+
+    if not _is_nonempty_text(data.get("timestamp")):
+        _append(errors, "timestamp must be a non-empty string", error_limit)
+    if not _is_nonempty_text(data.get("market_assessment")):
+        _append(errors, "market_assessment must be a non-empty string", error_limit)
+
+    regime_action = data.get("regime_action")
+    if regime_action not in REGIME_ACTIONS:
+        _append(errors, f"regime_action must be one of {sorted(REGIME_ACTIONS)}", error_limit)
+
+    for key in ("portfolio_advice", "self_evaluation", "next_focus"):
+        if not _is_nonempty_text(data.get(key)):
+            _append(errors, f"{key} must be a non-empty string", error_limit)
+
+    orders = data.get("orders")
+    if not isinstance(orders, list):
+        _append(errors, "orders must be an array", error_limit)
+        orders = []
+    for idx, order in enumerate(orders):
+        prefix = f"orders[{idx}]"
+        if not isinstance(order, dict):
+            _append(errors, f"{prefix} must be an object", error_limit)
+            continue
+        extra = sorted(set(order.keys()) - ORDER_KEYS)
+        if extra:
+            _append(errors, f"{prefix} unexpected keys: {', '.join(extra)}", error_limit)
+        for key in ("action", "ticker", "ticker_name", "quantity", "order_type", "confidence", "reasoning"):
+            if key not in order:
+                _append(errors, f"{prefix}.{key} is required", error_limit)
+        if order.get("action") not in ORDER_ACTIONS:
+            _append(errors, f"{prefix}.action must be BUY or SELL", error_limit)
+        if not _is_six_digit_ticker(order.get("ticker")):
+            _append(errors, f"{prefix}.ticker must be 6 digits", error_limit)
+        if not _is_nonempty_text(order.get("ticker_name")):
+            _append(errors, f"{prefix}.ticker_name must be non-empty", error_limit)
+        quantity = order.get("quantity")
+        if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity < 1:
+            _append(errors, f"{prefix}.quantity must be an integer >= 1", error_limit)
+        if order.get("order_type") not in ORDER_TYPES:
+            _append(errors, f"{prefix}.order_type must be LIMIT or MARKET", error_limit)
+        price = order.get("price")
+        if "price" in order and not _is_number(price):
+            _append(errors, f"{prefix}.price must be numeric when present", error_limit)
+        if order.get("order_type") == "LIMIT":
+            if not _is_number(price) or float(price) <= 0:
+                _append(errors, f"{prefix}.price must be > 0 for LIMIT orders", error_limit)
+        confidence = order.get("confidence")
+        if not _is_number(confidence) or float(confidence) < 0 or float(confidence) > 1:
+            _append(errors, f"{prefix}.confidence must be between 0 and 1", error_limit)
+        if not _is_nonempty_text(order.get("reasoning")):
+            _append(errors, f"{prefix}.reasoning must be non-empty", error_limit)
+        if "time_horizon" in order and order.get("time_horizon") not in EVENT_HORIZONS:
+            _append(errors, f"{prefix}.time_horizon must be one of {sorted(EVENT_HORIZONS)}", error_limit)
+        if "lag_hours" in order:
+            lag = order.get("lag_hours")
+            if not isinstance(lag, int) or isinstance(lag, bool) or lag < 0 or lag > 336:
+                _append(errors, f"{prefix}.lag_hours must be an integer between 0 and 336", error_limit)
+        if "evidence_refs" in order and not isinstance(order.get("evidence_refs"), list):
+            _append(errors, f"{prefix}.evidence_refs must be an array", error_limit)
+        if "evidence_urls" in order and not isinstance(order.get("evidence_urls"), list):
+            _append(errors, f"{prefix}.evidence_urls must be an array", error_limit)
+
+        if order.get("action") == "BUY":
+            if order.get("time_horizon") not in EVENT_HORIZONS:
+                _append(errors, f"{prefix}.time_horizon is required for BUY", error_limit)
+            if not _is_nonempty_text(order.get("thesis_path")):
+                _append(errors, f"{prefix}.thesis_path is required for BUY", error_limit)
+            refs = order.get("evidence_refs")
+            urls = order.get("evidence_urls")
+            refs_ok = isinstance(refs, list) and len(refs) > 0
+            urls_ok = isinstance(urls, list) and len(urls) > 0
+            if not (refs_ok or urls_ok):
+                _append(errors, f"{prefix} BUY requires evidence_refs or evidence_urls", error_limit)
+
+    risk_targets = data.get("risk_targets")
+    if not isinstance(risk_targets, list):
+        _append(errors, "risk_targets must be an array", error_limit)
+        risk_targets = []
+    for idx, row in enumerate(risk_targets):
+        prefix = f"risk_targets[{idx}]"
+        if not isinstance(row, dict):
+            _append(errors, f"{prefix} must be an object", error_limit)
+            continue
+        extra = sorted(set(row.keys()) - RISK_TARGET_KEYS)
+        if extra:
+            _append(errors, f"{prefix} unexpected keys: {', '.join(extra)}", error_limit)
+        for key in ("ticker", "ticker_name", "take_profit_pct", "stop_loss_pct", "confidence", "time_horizon", "reasoning"):
+            if key not in row:
+                _append(errors, f"{prefix}.{key} is required", error_limit)
+        if not _is_six_digit_ticker(row.get("ticker")):
+            _append(errors, f"{prefix}.ticker must be 6 digits", error_limit)
+        if not _is_nonempty_text(row.get("ticker_name")):
+            _append(errors, f"{prefix}.ticker_name must be non-empty", error_limit)
+        tp = row.get("take_profit_pct")
+        sl = row.get("stop_loss_pct")
+        if not _is_number(tp) or float(tp) <= 0 or float(tp) > 0.6:
+            _append(errors, f"{prefix}.take_profit_pct must be > 0 and <= 0.6", error_limit)
+        if not _is_number(sl) or float(sl) >= 0 or float(sl) < -0.6:
+            _append(errors, f"{prefix}.stop_loss_pct must be < 0 and >= -0.6", error_limit)
+        conf = row.get("confidence")
+        if not _is_number(conf) or float(conf) < 0 or float(conf) > 1:
+            _append(errors, f"{prefix}.confidence must be between 0 and 1", error_limit)
+        if row.get("time_horizon") not in EVENT_HORIZONS:
+            _append(errors, f"{prefix}.time_horizon must be one of {sorted(EVENT_HORIZONS)}", error_limit)
+        if not _is_nonempty_text(row.get("reasoning")):
+            _append(errors, f"{prefix}.reasoning must be non-empty", error_limit)
+
+    watch_list = data.get("watch_list")
+    if not isinstance(watch_list, list):
+        _append(errors, "watch_list must be an array", error_limit)
+        watch_list = []
+    for idx, row in enumerate(watch_list):
+        prefix = f"watch_list[{idx}]"
+        if not isinstance(row, dict):
+            _append(errors, f"{prefix} must be an object", error_limit)
+            continue
+        extra = sorted(set(row.keys()) - WATCH_ITEM_KEYS)
+        if extra:
+            _append(errors, f"{prefix} unexpected keys: {', '.join(extra)}", error_limit)
+        if not _is_six_digit_ticker(row.get("ticker")):
+            _append(errors, f"{prefix}.ticker must be 6 digits", error_limit)
+        if not _is_nonempty_text(row.get("ticker_name")):
+            _append(errors, f"{prefix}.ticker_name must be non-empty", error_limit)
+        if not _is_nonempty_text(row.get("reason")):
+            _append(errors, f"{prefix}.reason must be non-empty", error_limit)
+
+    return errors

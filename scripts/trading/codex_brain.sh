@@ -517,18 +517,30 @@ sys.exit(1)
     fi
 fi
 
-# 필수 필드 존재 확인
-python3 -c "
-import json, sys
-with open('$RESPONSE_FILE') as f:
-    data = json.load(f)
-required = ['timestamp', 'market_assessment', 'regime_action', 'orders', 'risk_targets']
-missing = [k for k in required if k not in data]
-if missing:
-    print(f'필수 필드 누락: {missing}')
-    sys.exit(1)
-print(f'검증 통과: orders={len(data.get(\"orders\",[]))}건, regime={data.get(\"regime_action\",\"?\")}')
-" 2>&1 | while read -r line; do log "  $line"; done
+# 공통 strict validator 검사
+if ! python3 - "$SCRIPTS_DIR" "$RESPONSE_FILE" <<'PY' 2>&1 | while read -r line; do log "  $line"; done
+import json
+import sys
+from pathlib import Path
+
+scripts_dir = Path(sys.argv[1])
+response_path = Path(sys.argv[2])
+sys.path.insert(0, str(scripts_dir))
+
+from response_validator import validate_trading_response  # type: ignore
+
+data = json.loads(response_path.read_text(encoding="utf-8"))
+errors = validate_trading_response(data)
+if errors:
+    print("strict validation failed:")
+    for err in errors[:20]:
+        print(f"- {err}")
+    raise SystemExit(1)
+print(f'검증 통과: orders={len(data.get("orders", []))}건, regime={data.get("regime_action","?")}, watch_list={len(data.get("watch_list", []))}건')
+PY
+then
+    die "응답 strict validation 실패"
+fi
 
 RESPONSE_LEN=$(wc -c < "$RESPONSE_FILE")
 log "  응답 저장: $RESPONSE_FILE (${RESPONSE_LEN}바이트)"

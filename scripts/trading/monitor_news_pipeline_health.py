@@ -8,6 +8,7 @@
 4) news_event_frames explain_ready 생성량
 5) hidden_relation_signals 최신성
 6) interest_watchlist_runs 최신 run 상태
+7) monitor_news 실행 SLA/지연/락스킵 상태
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ def _resolve_clickhouse() -> tuple[str, tuple[str, str] | None]:
 
 CLICKHOUSE_URL, CLICKHOUSE_AUTH = _resolve_clickhouse()
 STATE_FILE = Path.home() / ".openclaw" / "data" / "news_pipeline_health.json"
+MONITOR_STATE_FILE = Path(os.path.expanduser(os.environ.get("BREAKING_MONITOR_STATE_FILE", "~/.openclaw/data/news_monitor_state.json")))
 
 
 def _ch_query(sql: str) -> list[dict[str, Any]]:
@@ -82,6 +84,26 @@ def _to_int(v: Any, default: int = 0) -> int:
 
 def _to_str(v: Any) -> str:
     return str(v or "").strip()
+
+
+def _parse_iso_dt(raw: Any) -> datetime | None:
+    text = _to_str(raw)
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    ordered = sorted(float(v) for v in values)
+    idx = max(0, min(len(ordered) - 1, int(round((pct / 100.0) * (len(ordered) - 1)))))
+    return float(ordered[idx])
 
 
 def _load_notify() -> Callable[[str], Any] | None:
@@ -118,12 +140,29 @@ def _save_state(state: dict[str, Any]) -> None:
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _load_monitor_state() -> dict[str, Any]:
+    try:
+        if MONITOR_STATE_FILE.exists():
+            data = json.loads(MONITOR_STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
 def main() -> int:
     stale_regime_min = max(60, _to_int(os.environ.get("NEWS_PIPELINE_STALE_REGIME_MIN", "1500"), 1500))
     stale_cluster_min = max(30, _to_int(os.environ.get("NEWS_PIPELINE_STALE_CLUSTER_MIN", "180"), 180))
     stale_relation_min = max(30, _to_int(os.environ.get("NEWS_PIPELINE_STALE_RELATION_MIN", "180"), 180))
     min_news_3h = max(0, _to_int(os.environ.get("NEWS_PIPELINE_MIN_NEWS_3H", "5"), 5))
     min_frames_explain_6h = max(0, _to_int(os.environ.get("NEWS_PIPELINE_MIN_FRAMES_EXPLAIN_6H", "3"), 3))
+    monitor_stale_min = max(10, _to_int(os.environ.get("NEWS_MONITOR_STALE_MIN", "30"), 30))
+    monitor_success_stale_min = max(10, _to_int(os.environ.get("NEWS_MONITOR_SUCCESS_STALE_MIN", "90"), 90))
+    monitor_runtime_warn_sec = max(30, _to_int(os.environ.get("NEWS_MONITOR_RUNTIME_WARN_SEC", "180"), 180))
+    monitor_lock_skip_warn_1d = max(1, _to_int(os.environ.get("NEWS_MONITOR_LOCK_SKIP_WARN_1D", "6"), 6))
+    monitor_parse_fail_warn_1d = max(1, _to_int(os.environ.get("NEWS_MONITOR_PARSE_FAIL_WARN_1D", "6"), 6))
+    monitor_codex_fail_warn_1d = max(1, _to_int(os.environ.get("NEWS_MONITOR_CODEX_FAIL_WARN_1D", "6"), 6))
     notify_enabled = os.environ.get("NEWS_PIPELINE_HEALTH_NOTIFY", "0").strip() in {"1", "true", "TRUE", "yes", "YES"}
     cooldown_min = max(5, _to_int(os.environ.get("NEWS_PIPELINE_HEALTH_COOLDOWN_MIN", "120"), 120))
 
@@ -215,6 +254,81 @@ LIMIT 1
             warn.append("watchlist_run_missing")
     else:
         warn.append("watchlist_run_table_missing")
+
+    # 7) monitor_news runtime health
+    monitor_state = _load_monitor_state()
+    if not monitor_state:
+        warn.append("news_monitor_state_missing")
+    else:
+        recent_runs = monitor_state.get("recent_runs", [])
+        if not isinstance(recent_runs, list):
+            recent_runs = []
+        recent_runs = [r for r in recent_runs if isinstance(r, dict)]
+
+        now = datetime.now()
+        last_finished = _parse_iso_dt(monitor_state.get("last_finished_at"))
+        last_success = _parse_iso_dt(monitor_state.get("last_success_at"))
+        last_metrics = monitor_state.get("last_metrics", {})
+        if not isinstance(last_metrics, dict):
+            last_metrics = {}
+
+        if last_finished is None:
+            warn.append("news_monitor_last_finished_missing")
+        else:
+            age_min = max(0, int((now - last_finished).total_seconds() // 60))
+            checks["news_monitor_age_min"] = age_min
+            if age_min > monitor_stale_min:
+                warn.append(f"news_monitor_stale({age_min}m)")
+
+        if last_success is None:
+            warn.append("news_monitor_last_success_missing")
+        else:
+            success_age_min = max(0, int((now - last_success).total_seconds() // 60))
+            checks["news_monitor_success_age_min"] = success_age_min
+            if success_age_min > monitor_success_stale_min:
+                fail.append(f"news_monitor_success_stale({success_age_min}m)")
+
+        recent_1d = []
+        for row in recent_runs:
+            finished = _parse_iso_dt(row.get("finished_at"))
+            if finished is not None and (now - finished).total_seconds() <= 86400:
+                recent_1d.append(row)
+
+        runtimes = []
+        lock_skips_1d = 0
+        parse_fail_1d = 0
+        codex_fail_1d = 0
+        for row in recent_1d:
+            runtime = row.get("runtime_sec")
+            try:
+                runtimes.append(float(runtime))
+            except Exception:
+                pass
+            lock_skips_1d += _to_int(row.get("lock_skipped"), 0)
+            parse_fail_1d += _to_int(row.get("parse_fail_count"), 0)
+            codex_fail_1d += _to_int(row.get("codex_fail_count"), 0)
+
+        checks["news_monitor_runs_1d"] = len(recent_1d)
+        checks["news_monitor_lock_skips_1d"] = lock_skips_1d
+        checks["news_monitor_parse_fail_1d"] = parse_fail_1d
+        checks["news_monitor_codex_fail_1d"] = codex_fail_1d
+        checks["news_monitor_last_candidate_count"] = _to_int(last_metrics.get("candidate_count"), 0)
+        checks["news_monitor_last_breaking_count"] = _to_int(last_metrics.get("breaking_count"), 0)
+        checks["news_monitor_last_query_count"] = _to_int(last_metrics.get("query_count"), 0)
+        checks["news_monitor_last_dynamic_query_count"] = _to_int(last_metrics.get("dynamic_query_count"), 0)
+
+        if runtimes:
+            runtime_p95 = round(_percentile(runtimes, 95), 2)
+            checks["news_monitor_runtime_p95_sec"] = runtime_p95
+            if runtime_p95 > monitor_runtime_warn_sec:
+                warn.append(f"news_monitor_runtime_p95_high({runtime_p95}s)")
+
+        if lock_skips_1d > monitor_lock_skip_warn_1d:
+            warn.append(f"news_monitor_lock_skips_high({lock_skips_1d}/1d)")
+        if parse_fail_1d > monitor_parse_fail_warn_1d:
+            warn.append(f"news_monitor_parse_fail_high({parse_fail_1d}/1d)")
+        if codex_fail_1d > monitor_codex_fail_warn_1d:
+            warn.append(f"news_monitor_codex_fail_high({codex_fail_1d}/1d)")
 
     status = "ok"
     if fail:

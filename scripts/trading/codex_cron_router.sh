@@ -189,6 +189,17 @@ RUN_PROMPT_FILE="/tmp/gpt_prompt_${RUN_ID}.txt"
 RUN_RESPONSE_FILE="/tmp/gpt_response_${RUN_ID}.json"
 export OPENCLAW_PROMPT_FILE="$RUN_PROMPT_FILE"
 export OPENCLAW_RESPONSE_FILE="$RUN_RESPONSE_FILE"
+case "$JOB_NAME" in
+    news-urgent-trigger)
+        export OPENCLAW_PROMPT_MODE="urgent"
+        ;;
+    *briefing*|*weekly-market-report*|*dooray*)
+        export OPENCLAW_PROMPT_MODE="briefing"
+        ;;
+    *)
+        export OPENCLAW_PROMPT_MODE="regular"
+        ;;
+esac
 
 jq -nc \
     --arg ts "$START_TS" \
@@ -359,8 +370,16 @@ else
 fi
 
 # systemEvent는 Codex 응답 주문을 직접 실행한다.
+EXECUTOR_DRY_RUN="0"
+if [[ "$(printf '%s' "$JOB_JSON" | jq -r '.payload.dry_run // "false"')" == "true" ]]; then
+    EXECUTOR_DRY_RUN="1"
+fi
 if [[ "$STATUS" == "ok" && "$PAYLOAD_KIND" == "systemEvent" && "$JOB_NAME" != coin-* ]]; then
-    if ! python3 "$ORDER_EXEC" --response "$RUN_RESPONSE_FILE" >> "$LOG_FILE" 2>&1; then
+    EXEC_ARGS=(--response "$RUN_RESPONSE_FILE")
+    if [[ "$EXECUTOR_DRY_RUN" == "1" ]]; then
+        EXEC_ARGS+=(--dry-run)
+    fi
+    if ! python3 "$ORDER_EXEC" "${EXEC_ARGS[@]}" >> "$LOG_FILE" 2>&1; then
         STATUS="error"
         ERROR_MSG="order execution stage failed"
     fi

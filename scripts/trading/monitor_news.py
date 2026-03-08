@@ -124,6 +124,13 @@ BREAKING_TITLE_COOLDOWN_SEC = max(300, int(os.environ.get("BREAKING_TITLE_COOLDO
 BREAKING_TOPIC_COOLDOWN_SEC = max(600, int(os.environ.get("BREAKING_TOPIC_COOLDOWN_SEC", "10800")))
 BREAKING_SINGLE_WORKER_LOCK = os.environ.get("BREAKING_SINGLE_WORKER_LOCK", "1").strip() not in {"0", "false", "False"}
 BREAKING_LOCK_FILE = Path(os.path.expanduser(os.environ.get("BREAKING_LOCK_FILE", "~/.openclaw/state/news_monitor.lock")))
+BREAKING_MONITOR_STATE_FILE = Path(os.path.expanduser(os.environ.get("BREAKING_MONITOR_STATE_FILE", "~/.openclaw/data/news_monitor_state.json")))
+BREAKING_MONITOR_RECENT_RUN_LIMIT = max(10, int(os.environ.get("BREAKING_MONITOR_RECENT_RUN_LIMIT", "60")))
+BREAKING_QUERY_DISPLAY = max(1, int(os.environ.get("BREAKING_QUERY_DISPLAY", "10")))
+BREAKING_DYNAMIC_QUERY_DISPLAY = max(1, int(os.environ.get("BREAKING_DYNAMIC_QUERY_DISPLAY", "6")))
+BREAKING_DYNAMIC_HOLDINGS_LIMIT = max(0, int(os.environ.get("BREAKING_DYNAMIC_HOLDINGS_LIMIT", "6")))
+BREAKING_DYNAMIC_WATCHLIST_LIMIT = max(0, int(os.environ.get("BREAKING_DYNAMIC_WATCHLIST_LIMIT", "6")))
+BREAKING_DYNAMIC_MAX_TOTAL_QUERIES = max(1, int(os.environ.get("BREAKING_DYNAMIC_MAX_TOTAL_QUERIES", "24")))
 
 # 보유종목 중요뉴스 → 즉시 Codex 판단 트리거
 URGENT_TRIGGER_ENABLED = os.environ.get("NEWS_URGENT_TRIGGER_ENABLED", "1") == "1"
@@ -205,6 +212,29 @@ def _topic_signature(item: dict) -> str:
     return hashlib.md5(norm.encode("utf-8")).hexdigest()[:16]
 
 
+def _sql_quote(value: str) -> str:
+    return "'" + str(value or "").replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _clickhouse_json_rows(sql: str, timeout: int = 20) -> list[dict]:
+    resp = requests.post(
+        CLICKHOUSE_URL,
+        params={"default_format": "JSON"},
+        data=(sql + "\n").encode("utf-8"),
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    rows = data.get("data", [])
+    return rows if isinstance(rows, list) else []
+
+
+def _active_watchlist_sources() -> list[str]:
+    raw = os.environ.get("WATCHLIST_ACTIVE_SOURCE", "enrich_data").strip()
+    out = [s.strip() for s in raw.split(",") if s.strip()]
+    return out or ["enrich_data"]
+
+
 def _find_codex_bin():
     for cand in CODEX_BIN_CANDIDATES:
         if not cand:
@@ -271,7 +301,7 @@ def _map_one_ticker(value: str) -> str:
     return ""
 
 
-def _extract_tickers_from_text(text: str, max_items: int = 4) -> list[str]:
+def _extract_tickers_from_text(text: str, max_items: int = 3) -> list[str]:
     content = clean_html(text or "")
     if not content:
         return []
@@ -332,6 +362,41 @@ def load_holdings_tickers() -> set[str]:
     return out
 
 
+def load_watchlist_tickers(limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    sources = _active_watchlist_sources()
+    sources_sql = ", ".join(_sql_quote(src) for src in sources)
+    sql = f"""
+SELECT
+    ticker,
+    argMax(ticker_name, ts) AS ticker_name,
+    argMin(rank, ts) AS rank
+FROM trading.interest_watchlist
+WHERE source IN ({sources_sql})
+  AND ts = (
+      SELECT max(ts)
+      FROM trading.interest_watchlist
+      WHERE source IN ({sources_sql})
+  )
+GROUP BY ticker
+HAVING match(ticker, '^[0-9]{{6}}$')
+ORDER BY rank ASC, ticker ASC
+LIMIT {max(1, int(limit))}
+"""
+    try:
+        rows = _clickhouse_json_rows(sql, timeout=15)
+    except Exception as e:
+        log.warning(f"watchlist 조회 실패 → 동적 속보 쿼리 스킵: {e}")
+        return []
+    out: list[str] = []
+    for row in rows:
+        ticker = str(row.get("ticker", "") or "").strip()
+        if re.match(r"^\d{6}$", ticker) and ticker not in out:
+            out.append(ticker)
+    return out
+
+
 def load_urgent_state() -> dict:
     try:
         if URGENT_STATE_FILE.exists():
@@ -350,22 +415,66 @@ def save_urgent_state(state: dict) -> None:
     URGENT_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def maybe_trigger_codex_for_holdings(breaking_items: list[dict]) -> None:
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def load_monitor_state() -> dict:
+    try:
+        if BREAKING_MONITOR_STATE_FILE.exists():
+            data = json.loads(BREAKING_MONITOR_STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def record_monitor_run(status: str, started_at: str, metrics: dict) -> None:
+    state = load_monitor_state()
+    finished_at = datetime.now().isoformat()
+    run = {
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "status": str(status or "unknown"),
+    }
+    for key, value in (metrics or {}).items():
+        run[str(key)] = value
+    recent = state.get("recent_runs", [])
+    if not isinstance(recent, list):
+        recent = []
+    recent.append(run)
+    recent = recent[-BREAKING_MONITOR_RECENT_RUN_LIMIT:]
+    state["recent_runs"] = recent
+    state["last_status"] = run["status"]
+    state["last_started_at"] = started_at
+    state["last_finished_at"] = finished_at
+    state["last_metrics"] = run
+    if run["status"] not in {"error", "lock_skip"}:
+        state["last_success_at"] = finished_at
+    _write_json_atomic(BREAKING_MONITOR_STATE_FILE, state)
+
+
+def maybe_trigger_codex_for_holdings(breaking_items: list[dict], holdings: set[str] | None = None) -> int:
     """보유종목 관련 중요뉴스가 있으면 Codex 판단을 즉시 트리거한다(중복/쿨다운 적용)."""
     if not URGENT_TRIGGER_ENABLED:
-        return
+        return 0
     if not breaking_items:
-        return
+        return 0
     if not MCPORTER_BIN:
         log.warning("mcporter 미탐지 → 긴급 트리거 스킵")
-        return
-    try:
-        holdings = load_holdings_tickers()
-    except Exception as e:
-        log.warning(f"잔고 조회 실패 → 긴급 트리거 스킵: {e}")
-        return
+        return 0
+    if holdings is None:
+        try:
+            holdings = load_holdings_tickers()
+        except Exception as e:
+            log.warning(f"잔고 조회 실패 → 긴급 트리거 스킵: {e}")
+            return 0
     if not holdings:
-        return
+        return 0
 
     urgent = []
     for it in breaking_items:
@@ -379,14 +488,14 @@ def maybe_trigger_codex_for_holdings(breaking_items: list[dict]) -> None:
             urgent.append(it)
 
     if not urgent:
-        return
+        return 0
 
     state = load_urgent_state()
     now_ts = int(time.time())
     last_ts = int(state.get("last_trigger_ts", 0) or 0)
     if now_ts - last_ts < URGENT_COOLDOWN_SEC:
         log.info(f"긴급 트리거 쿨다운({URGENT_COOLDOWN_SEC}s) → 스킵")
-        return
+        return 0
 
     seen: dict = state.get("seen", {}) if isinstance(state.get("seen"), dict) else {}
     # 24시간 지난 seen 정리
@@ -401,7 +510,7 @@ def maybe_trigger_codex_for_holdings(breaking_items: list[dict]) -> None:
             seen[key] = now_ts
 
     if not new_items:
-        return
+        return 0
 
     state["last_trigger_ts"] = now_ts
     state["seen"] = seen
@@ -419,13 +528,19 @@ def maybe_trigger_codex_for_holdings(breaking_items: list[dict]) -> None:
             start_new_session=True,
         )
         log.info(f"긴급 트리거 실행: job={URGENT_JOB_NAME} alerts={len(new_items)}")
+        return len(new_items)
     except Exception as e:
         log.error(f"긴급 트리거 실행 실패: {e}")
+        return 0
 
 
-def persist_urgent_context(breaking_items: list[dict], holdings: list[str] | None = None) -> None:
+def persist_urgent_context(
+    breaking_items: list[dict],
+    holdings: list[str] | None = None,
+    path: Path | None = None,
+) -> Path | None:
     if not breaking_items:
-        return
+        return None
     alerts = []
     for item in breaking_items:
         alerts.append(
@@ -446,11 +561,12 @@ def persist_urgent_context(breaking_items: list[dict], holdings: list[str] | Non
         "holdings": [str(x) for x in (holdings or [])],
         "alerts": alerts,
     }
-    URGENT_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    URGENT_CONTEXT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    target = path or URGENT_CONTEXT_FILE
+    _write_json_atomic(target, payload)
+    return target
 
 
-def maybe_send_dooray_breaking_report() -> None:
+def maybe_send_dooray_breaking_report(context_file: Path | None = None) -> None:
     if not DOORAY_BREAKING_REPORT_ENABLED:
         return
     try:
@@ -462,7 +578,7 @@ def maybe_send_dooray_breaking_report() -> None:
                 DOORAY_BREAKING_REPORT_SCRIPT,
                 "--breaking",
                 "--context-file",
-                str(URGENT_CONTEXT_FILE),
+                str(context_file or URGENT_CONTEXT_FILE),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -657,20 +773,75 @@ def _release_worker_lock(fd) -> None:
 
 
 # ─── 1. 속보 후보 수집 ──────────────────────────────────
+def build_breaking_query_specs() -> list[dict]:
+    specs: list[dict] = []
+    seen_queries: set[str] = set()
+
+    for query in BREAKING_QUERIES:
+        q = str(query or "").strip()
+        if not q or q in seen_queries:
+            continue
+        specs.append({"query": q, "display": BREAKING_QUERY_DISPLAY, "tag": "base"})
+        seen_queries.add(q)
+
+    dynamic_candidates: list[tuple[str, str, str]] = []
+    try:
+        holdings = sorted(load_holdings_tickers())
+    except Exception as e:
+        log.warning(f"보유종목 조회 실패 → 동적 속보 쿼리 일부 스킵: {e}")
+        holdings = []
+    for ticker in holdings[:BREAKING_DYNAMIC_HOLDINGS_LIMIT]:
+        name = str(_ticker_name_by_code.get(ticker, "") or "").strip()
+        if name:
+            dynamic_candidates.append(("holding", ticker, name))
+
+    watchlist = load_watchlist_tickers(BREAKING_DYNAMIC_WATCHLIST_LIMIT * 2)
+    for ticker in watchlist:
+        if ticker in holdings:
+            continue
+        if sum(1 for tag, _, _ in dynamic_candidates if tag == "watchlist") >= BREAKING_DYNAMIC_WATCHLIST_LIMIT:
+            break
+        name = str(_ticker_name_by_code.get(ticker, "") or "").strip()
+        if name:
+            dynamic_candidates.append(("watchlist", ticker, name))
+
+    for tag, ticker, name in dynamic_candidates:
+        query = name.strip()
+        if not query or query in seen_queries:
+            continue
+        if len(specs) >= BREAKING_DYNAMIC_MAX_TOTAL_QUERIES:
+            break
+        specs.append(
+            {
+                "query": query,
+                "display": BREAKING_DYNAMIC_QUERY_DISPLAY,
+                "tag": tag,
+                "ticker": ticker,
+                "ticker_name": name,
+            }
+        )
+        seen_queries.add(query)
+
+    return specs
+
+
 def fetch_breaking_news():
     all_news = []
     seen_urls = set()
+    query_specs = build_breaking_query_specs()
 
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
         log.error("NAVER_CLIENT_ID/NAVER_CLIENT_SECRET 미설정")
-        return all_news
+        return all_news, {"query_count": 0, "dynamic_query_count": 0}
 
-    for query in BREAKING_QUERIES:
+    for spec in query_specs:
+        query = str(spec.get("query", "") or "").strip()
+        display = max(1, int(spec.get("display", BREAKING_QUERY_DISPLAY) or BREAKING_QUERY_DISPLAY))
         headers = {
             "X-Naver-Client-Id": NAVER_CLIENT_ID,
             "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
         }
-        params = {"query": query, "display": 10, "sort": "date"}
+        params = {"query": query, "display": display, "sort": "date"}
         try:
             resp = requests.get(NAVER_API_URL, headers=headers, params=params, timeout=10)
             resp.raise_for_status()
@@ -696,13 +867,21 @@ def fetch_breaking_news():
                     "url": url,
                     "pub_date": item.get("pubDate", ""),
                     "category": "breaking",
+                    "query_tag": str(spec.get("tag", "base") or "base"),
+                    "query_text": query,
+                    "query_tickers": [str(spec.get("ticker", "")).strip()] if str(spec.get("ticker", "")).strip() else [],
+                    "query_name": str(spec.get("ticker_name", "") or "").strip(),
                 })
         except Exception as e:
             log.error(f"Naver API 실패 [{query}]: {e}")
         time.sleep(0.1)
 
-    log.info(f"속보 후보: {len(all_news)}건 (최근 {BREAKING_MAX_AGE_MIN}분)")
-    return all_news
+    dynamic_query_count = sum(1 for spec in query_specs if str(spec.get("tag", "base")) != "base")
+    log.info(
+        f"속보 후보: {len(all_news)}건 (최근 {BREAKING_MAX_AGE_MIN}분, "
+        f"쿼리 {len(query_specs)}개=기본 {len(query_specs)-dynamic_query_count}+동적 {dynamic_query_count})"
+    )
+    return all_news, {"query_count": len(query_specs), "dynamic_query_count": dynamic_query_count}
 
 
 # ─── 2. 3단계 중복 필터 ─────────────────────────────────
@@ -711,7 +890,8 @@ def filter_duplicates(candidates):
     # L1: DB URL
     query = (
         "SELECT source_url, title FROM trading.news "
-        f"WHERE collected_at > now() - INTERVAL {BREAKING_DB_DEDUP_HOURS} HOUR"
+        f"WHERE collected_at > now() - INTERVAL {BREAKING_DB_DEDUP_HOURS} HOUR "
+        "AND (category = 'breaking' OR trigger_type = 'breaking')"
     )
     try:
         resp = requests.get(CLICKHOUSE_URL, params={"query": query}, timeout=10)
@@ -916,10 +1096,12 @@ def _normalize_breaking_result(result):
 def check_breaking(news_list):
     breaking = []
     consecutive_fail = 0
+    stats = {"llm_attempt_count": 0, "parse_fail_count": 0, "codex_fail_count": 0}
     schema_path = BREAKING_SCHEMA_PATH if os.path.isfile(BREAKING_SCHEMA_PATH) else None
     for news in news_list:
         for attempt in range(3):
             try:
+                stats["llm_attempt_count"] += 1
                 prompt = (
                     f"{BREAKING_PROMPT}\n\n"
                     f"[USER_TASK]\n제목: {news['title']}\n내용: {news['description']}\n\n"
@@ -940,22 +1122,33 @@ def check_breaking(news_list):
                 if parsed_obj is None:
                     obj_match = re.search(r"\{.*\}", raw, re.DOTALL)
                     if not obj_match:
-                        break  # 파싱 실패 → 다음 뉴스
+                        raise ValueError("breaking response missing json object")
                     parsed_obj = json.loads(obj_match.group())
 
                 result = _normalize_breaking_result(parsed_obj)
                 if not result:
-                    break
+                    raise ValueError("breaking response normalization failed")
                 consecutive_fail = 0
 
                 if result.get("is_breaking") and result.get("importance", 0) >= 4:
                     if not result.get("tickers"):
                         inferred = _extract_tickers_from_text(
                             f"{news.get('title', '')}\n{news.get('description', '')}",
-                            max_items=4,
+                            max_items=3,
                         )
                         if inferred:
                             result["tickers"] = inferred
+                    if not result.get("tickers"):
+                        query_name = str(news.get("query_name", "") or "").strip()
+                        content = f"{news.get('title', '')}\n{news.get('description', '')}"
+                        if query_name and query_name.replace(" ", "") in content.replace(" ", ""):
+                            hinted = [
+                                str(t).strip()
+                                for t in news.get("query_tickers", [])
+                                if re.match(r"^\d{6}$", str(t).strip())
+                            ]
+                            if hinted:
+                                result["tickers"] = hinted[:3]
                     result["ticker_names"] = _ticker_names(result.get("tickers", []))
                     result["title"] = news["title"]
                     result["url"] = news["url"]
@@ -968,14 +1161,18 @@ def check_breaking(news_list):
                 break  # 성공 → 다음 뉴스
 
             except Exception as e:
+                if isinstance(e, ValueError):
+                    stats["parse_fail_count"] += 1
+                else:
+                    stats["codex_fail_count"] += 1
                 log.error(f"Codex 판별 실패 (attempt {attempt+1}/3): {e}")
                 consecutive_fail += 1
                 if consecutive_fail >= 5:
                     log.error("연속 5회 판별 실패 — codex 장애 의심, 조기 중단")
-                    return breaking
+                    return breaking, stats
                 time.sleep(2 ** attempt * 3)
 
-    return breaking
+    return breaking, stats
 
 
 # ─── 4. DB 삽입 + 알림 ──────────────────────────────────
@@ -1062,9 +1259,25 @@ def alert_trading_bot(items):
 
 # ─── 메인 ───────────────────────────────────────────────
 def main():
+    started_at = datetime.now().isoformat()
+    metrics: dict[str, int | float | str] = {
+        "candidate_count": 0,
+        "filtered_count": 0,
+        "breaking_count": 0,
+        "inserted_count": 0,
+        "query_count": 0,
+        "dynamic_query_count": 0,
+        "lock_skipped": 0,
+        "parse_fail_count": 0,
+        "codex_fail_count": 0,
+        "llm_attempt_count": 0,
+        "urgent_trigger_count": 0,
+    }
     worker_lock = _acquire_worker_lock()
     if worker_lock is False:
         log.info("다른 속보 모니터 실행 중 → 이번 주기 스킵")
+        metrics["lock_skipped"] = 1
+        record_monitor_run("lock_skip", started_at, metrics)
         return
     start = time.time()
     try:
@@ -1074,49 +1287,81 @@ def main():
 
         if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
             log.error("NAVER_CLIENT_ID/NAVER_CLIENT_SECRET 미설정으로 속보 모니터 중단")
+            metrics["runtime_sec"] = round(time.time() - start, 2)
+            record_monitor_run("error", started_at, metrics)
             return
 
         if not CODEX_BIN:
             log.error("LLM binary not found. 속보 판별 중단.")
+            metrics["runtime_sec"] = round(time.time() - start, 2)
+            record_monitor_run("error", started_at, metrics)
             return
 
         # 1) 수집
-        candidates = fetch_breaking_news()
+        candidates, fetch_stats = fetch_breaking_news()
+        metrics["candidate_count"] = len(candidates)
+        metrics["query_count"] = int(fetch_stats.get("query_count", 0) or 0)
+        metrics["dynamic_query_count"] = int(fetch_stats.get("dynamic_query_count", 0) or 0)
         if not candidates:
             log.info(f"최근 {BREAKING_MAX_AGE_MIN}분 내 뉴스 없음.")
+            metrics["runtime_sec"] = round(time.time() - start, 2)
+            record_monitor_run("no_candidates", started_at, metrics)
             return
 
         # 2) 3단계 중복 필터
         filtered = filter_duplicates(candidates)
+        metrics["filtered_count"] = len(filtered)
         if not filtered:
             log.info("모두 중복. 종료.")
+            metrics["runtime_sec"] = round(time.time() - start, 2)
+            record_monitor_run("deduped", started_at, metrics)
             return
 
         log.info(f"Codex 판별 대상: {len(filtered)}건")
 
         # 3) 속보 판별
-        breaking = check_breaking(filtered)
+        breaking, check_stats = check_breaking(filtered)
+        metrics["breaking_count"] = len(breaking)
+        metrics["parse_fail_count"] = int(check_stats.get("parse_fail_count", 0) or 0)
+        metrics["codex_fail_count"] = int(check_stats.get("codex_fail_count", 0) or 0)
+        metrics["llm_attempt_count"] = int(check_stats.get("llm_attempt_count", 0) or 0)
         if not breaking:
             log.info("속보 없음. 정상.")
             log.info(f"완료 ({time.time()-start:.1f}초)")
+            metrics["runtime_sec"] = round(time.time() - start, 2)
+            record_monitor_run("no_breaking", started_at, metrics)
             return
 
         breaking = suppress_recent_topics(breaking)
+        metrics["breaking_count"] = len(breaking)
         if not breaking:
             log.info("기존 속보 토픽과 중복되어 알림 억제.")
             log.info(f"완료 ({time.time()-start:.1f}초)")
+            metrics["runtime_sec"] = round(time.time() - start, 2)
+            record_monitor_run("topic_suppressed", started_at, metrics)
             return
 
-        # 겹치는 프로세스가 있어도 같은 토픽을 재통과시키지 않도록 먼저 이력 예약.
-        reserve_alert_history(breaking)
+        holdings: set[str] = set()
+        if URGENT_TRIGGER_ENABLED or DOORAY_BREAKING_REPORT_ENABLED:
+            try:
+                holdings = load_holdings_tickers()
+            except Exception as e:
+                log.warning(f"잔고 조회 실패 → 긴급 컨텍스트는 빈 holdings로 저장: {e}")
+                holdings = set()
 
         # 4) DB + 알림
         inserted = insert_breaking(breaking)
+        metrics["inserted_count"] = int(inserted)
         log.info(f"🚨 속보 {len(breaking)}건 DB ({inserted}건)")
         alert_trading_bot(breaking)
-        maybe_trigger_codex_for_holdings(breaking)
-        persist_urgent_context(breaking)
-        maybe_send_dooray_breaking_report()
+        persist_urgent_context(breaking, holdings=sorted(holdings))
+        dooray_context_path = None
+        if DOORAY_BREAKING_REPORT_ENABLED:
+            dooray_context_path = URGENT_CONTEXT_FILE.with_name(f"{URGENT_CONTEXT_FILE.stem}_dooray.json")
+            persist_urgent_context(breaking, holdings=sorted(holdings), path=dooray_context_path)
+        reserve_alert_history(breaking)
+        metrics["urgent_trigger_count"] = maybe_trigger_codex_for_holdings(breaking, holdings=holdings)
+        maybe_send_dooray_breaking_report(dooray_context_path)
 
         # 4.5) 텔레그램 알림
         try:
@@ -1133,7 +1378,13 @@ def main():
         except Exception as e:
             log.warning(f"텔레그램 전송 실패: {e}")
 
+        metrics["runtime_sec"] = round(time.time() - start, 2)
+        record_monitor_run("ok", started_at, metrics)
         log.info(f"🚨 완료 ({time.time()-start:.1f}초) — {len(breaking)}건 감지!")
+    except Exception:
+        metrics["runtime_sec"] = round(time.time() - start, 2)
+        record_monitor_run("error", started_at, metrics)
+        raise
     finally:
         _release_worker_lock(worker_lock)
 
