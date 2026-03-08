@@ -101,6 +101,11 @@ SINGLE_WORKER_LOCK = os.environ.get("COLLECT_NEWS_SINGLE_WORKER_LOCK", "1").stri
 LOCK_FILE = os.path.expanduser(
     os.environ.get("COLLECT_NEWS_LOCK_FILE", "~/.openclaw/state/collect_news.lock")
 )
+LOCK_WAIT_SEC = max(0, int(os.environ.get("COLLECT_NEWS_WAIT_FOR_LOCK_SEC", "0").strip() or "0"))
+LOCK_WAIT_POLL_SEC = max(
+    0.2,
+    float(os.environ.get("COLLECT_NEWS_WAIT_FOR_LOCK_POLL_SEC", "2").strip() or "2"),
+)
 
 # ClickHouse (userinfo URL을 쓰되, 내부적으로 Authorization 헤더로 변환해서 요청한다)
 def _normalize_clickhouse_url() -> str:
@@ -502,11 +507,16 @@ def _acquire_worker_lock():
     path = Path(LOCK_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(fd)
-        return None
+    deadline = time.time() + LOCK_WAIT_SEC
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if LOCK_WAIT_SEC <= 0 or time.time() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(LOCK_WAIT_POLL_SEC)
     os.ftruncate(fd, 0)
     os.write(
         fd,
@@ -515,6 +525,7 @@ def _acquire_worker_lock():
                 "pid": os.getpid(),
                 "mode": determine_mode(),
                 "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "wait_sec": LOCK_WAIT_SEC,
             },
             ensure_ascii=False,
         ).encode("utf-8"),
