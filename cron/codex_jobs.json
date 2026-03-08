@@ -240,7 +240,7 @@
       "name": "data-news-cluster-hourly",
       "enabled": true,
       "schedule": {
-        "expr": "*/20 9-15 * * 1-5",
+        "expr": "6,26,46 9-15 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -253,7 +253,7 @@
       "name": "data-news-relation-reasoning-20m",
       "enabled": true,
       "schedule": {
-        "expr": "7,27,47 9-15 * * 1-5",
+        "expr": "14,34,54 9-15 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -318,7 +318,7 @@
       "name": "trading-decision-10m",
       "enabled": true,
       "schedule": {
-        "expr": "*/10 9-15 * * 1-5",
+        "expr": "16,26,36,46,56 9-14 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -331,7 +331,7 @@
       "name": "position-manager-20m",
       "enabled": true,
       "schedule": {
-        "expr": "*/20 9-15 * * 1-5",
+        "expr": "18,38,58 9-14 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -357,7 +357,7 @@
       "name": "data-watchlist-run-health-20m",
       "enabled": true,
       "schedule": {
-        "expr": "*/20 8-16 * * 1-5",
+        "expr": "9,29,49 8-16 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -396,7 +396,7 @@
       "name": "data-news-trading-hourly",
       "enabled": true,
       "schedule": {
-        "expr": "*/15 9-15 * * 1-5",
+        "expr": "4,19,34,49 9-15 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -409,7 +409,20 @@
       "name": "data-news-monitor-5m",
       "enabled": true,
       "schedule": {
-        "expr": "*/5 9-15 * * 1-5",
+        "expr": "2-57/5 9-14 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_news.py >> $HOME/.openclaw/logs/news-monitor.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-news-monitor-5m-close",
+      "enabled": true,
+      "schedule": {
+        "expr": "2,7,12,17,22,27 15 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -422,7 +435,7 @@
       "name": "data-news-relation-score-20m",
       "enabled": true,
       "schedule": {
-        "expr": "3,23,43 9-15 * * 1-5",
+        "expr": "10,30,50 9-15 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -435,7 +448,7 @@
       "name": "data-news-research-15m",
       "enabled": true,
       "schedule": {
-        "expr": "*/15 8-17 * * 1-5",
+        "expr": "8,23,38,53 8-17 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -461,7 +474,7 @@
       "name": "data-enrich-pre-market",
       "enabled": true,
       "schedule": {
-        "expr": "30 7 * * 1-5",
+        "expr": "35 7 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -474,7 +487,7 @@
       "name": "data-enrich-midday-quick",
       "enabled": true,
       "schedule": {
-        "expr": "0 12 * * 1-5",
+        "expr": "7 12 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -500,7 +513,7 @@
       "name": "data-news-pipeline-health-20m",
       "enabled": true,
       "schedule": {
-        "expr": "*/20 8-16 * * 1-5",
+        "expr": "12,32,52 8-16 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -513,7 +526,7 @@
       "name": "data-execution-mode-2m",
       "enabled": true,
       "schedule": {
-        "expr": "*/2 8-15 * * 1-5",
+        "expr": "1-59/2 8-15 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -523,10 +536,36 @@
       "source": "legacy-crontab"
     },
     {
+      "name": "position-manager-20m-close",
+      "enabled": true,
+      "schedule": {
+        "expr": "18 15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
       "name": "shock-position-review-3m",
       "enabled": true,
       "schedule": {
-        "expr": "*/3 9-15 * * 1-5",
+        "expr": "2-59/3 9-14 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute --only-modes shock,recovery >> $HOME/.openclaw/logs/position-manager-shock.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "shock-position-review-3m-close",
+      "enabled": true,
+      "schedule": {
+        "expr": "2,5,8,11,14,17 15 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -539,12 +578,25 @@
       "name": "pending-exit-replay-open",
       "enabled": true,
       "schedule": {
-        "expr": "0 9 * * 1-5",
+        "expr": "1 9 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
         "kind": "command",
         "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/execute_gpt_orders.py --replay-pending-exit-only >> $HOME/.openclaw/logs/pending-exit-replay.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "trading-decision-10m-close",
+      "enabled": true,
+      "schedule": {
+        "expr": "16,26 15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && DECISION_STAGE0_ONLY_CONSTRAINTS=\"${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/decision_operating_pipeline.py --horizon INTRADAY --universe auto --limit 30 >> $HOME/.openclaw/logs/decision-operating.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_decision_dryrun_telegram.py >> $HOME/.openclaw/logs/decision-operating.log 2>&1"
       },
       "source": "legacy-crontab"
     },
@@ -565,7 +617,7 @@
       "name": "data-market-10m",
       "enabled": true,
       "schedule": {
-        "expr": "*/10 9-16 * * 1-5",
+        "expr": "1,11,21,31,41,51 9-16 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -578,7 +630,7 @@
       "name": "data-morning-briefing-0800",
       "enabled": true,
       "schedule": {
-        "expr": "0 8 * * 1-5",
+        "expr": "58 7 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {

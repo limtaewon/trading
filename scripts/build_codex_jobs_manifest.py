@@ -48,8 +48,8 @@ def data_jobs() -> list[dict]:
     base_scripts = "$HOME/.openclaw/scripts"
     logs = "$HOME/.openclaw/logs"
     py = "/usr/bin/python3"
-    collect_expr = "*/15 9-15 * * 1-5"
-    cluster_expr = "*/20 9-15 * * 1-5"
+    collect_expr = "4,19,34,49 9-15 * * 1-5"
+    cluster_expr = "6,26,46 9-15 * * 1-5"
     cluster_window_hours = "144"
     cluster_threshold = "0.48"
     cluster_limit = "10000"
@@ -87,7 +87,17 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-news-monitor-5m",
             "enabled": True,
-            "schedule": {"expr": "*/5 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "2-57/5 9-14 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/monitor_news.py >> {logs}/news-monitor.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "data-news-monitor-5m-close",
+            "enabled": True,
+            "schedule": {"expr": "2,7,12,17,22,27 15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/monitor_news.py >> {logs}/news-monitor.log 2>&1',
@@ -107,7 +117,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-news-relation-score-20m",
             "enabled": True,
-            "schedule": {"expr": "3,23,43 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "10,30,50 9-15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": (
@@ -124,7 +134,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-news-research-15m",
             "enabled": True,
-            "schedule": {"expr": "*/15 8-17 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "8,23,38,53 8-17 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": (
@@ -158,7 +168,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-news-relation-reasoning-20m",
             "enabled": True,
-            "schedule": {"expr": "7,27,47 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "14,34,54 9-15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": (
@@ -173,7 +183,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-enrich-pre-market",
             "enabled": True,
-            "schedule": {"expr": "30 7 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "35 7 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && bash {trading_scripts}/enrich_data.sh >> {logs}/enrich.log 2>&1',
@@ -183,7 +193,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-enrich-midday-quick",
             "enabled": True,
-            "schedule": {"expr": "0 12 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "7 12 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && bash {trading_scripts}/enrich_data.sh --quick >> {logs}/enrich.log 2>&1',
@@ -193,7 +203,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-watchlist-run-health-20m",
             "enabled": True,
-            "schedule": {"expr": "*/20 8-16 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "9,29,49 8-16 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/monitor_watchlist_runs.py --source "${{WATCHLIST_ACTIVE_SOURCE:-enrich_data}}" >> {logs}/watchlist-health.log 2>&1',
@@ -216,7 +226,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-news-pipeline-health-20m",
             "enabled": True,
-            "schedule": {"expr": "*/20 8-16 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "12,32,52 8-16 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/monitor_news_pipeline_health.py >> {logs}/news-pipeline-health.log 2>&1',
@@ -236,7 +246,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-execution-mode-2m",
             "enabled": True,
-            "schedule": {"expr": "*/2 8-15 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "1-59/2 8-15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1',
@@ -246,7 +256,17 @@ def data_jobs() -> list[dict]:
         {
             "name": "position-manager-20m",
             "enabled": True,
-            "schedule": {"expr": "*/20 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "18,38,58 9-14 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1 && {py} {trading_scripts}/manage_positions.py --execute >> {logs}/position-manager.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "position-manager-20m-close",
+            "enabled": True,
+            "schedule": {"expr": "18 15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1 && {py} {trading_scripts}/manage_positions.py --execute >> {logs}/position-manager.log 2>&1',
@@ -256,7 +276,22 @@ def data_jobs() -> list[dict]:
         {
             "name": "shock-position-review-3m",
             "enabled": True,
-            "schedule": {"expr": "*/3 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "2-59/3 9-14 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && '
+                    f'{py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1 && '
+                    f'{py} {trading_scripts}/manage_positions.py --execute --only-modes shock,recovery '
+                    f'>> {logs}/position-manager-shock.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "shock-position-review-3m-close",
+            "enabled": True,
+            "schedule": {"expr": "2,5,8,11,14,17 15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": (
@@ -271,7 +306,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "pending-exit-replay-open",
             "enabled": True,
-            "schedule": {"expr": "0 9 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "1 9 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": (
@@ -286,7 +321,25 @@ def data_jobs() -> list[dict]:
         {
             "name": "trading-decision-10m",
             "enabled": True,
-            "schedule": {"expr": "*/10 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "16,26,36,46,56 9-14 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && '
+                    f'{py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1 && '
+                    'DECISION_STAGE0_ONLY_CONSTRAINTS="${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}" '
+                    f'{py} {trading_scripts}/decision_operating_pipeline.py --horizon INTRADAY --universe auto --limit 30 '
+                    f'>> {logs}/decision-operating.log 2>&1 && '
+                    f'{py} {trading_scripts}/send_decision_dryrun_telegram.py '
+                    f'>> {logs}/decision-operating.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "trading-decision-10m-close",
+            "enabled": True,
+            "schedule": {"expr": "16,26 15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": (
@@ -314,7 +367,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-market-10m",
             "enabled": True,
-            "schedule": {"expr": "*/10 9-16 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "1,11,21,31,41,51 9-16 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/collect_market_data.py >> {logs}/market_data.log 2>&1',
@@ -324,7 +377,7 @@ def data_jobs() -> list[dict]:
         {
             "name": "data-morning-briefing-0800",
             "enabled": True,
-            "schedule": {"expr": "0 8 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "58 7 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/morning_briefing.py >> {logs}/briefing.log 2>&1',
