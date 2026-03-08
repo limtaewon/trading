@@ -112,8 +112,17 @@
 - 실제 잡 정의 파일:
 - `cron/codex_jobs.json`
 - `cron/jobs.json`
+- `cron/desktop_trading.crontab`
 - 생성기:
 - `scripts/build_codex_jobs_manifest.py`
+- `scripts/build_desktop_crontab.py`
+- macOS 데스크톱 cron export는 `codex_jobs.json` 중 `source=legacy-crontab`인 `command` 잡만 포함한다.
+- macOS cron은 스케줄 해석에 `CRON_TZ`를 쓰지 않으므로, `desktop_trading.crontab` 설치 전 로컬 타임존을 `Asia/Seoul`로 맞춘다.
+- macOS desktop cron 반영:
+```bash
+python3 scripts/build_desktop_crontab.py
+crontab ~/.openclaw/cron/desktop_trading.crontab
+```
 - 보유 포지션 동적 관리는 `position-manager-20m` command 잡(평일 09:00~15:59, 20분 주기)으로 실행한다.
 - `data-execution-mode-2m`로 execution mode를 2분마다 갱신한다.
 - `shock-position-review-3m`로 shock/recovery 구간에서만 빠른 포지션 리뷰를 추가 실행한다.
@@ -222,7 +231,17 @@ bash scripts/ops/deploy_to_runtime.sh
 - ClickHouse 연결은 `CLICKHOUSE_URL=http://user:pass@host:8123`와 `CLICKHOUSE_HOST + USER/PASS` 두 형식을 모두 정규화해 인증 오류 재발을 줄인다.
 
 ### 11-3. 두레이 보고 흐름
-- 기본값(`DOORAY_USE_PIPELINE_BRIEFING=1`)에서 `send_dooray_briefing.py`는 파이프라인 모드를 사용한다.
+- 기본값(`DOORAY_USE_PIPELINE_BRIEFING=1`, `DOORAY_USE_SHARED_PAYLOAD=1`)에서 `send_dooray_briefing.py`는 shared payload 기반 내부 브리핑을 우선 사용한다.
+- 이전 LLM 파이프라인 브리핑 포맷이 필요하면 `DOORAY_USE_SHARED_PAYLOAD=0` 또는 `--legacy-format`/기존 경로를 사용한다.
+- 공개 브로드캐스트는 `공개 Telegram + Dooray 2개 방`을 하나의 채널로 보고 같은 시간에 같은 메시지를 보낸다.
+- owner Telegram은 별도 채널이다. 이 방에는 데이터 수집 상태, 파이프라인 헬스, 자동매매 체결/스킵, 포지션 운영 같은 내부 운영 정보가 계속 남는다.
+- 공개 Telegram 오프닝 노트/주간 리뷰/다음 주 전망은 각각
+  `send_public_telegram_report.py`,
+  `send_public_weekly_review.py`,
+  `send_public_weekly_outlook.py`
+  가 담당하며 `TG_PUBLIC_BOT_TOKEN`/`TG_PUBLIC_CHAT_ID` 또는 `TELEGRAM_PUBLIC_BOT_TOKEN`/`TELEGRAM_PUBLIC_CHAT_ID`를 사용한다.
+- 공개 리포트 전송은 `public_report_delivery.py`가 담당하며, 같은 본문을 Telegram public + Dooray webhooks로 동시 전송한다.
+- 공개 일간 리포트는 `shared payload + 내부 DB + 네이버 실시간 지수/환율 + web_market_signals + LLM longform renderer`를 사용한다.
 - 파이프라인 모드는 `send_decision_dryrun_telegram.py`를 재사용해 `decision_run/decision_candidate` 기반 메시지를 생성한다.
 - 파이프라인 모드 메시지에 `매크로 24h Digest`를 추가해 티커 매핑이 없는 지정학/전쟁/유가 이슈도 노출한다.
 - 브리핑 LLM은 `scripts/trading/prompts/dooray_briefing_main_prompt.txt`를 기본 템플릿으로 사용하고, 공통 판단 프레임워크(`scripts/trading/prompts/shared_trading_framework_kr.txt`)를 동일하게 주입한다.
@@ -255,7 +274,10 @@ python3 ~/.openclaw/scripts/trading/prune_interest_watchlist.py --retention-days
 # 4) 최신 decision_id 기준 두레이 보고
 python3 ~/.openclaw/scripts/trading/send_dooray_briefing.py
 
-# 5) 보유 포지션 동적 관리 실행(실주문)
+# 5) 공개 일간 리포트 수동 발송
+python3 ~/.openclaw/scripts/trading/send_public_telegram_report.py
+
+# 6) 보유 포지션 동적 관리 실행(실주문)
 python3 ~/.openclaw/scripts/trading/manage_positions.py --execute
 
 # 6) Replay 검증(최근 20개 decision 재집계 일치성 점검)

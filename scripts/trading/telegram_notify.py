@@ -26,7 +26,21 @@ except ImportError:
     from _requests_compat import requests
 
 
-def _resolve_creds() -> tuple[str, str]:
+def _resolve_creds(audience: str = "default") -> tuple[str, str]:
+    aud = str(audience or "default").strip().lower()
+    if aud == "public":
+        token = (
+            os.environ.get("TG_PUBLIC_BOT_TOKEN", "").strip()
+            or os.environ.get("TELEGRAM_PUBLIC_BOT_TOKEN", "").strip()
+            or os.environ.get("TG_BOT_TOKEN", "").strip()
+            or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        )
+        chat_id = (
+            os.environ.get("TG_PUBLIC_CHAT_ID", "").strip()
+            or os.environ.get("TELEGRAM_PUBLIC_CHAT_ID", "").strip()
+        )
+        return token, chat_id
+
     token = (
         os.environ.get("TG_BOT_TOKEN", "").strip()
         or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -58,11 +72,14 @@ def _load_shared_notify(func_name: str = "notify"):
         return None
 
 
-def _send(text: str, parse_mode: str | None = "HTML") -> bool:
+def _send(text: str, parse_mode: str | None = "HTML", audience: str = "default") -> bool:
     if not str(text or "").strip():
         return True
-    token, chat_id = _resolve_creds()
+    token, chat_id = _resolve_creds(audience=audience)
     if not token or not chat_id:
+        if audience == "public":
+            print("[TG] skip: TG_PUBLIC_BOT_TOKEN/TG_PUBLIC_CHAT_ID not configured")
+            return False
         shared_notify = _load_shared_notify("notify")
         if shared_notify:
             shared_text = str(text)
@@ -105,15 +122,23 @@ def _send(text: str, parse_mode: str | None = "HTML") -> bool:
 
 
 def notify(text: str) -> bool:
-    return _send(text, "HTML")
+    return _send(text, "HTML", audience="default")
 
 
 def alert(text: str) -> bool:
-    return _send(text, "HTML")
+    return _send(text, "HTML", audience="default")
 
 
 def notify_plain(text: str) -> bool:
-    return _send(text, None)
+    return _send(text, None, audience="default")
+
+
+def notify_public(text: str) -> bool:
+    return _send(text, "HTML", audience="public")
+
+
+def notify_public_plain(text: str) -> bool:
+    return _send(text, None, audience="public")
 
 
 if __name__ == "__main__":

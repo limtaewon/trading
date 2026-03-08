@@ -54,6 +54,13 @@
   pipeline 모드에서는 "매크로 24h Digest" 데이터를 함께 사용해 티커 매핑 실패 뉴스도 노출
   `DOORAY_SEND_RELATION_PLUS_A=1`(기본)일 때 기본 브리핑 직후 `연관관계 +A 브리핑`을 2차 전송
   (`DOORAY_RELATION_PLUS_A_DELAY_SEC`, `DOORAY_RELATION_PLUS_A_TOP`, `DOORAY_RELATION_PLUS_A_HYPOTHESIS`로 조정)
+- 채널 분리:
+  owner Telegram은 내부 운영 채널이다.
+  여기에는 morning_briefing.py, execute_gpt_orders.py order brief, watchlist/news health alert, weekly_market_report.py 같은 내부 메시지가 남는다.
+  public broadcast는 공개 Telegram + Dooray 2개 방을 하나의 묶음으로 보고 같은 메시지를 동시 전송한다.
+  public daily/weekly sender는 send_public_telegram_report.py, send_public_weekly_review.py, send_public_weekly_outlook.py 이다.
+  public 전송은 public_report_delivery.py가 맡고, Telegram public + Dooray webhook 2개로 동일 본문을 보낸다.
+  public daily는 shared payload + web_market_signals + LLM longform renderer(public_daily_report_llm.py) 경로를 우선 사용한다.
 - 연관 매핑 정책:
   hidden_relation_scorer.py는 technical_signals뿐 아니라
   `~/.openclaw/workspace/STOCKS.csv` + `~/.openclaw/data/krx_stocks.json`

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "report_payload_schema.json",
+  "title": "Trading Report Payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_type",
+    "audience",
+    "generated_at",
+    "as_of",
+    "market_context",
+    "mode_context",
+    "event_context",
+    "candidate_context",
+    "execution_context",
+    "change_context",
+    "guidance_context",
+    "ops_context"
+  ],
+  "properties": {
+    "report_type": {
+      "type": "string",
+      "enum": [
+        "dooray_internal",
+        "telegram_owner_ops",
+        "telegram_owner_execution",
+        "telegram_public",
+        "weekly_review",
+        "weekly_outlook"
+      ]
+    },
+    "audience": {
+      "type": "string",
+      "enum": ["internal", "owner", "public"]
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "as_of": {
+      "type": "string"
+    },
+    "market_context": {
+      "type": "object"
+    },
+    "mode_context": {
+      "type": "object"
+    },
+    "event_context": {
+      "type": "object"
+    },
+    "candidate_context": {
+      "type": "object"
+    },
+    "execution_context": {
+      "type": "object"
+    },
+    "change_context": {
+      "type": "object"
+    },
+    "guidance_context": {
+      "type": "object"
+    },
+    "ops_context": {
+      "type": "object"
+    }
+  }
+}

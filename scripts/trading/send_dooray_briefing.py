@@ -32,6 +32,8 @@ import requests
 from env_bootstrap import bootstrap_openclaw_env
 from llm_model_config import resolve_model
 from market_realtime import fetch_naver_realtime_indices, fetch_naver_usdkrw
+from report_payload_builder import build_internal_payload, save_payload_state
+from report_renderer_dooray import render_dooray_internal_message
 
 bootstrap_openclaw_env()
 
@@ -78,6 +80,7 @@ MCPORTER_CONFIG = os.environ.get(
     str(Path.home() / ".openclaw" / "config" / "mcporter.json"),
 ).strip()
 STATE_PATH = os.path.expanduser("~/.openclaw/state/dooray_briefing_state.json")
+SHARED_PAYLOAD_STATE_PATH = Path.home() / ".openclaw" / "state" / "reporting" / "dooray_internal.json"
 STOCKS_CSV = os.path.expanduser("~/.openclaw/workspace/STOCKS.csv")
 PUBLIC_BASE_URL = os.environ.get("STOCK_REPORT_PUBLIC_BASE_URL", "").strip().rstrip("/")
 URGENT_CONTEXT_PATH = os.path.expanduser("~/.openclaw/state/news_urgent_context.json")
@@ -2641,6 +2644,22 @@ def save_report_predictions(raw: dict, source: str = "dooray_briefing") -> int:
     return len(values)
 
 
+def build_shared_payload_message(decision_id: str = "", top_candidates: int = 5):
+    payload = build_internal_payload(
+        top_candidates=max(1, int(top_candidates)),
+        previous_payload_path=SHARED_PAYLOAD_STATE_PATH,
+        decision_id_override=str(decision_id or "").strip(),
+    )
+    msg = render_dooray_internal_message(payload)
+    raw = {
+        "mode": "shared_payload",
+        "report_type": "dooray_internal",
+        "decision_id": str((payload.get("execution_context") or {}).get("decision_id") or "").strip(),
+        "payload": payload,
+    }
+    return msg, raw
+
+
 def main():
     ap = argparse.ArgumentParser(description="Dooray 브리핑 전송기")
     ap.add_argument("--dry-run", action="store_true", help="웹훅 전송 없이 메시지만 출력")
@@ -2652,6 +2671,7 @@ def main():
     ap.add_argument("--clusters", type=int, default=3, help="클러스터 표시 개수")
     ap.add_argument("--legacy-format", action="store_true", help="기존 도레이 브리핑 포맷 사용")
     ap.add_argument("--relation-plus-a", action="store_true", help="+A 연관관계 브리핑도 함께 전송")
+    ap.add_argument("--shared-payload", action="store_true", help="shared payload 기반 내부 브리핑 사용")
     args = ap.parse_args()
     # 운영 기본값: 정기 도레이 브리핑은 평일 08:00 1회만 전송
     # (장중 호출 라인이 남아있어도 자동 차단)
@@ -2673,6 +2693,7 @@ def main():
 
     refresh_market_data()
     use_pipeline = os.environ.get("DOORAY_USE_PIPELINE_BRIEFING", "1") == "1" and not args.legacy_format
+    use_shared_payload = args.shared_payload or (os.environ.get("DOORAY_USE_SHARED_PAYLOAD", "1") == "1")
     plus_a_enabled = (
         args.relation_plus_a
         or (os.environ.get("DOORAY_SEND_RELATION_PLUS_A", "0") == "1")
@@ -2681,7 +2702,12 @@ def main():
     plus_a_top = max(1, int(os.environ.get("DOORAY_RELATION_PLUS_A_TOP", "3")))
     plus_a_hypothesis = max(1, int(os.environ.get("DOORAY_RELATION_PLUS_A_HYPOTHESIS", "3")))
 
-    if use_pipeline:
+    if use_pipeline and use_shared_payload:
+        msg, raw = build_shared_payload_message(
+            decision_id=args.decision_id,
+            top_candidates=args.top_candidates,
+        )
+    elif use_pipeline:
         msg, raw = build_pipeline_message(
             decision_id=args.decision_id,
             top_candidates=args.top_candidates,
@@ -2693,7 +2719,7 @@ def main():
 
     if args.dry_run:
         print(msg)
-        if use_pipeline and plus_a_enabled:
+        if use_pipeline and plus_a_enabled and not use_shared_payload:
             plus_a_msg, _ = build_relation_plus_a_message(
                 decision_id=str(raw.get("decision_id", "")),
                 top_candidates=plus_a_top,
@@ -2709,7 +2735,7 @@ def main():
     relation_msg = ""
     relation_raw = {}
     relation_digest = ""
-    if use_pipeline and plus_a_enabled:
+    if use_pipeline and plus_a_enabled and not use_shared_payload:
         relation_msg, relation_raw = build_relation_plus_a_message(
             decision_id=str(raw.get("decision_id", "")),
             top_candidates=plus_a_top,
@@ -2740,12 +2766,21 @@ def main():
             if errs_rel:
                 print("[WARN] 일부 Dooray +A 웹훅 전송 실패:", " | ".join(errs_rel), file=sys.stderr)
 
-    try:
-        saved_n = save_report_predictions(raw, source="dooray_pipeline")
-        if saved_n > 0:
-            print(f"[INFO] report_prediction 저장 {saved_n}건", file=sys.stderr)
-    except Exception as e:
-        print(f"[WARN] report_prediction 저장 실패: {type(e).__name__}: {e}", file=sys.stderr)
+    if use_pipeline and not use_shared_payload:
+        try:
+            saved_n = save_report_predictions(raw, source="dooray_pipeline")
+            if saved_n > 0:
+                print(f"[INFO] report_prediction 저장 {saved_n}건", file=sys.stderr)
+        except Exception as e:
+            print(f"[WARN] report_prediction 저장 실패: {type(e).__name__}: {e}", file=sys.stderr)
+
+    if use_pipeline and use_shared_payload:
+        try:
+            payload = raw.get("payload")
+            if isinstance(payload, dict):
+                save_payload_state(payload, SHARED_PAYLOAD_STATE_PATH)
+        except Exception as e:
+            print(f"[WARN] shared payload state 저장 실패: {type(e).__name__}: {e}", file=sys.stderr)
 
     next_state = dict(state)
     next_state.update({
@@ -2754,7 +2789,7 @@ def main():
         "sent_at": datetime.now().isoformat(),
     })
     if use_pipeline:
-        next_state["last_mode"] = "pipeline"
+        next_state["last_mode"] = "shared_payload" if use_shared_payload else "pipeline"
         next_state["last_decision_id"] = str(raw.get("decision_id", ""))
         if relation_digest:
             next_state["last_relation_digest"] = relation_digest

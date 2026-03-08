@@ -1,0 +1,104 @@
+SHELL=/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+# Generated from trading/cron/codex_jobs.json
+# Install manually when macOS permits:
+#   crontab ~/.openclaw/cron/desktop_trading.crontab
+#
+# Note:
+# - macOS cron parses schedules in the Mac's local timezone.
+# - It does not honor CRON_TZ for schedule evaluation.
+# - Keep the desktop timezone set to Asia/Seoul before installing this file.
+
+# data-news-cluster-hourly
+6,26,46 9-15 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/cluster_news.py --window-hours 144 --threshold 0.48 --limit 10000 --min-size 2 >> $HOME/.openclaw/logs/news-cluster.log 2>&1
+
+# data-news-relation-reasoning-20m
+14,34,54 9-15 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/llm_relation_reasoner.py --lookback-hours 72 --min-score 0.10 --top-tickers 30 --events-per-ticker 5 --states-per-ticker 3 --cache-ttl-sec 300 --timeout-sec 180 >> $HOME/.openclaw/logs/relation-reasoning.log 2>&1
+
+# trading-decision-10m
+16,26,36,46,56 9-14 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && DECISION_STAGE0_ONLY_CONSTRAINTS="${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}" /usr/bin/python3 $HOME/.openclaw/scripts/trading/decision_operating_pipeline.py --horizon INTRADAY --universe auto --limit 30 >> $HOME/.openclaw/logs/decision-operating.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_decision_dryrun_telegram.py >> $HOME/.openclaw/logs/decision-operating.log 2>&1
+
+# position-manager-20m
+18,38,58 9-14 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1
+
+# data-news-weekend-hourly
+0 * * * 0,6 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1
+
+# data-watchlist-run-health-20m
+9,29,49 8-16 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_watchlist_runs.py --source "${WATCHLIST_ACTIVE_SOURCE:-enrich_data}" >> $HOME/.openclaw/logs/watchlist-health.log 2>&1
+
+# data-watchlist-retention-daily
+20 6 * * * source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/prune_interest_watchlist.py --retention-days "${WATCHLIST_RETENTION_DAYS:-21}" --run-retention-days "${WATCHLIST_RUN_RETENTION_DAYS:-45}" >> $HOME/.openclaw/logs/watchlist-retention.log 2>&1
+
+# data-news-morning
+0 7 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1
+
+# data-news-trading-hourly
+4,19,34,49 9-15 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py trading >> $HOME/.openclaw/logs/news-collector.log 2>&1
+
+# data-news-monitor-5m
+2-57/5 9-14 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_news.py >> $HOME/.openclaw/logs/news-monitor.log 2>&1
+
+# data-news-monitor-5m-close
+2,7,12,17,22,27 15 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_news.py >> $HOME/.openclaw/logs/news-monitor.log 2>&1
+
+# data-news-relation-score-20m
+10,30,50 9-15 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/hidden_relation_scorer.py --lookback-hours "${RELATION_LOOKBACK_HOURS:-168}" --limit "${RELATION_FRAME_LIMIT:-6000}" --max-tickers "${RELATION_MAX_TICKERS:-500}" --min-abs-score "${RELATION_MIN_ABS_SCORE:-0.0}" >> $HOME/.openclaw/logs/relation-score.log 2>&1
+
+# data-news-research-15m
+8,23,38,53 8-17 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && NEWS_RESEARCH_LIMIT="${NEWS_RESEARCH_LIMIT:-24}" NEWS_RESEARCH_BATCH="${NEWS_RESEARCH_BATCH:-6}" NEWS_RESEARCH_MAX_DYNAMIC_LIMIT="${NEWS_RESEARCH_MAX_DYNAMIC_LIMIT:-80}" NEWS_RESEARCH_MAX_ITEMS_PER_RUN="${NEWS_RESEARCH_MAX_ITEMS_PER_RUN:-96}" NEWS_RESEARCH_WINDOW_HOURS="${NEWS_RESEARCH_WINDOW_HOURS:-48}" /usr/bin/python3 $HOME/.openclaw/scripts/trading/analyze_news_research.py >> $HOME/.openclaw/logs/news-research.log 2>&1
+
+# data-news-research-night-drain-10m
+*/10 0-7,18-23 * * * source "$HOME/.openclaw/cron/codex_env.sh" && NEWS_RESEARCH_LIMIT="${NEWS_RESEARCH_NIGHT_LIMIT:-48}" NEWS_RESEARCH_BATCH="${NEWS_RESEARCH_NIGHT_BATCH:-8}" NEWS_RESEARCH_MAX_DYNAMIC_LIMIT="${NEWS_RESEARCH_NIGHT_MAX_DYNAMIC_LIMIT:-160}" NEWS_RESEARCH_MAX_ITEMS_PER_RUN="${NEWS_RESEARCH_NIGHT_MAX_ITEMS_PER_RUN:-220}" NEWS_RESEARCH_WINDOW_HOURS="${NEWS_RESEARCH_NIGHT_WINDOW_HOURS:-96}" /usr/bin/python3 $HOME/.openclaw/scripts/trading/analyze_news_research.py >> $HOME/.openclaw/logs/news-research.log 2>&1
+
+# data-enrich-pre-market
+35 7 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && bash $HOME/.openclaw/scripts/trading/enrich_data.sh >> $HOME/.openclaw/logs/enrich.log 2>&1
+
+# data-enrich-midday-quick
+7 12 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && bash $HOME/.openclaw/scripts/trading/enrich_data.sh --quick >> $HOME/.openclaw/logs/enrich.log 2>&1
+
+# data-news-pipeline-health-20m
+12,32,52 8-16 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_news_pipeline_health.py >> $HOME/.openclaw/logs/news-pipeline-health.log 2>&1
+
+# data-execution-mode-2m
+1-59/2 8-15 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1
+
+# position-manager-20m-close
+18 15 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1
+
+# shock-position-review-3m
+2-59/3 9-14 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute --only-modes shock,recovery >> $HOME/.openclaw/logs/position-manager-shock.log 2>&1
+
+# shock-position-review-3m-close
+2,5,8,11,14,17 15 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute --only-modes shock,recovery >> $HOME/.openclaw/logs/position-manager-shock.log 2>&1
+
+# pending-exit-replay-open
+1 9 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/execute_gpt_orders.py --replay-pending-exit-only >> $HOME/.openclaw/logs/pending-exit-replay.log 2>&1
+
+# trading-decision-10m-close
+16,26 15 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && DECISION_STAGE0_ONLY_CONSTRAINTS="${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}" /usr/bin/python3 $HOME/.openclaw/scripts/trading/decision_operating_pipeline.py --horizon INTRADAY --universe auto --limit 30 >> $HOME/.openclaw/logs/decision-operating.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_decision_dryrun_telegram.py >> $HOME/.openclaw/logs/decision-operating.log 2>&1
+
+# data-refresh-stocks-weekly
+0 6 * * 1 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_stocks.py >> $HOME/.openclaw/logs/refresh_stocks.log 2>&1
+
+# data-market-10m
+1,11,21,31,41,51 9-16 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_market_data.py >> $HOME/.openclaw/logs/market_data.log 2>&1
+
+# data-morning-briefing-0800
+58 7 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/morning_briefing.py >> $HOME/.openclaw/logs/briefing.log 2>&1
+
+# telegram-public-opening-note-0820
+20 8 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_public_telegram_report.py >> $HOME/.openclaw/logs/telegram-public-report.log 2>&1
+
+# data-weekly-market-report-friday-1800
+0 18 * * 5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/weekly_market_report.py --send >> $HOME/.openclaw/logs/weekly-market-report.log 2>&1
+
+# telegram-public-weekly-review-friday-1820
+20 18 * * 5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_public_weekly_review.py >> $HOME/.openclaw/logs/telegram-public-weekly-review.log 2>&1
+
+# telegram-public-weekly-outlook-sunday-2030
+30 20 * * 0 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_public_weekly_outlook.py >> $HOME/.openclaw/logs/telegram-public-weekly-outlook.log 2>&1
+
+# data-weekend-news-prep-sunday-2300
+0 23 * * 0 source "$HOME/.openclaw/cron/codex_env.sh" && NEWS_RESEARCH_LIMIT="${WEEKEND_NEWS_PREP_LIMIT:-48}" NEWS_RESEARCH_BATCH="${WEEKEND_NEWS_PREP_BATCH:-8}" NEWS_RESEARCH_MAX_DYNAMIC_LIMIT="${WEEKEND_NEWS_PREP_MAX_DYNAMIC_LIMIT:-120}" NEWS_RESEARCH_MAX_ITEMS_PER_RUN="${WEEKEND_NEWS_PREP_MAX_ITEMS_PER_RUN:-160}" NEWS_RESEARCH_WINDOW_HOURS="${WEEKEND_NEWS_PREP_WINDOW_HOURS:-72}" bash $HOME/.openclaw/scripts/trading/weekend_news_prep.sh >> $HOME/.openclaw/logs/weekend-news-prep.log 2>&1

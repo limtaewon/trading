@@ -385,12 +385,42 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "telegram-public-opening-note-0820",
+            "enabled": True,
+            "schedule": {"expr": "20 8 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/send_public_telegram_report.py >> {logs}/telegram-public-report.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "data-weekly-market-report-friday-1800",
             "enabled": True,
             "schedule": {"expr": "0 18 * * 5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
                 "command": f'{env} && {py} {trading_scripts}/weekly_market_report.py --send >> {logs}/weekly-market-report.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "telegram-public-weekly-review-friday-1820",
+            "enabled": True,
+            "schedule": {"expr": "20 18 * * 5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/send_public_weekly_review.py >> {logs}/telegram-public-weekly-review.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "telegram-public-weekly-outlook-sunday-2030",
+            "enabled": True,
+            "schedule": {"expr": "30 20 * * 0", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/send_public_weekly_outlook.py >> {logs}/telegram-public-weekly-outlook.log 2>&1',
             },
             "source": "legacy-crontab",
         },
@@ -414,7 +444,7 @@ def data_jobs() -> list[dict]:
         },
         {
             "name": "bybit-futures-ws-private-1m",
-            "enabled": True,
+            "enabled": False,
             "schedule": {"expr": "* * * * *", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
@@ -424,7 +454,7 @@ def data_jobs() -> list[dict]:
         },
         {
             "name": "bybit-futures-reconcile-5m",
-            "enabled": True,
+            "enabled": False,
             "schedule": {"expr": "*/5 * * * *", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
@@ -434,7 +464,7 @@ def data_jobs() -> list[dict]:
         },
         {
             "name": "bybit-futures-decision-1m",
-            "enabled": True,
+            "enabled": False,
             "schedule": {"expr": "* * * * *", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
@@ -456,7 +486,12 @@ def main() -> int:
         name = str(job.get("name", "")).strip()
         if not name:
             continue
-        if name == "weekly-review":
+        if name in {
+            "weekly-review",
+            "dooray-briefing-daily-0800",
+            "dooray-breaking-briefing-5m",
+            "dooray-major-news-after-collect",
+        }:
             job["enabled"] = False
         dedup[name] = job
     jobs = list(dedup.values())

@@ -25,6 +25,8 @@ from urllib import parse, request
 from zoneinfo import ZoneInfo
 
 from env_bootstrap import bootstrap_openclaw_env
+from report_payload_builder import build_owner_payload
+from report_renderer_telegram_owner import render_owner_execution_message
 from llm_model_config import resolve_model
 from response_enricher import enrich_trading_response
 from response_validator import validate_trading_response
@@ -1820,10 +1822,6 @@ def _ticker_label(item: dict[str, Any]) -> str:
 
 
 def build_telegram_order_brief(result: dict[str, Any]) -> str:
-    ts = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-    decision_id = str(result.get("decision_id", "") or "")
-    session_id = str(result.get("session_id", "") or "")
-    kill_state = str(result.get("kill_switch_state", "") or "")
     executed = result.get("executed", [])
     skipped = result.get("skipped", [])
     attempted = result.get("attempted", [])
@@ -1835,57 +1833,52 @@ def build_telegram_order_brief(result: dict[str, Any]) -> str:
     if not isinstance(attempted, list):
         attempted = []
 
-    lines: list[str] = []
-    lines.append(f"📒 <b>매매 후 브리핑</b> ({ts})")
-    lines.append(f"- decision_id: <code>{html.escape(decision_id)}</code>")
-    lines.append(f"- 세션: {html.escape(session_id)} / kill_switch: {html.escape(kill_state)}")
-    lines.append(
-        f"- 주문 요약: 시도 {len(attempted)}건 / 실행 {len(executed)}건 / 미실행 {len(skipped)}건"
+    decision_id = str(result.get("decision_id", "") or "")
+    payload = build_owner_payload(
+        report_type="telegram_owner_execution",
+        top_candidates=0,
+        previous_payload_path=None,
+        decision_id_override=decision_id,
     )
-    lines.append("")
 
-    lines.append("<b>실행 주문</b>")
-    if not executed:
-        lines.append("- 실행 주문 없음")
-    else:
-        for i, e in enumerate(executed[:TELEGRAM_ORDER_BRIEF_MAX_EXEC], 1):
-            side = str(e.get("action", "") or "").upper()
-            qty = to_int(e.get("quantity", 0), 0)
-            order_price = to_int(e.get("order_price", e.get("price", 0)), 0)
-            status = str(e.get("status", "") or "")
-            lines.append(
-                f"{i}) {html.escape(side)} {_ticker_label(e)} {qty}주 @ {order_price:,} ({html.escape(status)})"
-            )
-            lines.append(f"   - 이유: {html.escape(_short(e.get('reasoning', '-'), 160))}")
-            msg1 = _short(e.get("msg1", ""), 120)
-            if msg1:
-                lines.append(f"   - 체결응답: {html.escape(msg1)}")
+    reason_counts: dict[str, int] = {}
+    for s in skipped:
+        reason = str(s.get("reason", "unknown") or "unknown")
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    top_reason_items = sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[:TELEGRAM_ORDER_BRIEF_MAX_SKIP]
+    top_skip_rows = [{"skip_reason": k, "count": v} for k, v in top_reason_items]
 
-    lines.append("")
-    lines.append("<b>미실행 사유</b>")
-    if not skipped:
-        lines.append("- 미실행 없음")
-    else:
-        reason_counts: dict[str, int] = {}
-        for s in skipped:
-            reason = str(s.get("reason", "unknown") or "unknown")
-            reason_counts[reason] = reason_counts.get(reason, 0) + 1
-        top_reason_items = sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[:4]
-        lines.append(
-            "- 사유 집계: "
-            + ", ".join(f"{html.escape(_short(k, 40))} {v}건" for k, v in top_reason_items)
-        )
-        for i, s in enumerate(skipped[:TELEGRAM_ORDER_BRIEF_MAX_SKIP], 1):
-            side = str(s.get("action", "") or "").upper()
-            qty = to_int(s.get("quantity", 0), 0)
-            reason = _short(s.get("reason", "unknown"), 120)
-            lines.append(f"{i}) {html.escape(side)} {_ticker_label(s)} {qty}주")
-            lines.append(f"   - 사유: {html.escape(reason)}")
-            reasoning = _short(s.get("reasoning", ""), 120)
-            if reasoning:
-                lines.append(f"   - 원주문 이유: {html.escape(reasoning)}")
+    execution_context = payload.get("execution_context")
+    if not isinstance(execution_context, dict):
+        execution_context = {}
+        payload["execution_context"] = execution_context
+    execution_context["today_orders"] = {
+        "attempted": len(attempted),
+        "executed": len(executed),
+        "skipped": len(skipped),
+    }
+    execution_context["executed_orders"] = executed[:TELEGRAM_ORDER_BRIEF_MAX_EXEC]
+    execution_context["skipped_orders"] = top_skip_rows
+    execution_context["skip_reason_counts"] = reason_counts
 
-    return "\n".join(lines)
+    cash_after_estimate = result.get("cash_after_estimate")
+    total_asset = result.get("total_asset")
+    portfolio_delta = {}
+    try:
+        cash_after = float(cash_after_estimate) / float(total_asset) if float(total_asset) > 0 else None
+    except Exception:
+        cash_after = None
+    if cash_after is not None:
+        portfolio_delta["cash_ratio_after"] = cash_after
+    execution_context["portfolio_delta"] = portfolio_delta
+
+    mode_context = payload.get("mode_context")
+    if isinstance(mode_context, dict):
+        session_id = str(result.get("session_id", "") or "").strip()
+        if session_id:
+            mode_context["session"] = session_id
+
+    return render_owner_execution_message(payload)
 
 
 def main() -> int:

@@ -277,7 +277,7 @@
     },
     {
       "name": "dooray-briefing-daily-0800",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "0 8 * * 1-5",
         "tz": "Asia/Seoul"
@@ -640,6 +640,19 @@
       "source": "legacy-crontab"
     },
     {
+      "name": "telegram-public-opening-note-0820",
+      "enabled": true,
+      "schedule": {
+        "expr": "20 8 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_public_telegram_report.py >> $HOME/.openclaw/logs/telegram-public-report.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
       "name": "data-weekly-market-report-friday-1800",
       "enabled": true,
       "schedule": {
@@ -649,6 +662,32 @@
       "payload": {
         "kind": "command",
         "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/weekly_market_report.py --send >> $HOME/.openclaw/logs/weekly-market-report.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "telegram-public-weekly-review-friday-1820",
+      "enabled": true,
+      "schedule": {
+        "expr": "20 18 * * 5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_public_weekly_review.py >> $HOME/.openclaw/logs/telegram-public-weekly-review.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "telegram-public-weekly-outlook-sunday-2030",
+      "enabled": true,
+      "schedule": {
+        "expr": "30 20 * * 0",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_public_weekly_outlook.py >> $HOME/.openclaw/logs/telegram-public-weekly-outlook.log 2>&1"
       },
       "source": "legacy-crontab"
     },
@@ -667,7 +706,7 @@
     },
     {
       "name": "bybit-futures-ws-private-1m",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "* * * * *",
         "tz": "Asia/Seoul"
@@ -680,7 +719,7 @@
     },
     {
       "name": "bybit-futures-reconcile-5m",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "*/5 * * * *",
         "tz": "Asia/Seoul"
@@ -693,7 +732,7 @@
     },
     {
       "name": "bybit-futures-decision-1m",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "* * * * *",
         "tz": "Asia/Seoul"
