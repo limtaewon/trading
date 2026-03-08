@@ -316,6 +316,15 @@ def load_adaptive_policy() -> dict[str, Any]:
 
     policy = {
         "mode": "normal",
+        "execution_mode": "normal",
+        "allowed_universe": "watchlist",
+        "max_new_positions": 3,
+        "max_buys_per_run": 3,
+        "avg_down_block": True,
+        "close_only": False,
+        "sell_urgency": "normal",
+        "strategy_families_allowed": [],
+        "allowed_tickers": [],
         "min_confidence": clamp(DEFAULT_MIN_CONFIDENCE, 0.55, 0.9),
         "min_cash_ratio": clamp(DEFAULT_MIN_CASH_RATIO, 0.10, 0.40),
         "daily_order_limit": _norm_daily_order_limit(DEFAULT_DAILY_ORDER_LIMIT, 3),
@@ -328,6 +337,17 @@ def load_adaptive_policy() -> dict[str, Any]:
             raw = json.loads(ADAPTIVE_POLICY_FILE.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 policy["mode"] = str(raw.get("mode", policy["mode"]))
+                policy["execution_mode"] = str(raw.get("execution_mode", raw.get("mode", policy["execution_mode"])))
+                policy["allowed_universe"] = str(raw.get("allowed_universe", policy["allowed_universe"]))
+                policy["max_new_positions"] = max(0, int(safe_float(raw.get("max_new_positions", policy["max_new_positions"]), policy["max_new_positions"])))
+                policy["max_buys_per_run"] = max(0, int(safe_float(raw.get("max_buys_per_run", policy["max_buys_per_run"]), policy["max_buys_per_run"])))
+                policy["avg_down_block"] = bool(raw.get("avg_down_block", policy["avg_down_block"]))
+                policy["close_only"] = bool(raw.get("close_only", policy["close_only"]))
+                policy["sell_urgency"] = str(raw.get("sell_urgency", policy["sell_urgency"]))
+                fams = raw.get("strategy_families_allowed", policy["strategy_families_allowed"])
+                policy["strategy_families_allowed"] = fams if isinstance(fams, list) else []
+                allowed = raw.get("allowed_tickers", policy["allowed_tickers"])
+                policy["allowed_tickers"] = allowed if isinstance(allowed, list) else []
                 policy["min_confidence"] = clamp(
                     safe_float(raw.get("min_confidence", policy["min_confidence"]), policy["min_confidence"]),
                     0.55,

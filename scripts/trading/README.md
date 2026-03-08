@@ -5,6 +5,7 @@
 
 핵심 실행 흐름:
 - codex_cron_router.sh -> codex_brain.sh -> prepare_gpt_prompt.py -> execute_gpt_orders.py
+- refresh_execution_mode.py -> market_execution_mode.py -> adaptive_policy.json / market_execution_mode.json
 - 보유 포지션 동적 관리: manage_positions.py -> execute_gpt_orders.py
 - 뉴스/데이터 파이프라인: collect_news.py, monitor_news.py, cluster_news.py, llm_relation_reasoner.py
 - 연관 정량 스코어 파이프라인: hidden_relation_scorer.py (cluster 직후, watchlist 직전)
@@ -26,16 +27,16 @@
   run 헬스 모니터는 `monitor_watchlist_runs.py` 전용 잡에서 점검/알림
   ClickHouse 접속은 `CLICKHOUSE_URL=http://user:pass@host:8123` 형식도 자동 정규화(인증 분리)해 401/404 재발을 방지
 - Decision 운영 정책(실거래 정렬):
-  universe는 `watchlist-only`로 강제(technical/feature fallback 미사용)
+  universe는 execution mode 기준 `watchlist / shock_core / recovery_core`로 분기
   watchlist 조회 source는 `WATCHLIST_ACTIVE_SOURCE`로 강제(기본: `enrich_data`)
-  하드게이트는 Stage0/Stage1/Stage2(EXTREME shock만)/Stage5
-  Stage3/Stage4는 총점/설명용 보조지표로 사용(하드 차단 아님)
+  Stage0/Stage1/Stage2 신호는 execution mode 산출과 executor 하드게이트에 함께 반영
+  Stage3/Stage4는 총점/설명용 보조지표 성격이 더 강함
 - Stage2 수급 분모 정책:
   market_flow_daily 분모는 `MARKET_TOTAL`(market_index.traded_value_krw) 우선
   분모 품질 문제는 경고/보조 처리하며, 매수 차단은 EXTREME shock에서만 적용
 - 브레인 후보 정책:
-  prepare_gpt_prompt.py는 watchlist 최신 스냅샷(활성 source 필터) 기반으로 후보를 구성
-  `PROMPT_WATCHLIST_STRICT=1` 기본값에서 dashboard fallback 비활성
+  prepare_gpt_prompt.py는 execution mode를 읽어 `watchlist / shock_core / recovery_core`를 상위 제약으로 후보를 구성
+  `response_enricher.py`가 mode/playbook 필드를 보정하고, `codex_brain.sh`는 `jsonschema + response_validator.py`로 이중 검증
 - 수급 스냅샷 대상 정책:
   collect_market_data.py는 watchlist 우선 + dashboard 보강 방식으로 feature_snapshot 종목을 선택
   feature_snapshot 의미: foreign_flow=외국인 보유비중(%), news_event_score=외국인 순매수 수량 proxy, inst_flow=기관 순매수 수량
@@ -79,5 +80,5 @@
 
 정리 정책:
 - 불필요 백업 파일(*.bak) 삭제
-- LLM 실행은 openclaw agent 우선 + codex exec fallback 허용
+- LLM 실행은 openclaw agent 우선, `codex exec` fallback은 기본 비활성
 - 실행 경로는 `~/.openclaw/scripts/trading/...` 기준으로 통일

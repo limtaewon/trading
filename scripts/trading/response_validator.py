@@ -25,7 +25,7 @@ REQUIRED_ROOT_KEYS = {
     "self_evaluation",
     "next_focus",
 }
-ALLOWED_ROOT_KEYS = set(REQUIRED_ROOT_KEYS) | {"execution_mode", "missing_fields"}
+ALLOWED_ROOT_KEYS = set(REQUIRED_ROOT_KEYS) | {"execution_mode", "allowed_universe", "playbook_summary", "missing_fields"}
 ORDER_KEYS = {
     "action",
     "ticker",
@@ -39,6 +39,7 @@ ORDER_KEYS = {
     "strategy_family",
     "playbook_id",
     "priority",
+    "order_role",
     "close_only",
     "expected_holding_window",
     "event_type",
@@ -61,6 +62,7 @@ RISK_TARGET_KEYS = {
     "invalidation",
 }
 WATCH_ITEM_KEYS = {"ticker", "ticker_name", "reason"}
+EXECUTION_MODES = {"normal", "shock", "recovery", "close_only"}
 
 
 def _is_nonempty_text(v: Any) -> bool:
@@ -80,7 +82,12 @@ def _append(errors: list[str], msg: str, limit: int) -> None:
         errors.append(msg)
 
 
-def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
+def validate_trading_response(
+    data: Any,
+    *,
+    execution_mode_state: dict[str, Any] | None = None,
+    error_limit: int = 50,
+) -> list[str]:
     errors: list[str] = []
 
     if not isinstance(data, dict):
@@ -98,6 +105,15 @@ def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
         _append(errors, "timestamp must be a non-empty string", error_limit)
     if not _is_nonempty_text(data.get("market_assessment")):
         _append(errors, "market_assessment must be a non-empty string", error_limit)
+    execution_mode = data.get("execution_mode")
+    if execution_mode is not None and execution_mode not in EXECUTION_MODES:
+        _append(errors, f"execution_mode must be one of {sorted(EXECUTION_MODES)}", error_limit)
+    allowed_universe = data.get("allowed_universe")
+    if allowed_universe is not None and allowed_universe not in {"watchlist", "shock_core", "recovery_core"}:
+        _append(errors, "allowed_universe must be one of ['recovery_core', 'shock_core', 'watchlist']", error_limit)
+    playbook_summary = data.get("playbook_summary")
+    if playbook_summary is not None and not _is_nonempty_text(playbook_summary):
+        _append(errors, "playbook_summary must be a non-empty string when present", error_limit)
 
     regime_action = data.get("regime_action")
     if regime_action not in REGIME_ACTIONS:
@@ -111,6 +127,17 @@ def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
     if not isinstance(orders, list):
         _append(errors, "orders must be an array", error_limit)
         orders = []
+    state = execution_mode_state if isinstance(execution_mode_state, dict) else {}
+    effective_mode = str(state.get("execution_mode", execution_mode or "normal") or "normal")
+    if effective_mode not in EXECUTION_MODES:
+        effective_mode = "normal"
+    effective_close_only = bool(state.get("close_only", effective_mode == "close_only"))
+    allowed_tickers_raw = state.get("allowed_tickers", [])
+    allowed_tickers = {
+        str(v).strip()
+        for v in allowed_tickers_raw
+        if isinstance(v, (str, int)) and _is_six_digit_ticker(str(v).strip())
+    }
     for idx, order in enumerate(orders):
         prefix = f"orders[{idx}]"
         if not isinstance(order, dict):
@@ -160,6 +187,8 @@ def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
             pr = order.get("priority")
             if not isinstance(pr, int) or isinstance(pr, bool) or pr < 1 or pr > 10:
                 _append(errors, f"{prefix}.priority must be an integer between 1 and 10", error_limit)
+        if "order_role" in order and order.get("order_role") not in {"new_entry", "reduce", "forced_exit", "hedge"}:
+            _append(errors, f"{prefix}.order_role has invalid value", error_limit)
         if "close_only" in order and not isinstance(order.get("close_only"), bool):
             _append(errors, f"{prefix}.close_only must be boolean", error_limit)
         if "strategy_family" in order and order.get("strategy_family") not in {
@@ -171,6 +200,22 @@ def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
             "forced_exit",
         }:
             _append(errors, f"{prefix}.strategy_family has invalid value", error_limit)
+        strategy_family = str(order.get("strategy_family", "") or "")
+        action = str(order.get("action", "") or "")
+        ticker = str(order.get("ticker", "") or "")
+        order_close_only = bool(order.get("close_only", False))
+        if strategy_family == "forced_exit" and action != "SELL":
+            _append(errors, f"{prefix}.forced_exit must use SELL action", error_limit)
+        if order.get("order_role") == "forced_exit" and action != "SELL":
+            _append(errors, f"{prefix}.order_role forced_exit must use SELL action", error_limit)
+        if (effective_close_only or order_close_only) and action != "SELL":
+            _append(errors, f"{prefix} close_only mode cannot contain BUY", error_limit)
+        if effective_mode == "shock" and action == "BUY" and strategy_family not in {"shock_hedge", "index_etf"}:
+            _append(errors, f"{prefix} BUY must use shock_hedge or index_etf in shock mode", error_limit)
+        if effective_mode == "recovery" and action == "BUY" and strategy_family not in {"shock_rebound", "index_etf", "core_defensive"}:
+            _append(errors, f"{prefix} BUY has invalid strategy_family for recovery mode", error_limit)
+        if effective_mode in {"shock", "recovery"} and action == "BUY" and allowed_tickers and ticker not in allowed_tickers:
+            _append(errors, f"{prefix}.ticker is outside allowed_tickers for {effective_mode} mode", error_limit)
 
         if order.get("action") == "BUY":
             if order.get("time_horizon") not in EVENT_HORIZONS:
@@ -237,6 +282,3 @@ def validate_trading_response(data: Any, *, error_limit: int = 50) -> list[str]:
             _append(errors, f"{prefix}.reason must be non-empty", error_limit)
 
     return errors
-    execution_mode = data.get("execution_mode")
-    if execution_mode is not None and execution_mode not in {"normal", "shock", "recovery", "close_only"}:
-        _append(errors, "execution_mode must be one of ['close_only', 'normal', 'recovery', 'shock']", error_limit)

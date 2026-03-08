@@ -24,6 +24,7 @@ DEFAULT_RESPONSE_FILE="/tmp/gpt_response.json"
 PROMPT_FILE="${OPENCLAW_PROMPT_FILE:-$DEFAULT_PROMPT_FILE}"
 RESPONSE_FILE="${OPENCLAW_RESPONSE_FILE:-$DEFAULT_RESPONSE_FILE}"
 SCHEMA_FILE="$SCRIPTS_DIR/trading_response_schema.json"
+EXECUTION_MODE_FILE="${OPENCLAW_EXECUTION_MODE_FILE:-$HOME/.openclaw/state/market_execution_mode.json}"
 LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-openclaw}}"
 CODEX_BIN="${CODEX_BIN:-openclaw}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
@@ -518,19 +519,43 @@ sys.exit(1)
 fi
 
 # 공통 strict validator 검사
-if ! python3 - "$SCRIPTS_DIR" "$RESPONSE_FILE" <<'PY' 2>&1 | while read -r line; do log "  $line"; done
+if ! python3 - "$SCRIPTS_DIR" "$RESPONSE_FILE" "$SCHEMA_FILE" "$EXECUTION_MODE_FILE" <<'PY' 2>&1 | while read -r line; do log "  $line"; done
 import json
 import sys
 from pathlib import Path
 
 scripts_dir = Path(sys.argv[1])
 response_path = Path(sys.argv[2])
+schema_path = Path(sys.argv[3])
+execution_mode_path = Path(sys.argv[4])
 sys.path.insert(0, str(scripts_dir))
 
+from response_enricher import enrich_trading_response  # type: ignore
 from response_validator import validate_trading_response  # type: ignore
 
 data = json.loads(response_path.read_text(encoding="utf-8"))
-errors = validate_trading_response(data)
+try:
+    import jsonschema  # type: ignore
+except ModuleNotFoundError:
+    print("jsonschema module unavailable; using shared strict validator")
+else:
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    jsonschema.validate(instance=data, schema=schema)
+    print("jsonschema validation passed")
+
+mode_state = {}
+if execution_mode_path.exists():
+    try:
+        loaded = json.loads(execution_mode_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            mode_state = loaded
+    except Exception:
+        mode_state = {}
+
+data = enrich_trading_response(data, execution_mode_state=mode_state, source_label="brain")
+response_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+errors = validate_trading_response(data, execution_mode_state=mode_state)
 if errors:
     print("strict validation failed:")
     for err in errors[:20]:

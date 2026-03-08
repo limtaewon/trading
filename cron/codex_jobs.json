@@ -323,7 +323,7 @@
       },
       "payload": {
         "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/market_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && DECISION_STAGE0_ONLY_CONSTRAINTS=\"${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/decision_operating_pipeline.py --horizon INTRADAY --universe watchlist --limit 30 >> $HOME/.openclaw/logs/decision-operating.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_decision_dryrun_telegram.py >> $HOME/.openclaw/logs/decision-operating.log 2>&1"
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && DECISION_STAGE0_ONLY_CONSTRAINTS=\"${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/decision_operating_pipeline.py --horizon INTRADAY --universe auto --limit 30 >> $HOME/.openclaw/logs/decision-operating.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/send_decision_dryrun_telegram.py >> $HOME/.openclaw/logs/decision-operating.log 2>&1"
       },
       "source": "legacy-crontab"
     },
@@ -336,7 +336,7 @@
       },
       "payload": {
         "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/market_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
       },
       "source": "legacy-crontab"
     },
@@ -510,15 +510,41 @@
       "source": "legacy-crontab"
     },
     {
-      "name": "data-execution-mode-3m",
+      "name": "data-execution-mode-2m",
       "enabled": true,
       "schedule": {
-        "expr": "*/3 8-15 * * 1-5",
+        "expr": "*/2 8-15 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
         "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/market_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1"
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "shock-position-review-3m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/3 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute --only-modes shock,recovery >> $HOME/.openclaw/logs/position-manager-shock.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "pending-exit-replay-open",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 9 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/execute_gpt_orders.py --replay-pending-exit-only >> $HOME/.openclaw/logs/pending-exit-replay.log 2>&1"
       },
       "source": "legacy-crontab"
     },

@@ -910,8 +910,9 @@ def run_llm_review(prompt: str) -> tuple[dict[str, Any] | None, str]:
     return obj, "ok"
 
 
-def fallback_actions(contexts: list[PositionContext]) -> list[dict[str, Any]]:
+def fallback_actions(contexts: list[PositionContext], execution_mode: str = "normal") -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    mode_name = str(execution_mode or "normal").strip().lower()
     for c in contexts:
         pnl = c.holding.pnl_rate
         rsi = to_float(c.tech.get("rsi14", 50), 50.0)
@@ -920,23 +921,46 @@ def fallback_actions(contexts: list[PositionContext]) -> list[dict[str, Any]]:
         size = 0.0
         reason = "fallback_hold"
         thesis_status = "maintain"
-        if pnl <= -7.0:
+        exit_cut = -7.0
+        reduce_cut = -4.0
+        reduce_rsi = 38.0
+        take_profit = 12.0
+        take_profit_rsi = 66.0
+        reduce_size = -0.35
+        take_profit_size = -0.40
+        if mode_name == "shock":
+            exit_cut = -5.0
+            reduce_cut = -3.0
+            reduce_rsi = 45.0
+            take_profit = 8.0
+            take_profit_rsi = 62.0
+            reduce_size = -0.50
+            take_profit_size = -0.50
+        elif mode_name == "recovery":
+            exit_cut = -6.0
+            reduce_cut = -3.5
+            reduce_rsi = 40.0
+            take_profit = 10.0
+            take_profit_rsi = 64.0
+            reduce_size = -0.40
+            take_profit_size = -0.45
+        if pnl <= exit_cut:
             action = "EXIT"
             conf = 0.96
             size = -1.0
-            reason = "fallback_risk_cut: pnl<=-7%"
+            reason = f"fallback_risk_cut:{mode_name}: pnl<={exit_cut:.1f}%"
             thesis_status = "invalidate"
-        elif pnl <= -4.0 and rsi < 38:
+        elif pnl <= reduce_cut and rsi < reduce_rsi:
             action = "REDUCE"
             conf = 0.82
-            size = -0.35
-            reason = "fallback_reduce: drawdown+rsi_weak"
+            size = reduce_size
+            reason = f"fallback_reduce:{mode_name}: drawdown+rsi_weak"
             thesis_status = "weaken"
-        elif pnl >= 12.0 and rsi >= 66:
+        elif pnl >= take_profit and rsi >= take_profit_rsi:
             action = "TAKE_PROFIT_PARTIAL"
             conf = 0.84
-            size = -0.4
-            reason = "fallback_take_profit: pnl_high+rsi_hot"
+            size = take_profit_size
+            reason = f"fallback_take_profit:{mode_name}: pnl_high+rsi_hot"
             thesis_status = "weaken"
         out.append(
             {
@@ -1002,12 +1026,14 @@ def normalize_action_plans(
     dynamic_exits: dict[str, dict[str, Any]],
     max_actions: int,
     allow_add: bool,
+    execution_mode: str,
 ) -> list[ActionPlan]:
     by_ticker = {c.holding.ticker: c for c in contexts}
     today = now_kst().strftime("%Y-%m-%d")
     daily_count = state.get("daily_action_count", {}) if isinstance(state.get("daily_action_count"), dict) else {}
 
     plans: list[ActionPlan] = []
+    mode_name = str(execution_mode or "normal").strip().lower()
     for ticker, c in by_ticker.items():
         src = next((x for x in raw_items if x.get("ticker") == ticker), None)
         if not src:
@@ -1060,6 +1086,22 @@ def normalize_action_plans(
         if action == "ADD" and not allow_add:
             block_codes.append("ADD_DISABLED")
             action = "HOLD"
+        if mode_name == "close_only" and action not in {"EXIT", "REDUCE", "TIGHTEN_STOP", "HOLD", "TAKE_PROFIT_PARTIAL"}:
+            block_codes.append("CLOSE_ONLY_ACTION_BLOCK")
+            action = "HOLD"
+        if mode_name == "shock":
+            if action == "ADD":
+                block_codes.append("SHOCK_MODE_ADD_BLOCK")
+                action = "HOLD"
+            elif action == "TAKE_PROFIT_PARTIAL":
+                block_codes.append("SHOCK_MODE_PARTIAL_REMAP")
+                action = "REDUCE"
+                if size >= 0:
+                    size = -0.5
+        if mode_name == "recovery" and action == "ADD":
+            if c.holding.pnl_rate < 0 or thesis_status != "strengthen":
+                block_codes.append("RECOVERY_ADD_GATED")
+                action = "HOLD"
 
         ps = c.prior_state if isinstance(c.prior_state, dict) else {}
         cooldown_until = str(ps.get("cooldown_until", "") or "").strip()
@@ -1244,6 +1286,7 @@ def build_orders_and_targets(
                     "strategy_family": strategy_family,
                     "playbook_id": f"pm_{str(execution_mode.get('execution_mode', 'normal') or 'normal')}",
                     "priority": 9 if p.action == "EXIT" else (7 if p.action == "REDUCE" else 5),
+                    "order_role": "forced_exit" if p.action == "EXIT" else ("reduce" if p.action in {"REDUCE", "TAKE_PROFIT_PARTIAL"} else "new_entry"),
                     "close_only": str(execution_mode.get("execution_mode", "normal") or "normal") == "close_only",
                     "expected_holding_window": p.time_horizon,
                     "venue_preference": "SOR",
@@ -1316,10 +1359,13 @@ def build_response_payload(
     risk_targets: list[dict[str, Any]],
     llm_status: str,
     execution_mode: str,
+    allowed_universe: str,
 ) -> dict[str, Any]:
     return {
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
         "execution_mode": execution_mode,
+        "allowed_universe": allowed_universe,
+        "playbook_summary": f"position_manager:{execution_mode}:{allowed_universe}:{llm_status}",
         "market_assessment": normalize_text(market_assessment, 320),
         "regime_action": regime_to_action(regime_label),
         "orders": orders,
@@ -1543,6 +1589,7 @@ def main() -> int:
     ap.add_argument("--max-actions", type=int, default=POSITION_MANAGER_MAX_ACTIONS)
     ap.add_argument("--news-hours", type=int, default=POSITION_MANAGER_NEWS_WINDOW_HOURS)
     ap.add_argument("--allow-add", action="store_true", help="allow ADD action for this run")
+    ap.add_argument("--only-modes", default="", help="comma separated execution modes to allow")
     args = ap.parse_args()
 
     if not POSITION_MANAGER_ENABLED:
@@ -1602,6 +1649,11 @@ def main() -> int:
     state = load_position_state()
     dynamic_exits = load_dynamic_exit_state()
     execution_mode_state = load_execution_mode_state()
+    mode_name = str(execution_mode_state.get("execution_mode", "normal") or "normal")
+    only_modes = [s.strip().lower() for s in str(args.only_modes or "").split(",") if s.strip()]
+    if only_modes and mode_name.lower() not in set(only_modes):
+        print(json.dumps({"status": "skipped", "reason": "execution_mode_filtered", "execution_mode": mode_name}, ensure_ascii=False))
+        return 0
     regime = load_market_regime()
     tech = load_technical(tickers)
     flow = load_flow_snapshot(tickers)
@@ -1618,7 +1670,6 @@ def main() -> int:
     )
 
     max_actions = max(1, int(args.max_actions))
-    mode_name = str(execution_mode_state.get("execution_mode", "normal") or "normal")
     allow_add = (POSITION_MANAGER_ALLOW_ADD or bool(args.allow_add)) and mode_name not in {"shock", "close_only"}
 
     llm_obj: dict[str, Any] | None = None
@@ -1651,7 +1702,7 @@ def main() -> int:
 
     raw_items = parse_action_items(llm_obj or {}, contexts) if llm_obj else []
     if not raw_items:
-        raw_items = fallback_actions(contexts)
+        raw_items = fallback_actions(contexts, execution_mode=mode_name)
         if llm_status == "ok":
             llm_status = "ok_but_empty_fallback"
 
@@ -1662,6 +1713,7 @@ def main() -> int:
         dynamic_exits=dynamic_exits,
         max_actions=max_actions,
         allow_add=allow_add,
+        execution_mode=mode_name,
     )
 
     cash_krw = to_float(bal_summary.get("dnca_tot_amt", 0), 0.0)
@@ -1681,6 +1733,7 @@ def main() -> int:
         risk_targets=risk_targets,
         llm_status=llm_status,
         execution_mode=mode_name,
+        allowed_universe=str(execution_mode_state.get("allowed_universe", "watchlist") or "watchlist"),
     )
 
     response_path = str(args.response)

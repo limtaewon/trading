@@ -15,6 +15,9 @@
 보유 포지션 동적 관리 루프:
 `cron(command) -> manage_positions.py -> execute_gpt_orders.py`
 
+시장 모드 제어 루프:
+`refresh_execution_mode.py -> market_execution_mode.json + adaptive_policy.json -> decision/position/executor`
+
 ### 2-1. `codex_cron_router.sh`
 - 잡 단위 락으로 중복 실행을 방지한다.
 - `payload.kind`별 분기 실행:
@@ -27,26 +30,30 @@
 ### 2-2. `codex_brain.sh`
 - 프롬프트를 생성한 뒤 OpenClaw Agent를 호출한다.
 - 동일 프롬프트 해시 캐시(TTL)와 락을 사용해 중복 호출을 줄인다.
+- 응답은 `response_enricher.py`로 mode/playbook 필드를 보정한 뒤 `jsonschema + response_validator.py`로 이중 검증한다.
 - 응답 JSON 유효성을 확인하고 `/tmp/gpt_response.json`에 저장한다.
-- 기본 실행은 `openclaw agent`이며, 실패 시 `codex exec` 폴백 경로를 사용한다.
-- 공통 폴백 정책: 기본 모델과 폴백 모델 모두 공식 확인된 `gpt-5.4`를 사용한다.
+- 기본 실행은 `openclaw agent`이며, `codex exec` 폴백은 기본 비활성 상태다.
+- 기본 모델은 공식 확인된 `gpt-5.4`다.
 
 ### 2-3. `prepare_gpt_prompt.py`
 - ClickHouse, KIS(mcporter), 워크스페이스 메모리 파일을 합쳐 판단 프롬프트를 만든다.
 - 시장 레짐, watchlist 후보, 최근 뉴스, 공시, 잔고/미체결, 정책 파일을 프롬프트에 포함한다.
-- 매수/매도 후보는 `trading.interest_watchlist` 최신 스냅샷(`WATCHLIST_ACTIVE_SOURCE`)을 우선 사용한다.
-- `PROMPT_WATCHLIST_STRICT=1`(기본)일 때 watchlist가 비어도 dashboard fallback 없이 엄격 모드로 동작한다.
+- 평시에는 `watchlist`, 충격장/복구장에는 execution mode가 지정한 `shock_core/recovery_core`를 상위 제약으로 사용한다.
+- `PROMPT_WATCHLIST_STRICT=1`(기본)일 때도 execution mode가 `shock/recovery`면 allowlist 구조가 우선한다.
 
 ### 2-4. `execute_gpt_orders.py`
 - 주문 JSON을 파싱 후 규칙 검증(신뢰도/리스크/데이터 신선도/계좌 상태)을 수행한다.
+- `execution_mode` 기반 BUY 하드게이트, 물타기 차단, pending exit replay, 수량 재동기화, 재가격산정을 적용한다.
 - 하드 스탑로스, 하드 테이크프로핏, 포지션/현금/일일 주문 제한 등 강제 가드레일을 적용한다.
 - 검증 통과 주문만 KIS MCP로 실행하고 실행 이력을 상태 파일에 남긴다.
+- 결과 JSON과 journal에는 skip reason 집계와 pending-exit 상태를 남긴다.
 - 주문 입력 스키마(`trading_response_schema.json`)는 strict 모드로 관리한다.
 
 ### 2-5. `manage_positions.py`
 - 보유종목만 대상으로 LLM 기반 동적 관리 판단(HOLD/REDUCE/EXIT/ADD/TIGHTEN_STOP/TAKE_PROFIT_PARTIAL)을 수행한다.
 - 판단 결과를 `trading_response` 포맷으로 변환해 `execute_gpt_orders.py` 가드레일을 그대로 통과시킨다.
 - 포지션 상태(thesis/action/cooldown/next trigger)를 `~/.openclaw/state/position_manager_state.json`에 저장한다.
+- `shock/close_only`에선 ADD를 차단하고, fallback 임계값도 더 빠른 청산 쪽으로 조정한다.
 - 리뷰 로그를 `position_review_run`, `position_review_action` 테이블에 기록한다.
 
 ## 3) 뉴스/이벤트 파이프라인
@@ -108,6 +115,9 @@
 - 생성기:
 - `scripts/build_codex_jobs_manifest.py`
 - 보유 포지션 동적 관리는 `position-manager-20m` command 잡(평일 09:00~15:59, 20분 주기)으로 실행한다.
+- `data-execution-mode-2m`로 execution mode를 2분마다 갱신한다.
+- `shock-position-review-3m`로 shock/recovery 구간에서만 빠른 포지션 리뷰를 추가 실행한다.
+- `pending-exit-replay-open`으로 장 시작 직후 queued exit를 우선 재생한다.
 - `data-news-research-15m` command 잡(평일 08:00~16:59, 15분 간격)으로 심층 뉴스 연구 워커를 비동기 실행한다.
 - 기본 처리량: `NEWS_RESEARCH_LIMIT=16`, `NEWS_RESEARCH_BATCH=4`, `NEWS_RESEARCH_WINDOW_HOURS=24`
 - `data-news-pipeline-health-20m` command 잡으로 뉴스/클러스터/프레임/연관/watchlist 런의 헬스를 주기 점검한다.
@@ -140,13 +150,13 @@ bash scripts/ops/deploy_to_runtime.sh
 ## 8) 현재 정리 원칙
 - 주식 로직은 `scripts/trading` 중심으로만 관리한다.
 - 레거시/백업 성격 파일은 지속적으로 제거한다.
-- LLM 실행은 OpenClaw Agent를 우선 사용하고, 장애 시 Codex fallback을 허용한다.
+- LLM 실행은 OpenClaw Agent를 우선 사용하고, 실행 제어권은 executor와 execution mode state가 가진다.
 
 ## 11) 유망주 선정/브리핑 기준(최신)
 
 ### 11-1. 유망주 데이터 소스
 - 두레이/파이프라인 브리핑의 유망주는 `trading.decision_candidate`를 기준으로 표시한다.
-- `decision_candidate`는 `decision_operating_pipeline.py`가 생성하며, 기본 universe는 `watchlist`다.
+- `decision_candidate`는 `decision_operating_pipeline.py`가 생성하며, 기본 universe는 `execution mode` 기준 `watchlist / shock_core / recovery_core` 중 하나다.
 - decision의 watchlist 로딩은 append 스냅샷 최신 `ts` 1개를 고정하고 `rank ASC` 우선으로 후보를 선택한다.
 - `watchlist` 소스는 `trading.interest_watchlist`이고, `refresh_interest_watchlist.py`가 아래 신호를 합성해 갱신한다.
 - watchlist 후보 유니버스는 `technical_signals ∪ news_tickers ∪ news_event_frame_tickers ∪ hidden_relation_tickers ∪ news_research_tickers` 합집합으로 구성한다.

@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 KST = ZoneInfo("Asia/Seoul")
 HOME = Path.home()
 STATE_FILE = HOME / ".openclaw" / "state" / "market_execution_mode.json"
+ADAPTIVE_POLICY_FILE = HOME / ".openclaw" / "state" / "adaptive_policy.json"
+EXECUTION_UNIVERSE_FILE = Path(__file__).with_name("execution_universe.json")
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://localhost:8123")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
 CLICKHOUSE_PASS = os.getenv("CLICKHOUSE_PASS", os.getenv("CLICKHOUSE_PASSWORD", ""))
@@ -90,12 +92,47 @@ def load_previous_state() -> dict[str, Any]:
     return {}
 
 
+def load_json_file(path: Path, default: Any) -> Any:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return default
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _parse_csv_tickers(raw: str) -> list[str]:
     out: list[str] = []
     for token in str(raw or "").split(","):
         s = token.strip()
         if len(s) == 6 and s.isdigit() and s not in out:
             out.append(s)
+    return out
+
+
+def load_execution_universe(name: str) -> list[dict[str, str]]:
+    raw = load_json_file(EXECUTION_UNIVERSE_FILE, {})
+    if not isinstance(raw, dict):
+        return []
+    rows = raw.get(name, [])
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker", "") or "").strip()
+        ticker_name = str(row.get("ticker_name", "") or "").strip()
+        family = str(row.get("family", "") or "").strip()
+        if len(ticker) == 6 and ticker.isdigit():
+            out.append({"ticker": ticker, "ticker_name": ticker_name, "family": family})
     return out
 
 
@@ -143,6 +180,11 @@ def build_core(base: list[str], holdings: list[str], watchlist: list[str], limit
             if len(out) >= limit:
                 return out
     return out
+
+
+def build_core_from_entries(base_entries: list[dict[str, str]], holdings: list[str], watchlist: list[str], limit: int) -> list[str]:
+    base = [str(row.get("ticker", "") or "").strip() for row in base_entries if isinstance(row, dict)]
+    return build_core(base, holdings, watchlist, limit)
 
 
 def build_mode_snapshot() -> dict[str, Any]:
@@ -204,10 +246,16 @@ LIMIT 1
 
     holdings = load_balance_tickers()
     watchlist = load_watchlist_tickers()
+    shock_universe_entries = load_execution_universe("shock_core")
+    recovery_universe_entries = load_execution_universe("recovery_core")
     shock_core_base = _parse_csv_tickers(os.getenv("SHOCK_CORE_TICKERS", SHOCK_CORE_DEFAULT))
     recovery_core_base = _parse_csv_tickers(os.getenv("RECOVERY_CORE_TICKERS", RECOVERY_CORE_DEFAULT))
-    shock_core = build_core(shock_core_base, holdings, watchlist, SHOCK_CORE_LIMIT)
-    recovery_core = build_core(recovery_core_base, holdings, watchlist, RECOVERY_CORE_LIMIT)
+    shock_core = build_core_from_entries(shock_universe_entries, holdings, watchlist, SHOCK_CORE_LIMIT)
+    recovery_core = build_core_from_entries(recovery_universe_entries, holdings, watchlist, RECOVERY_CORE_LIMIT)
+    if not shock_core:
+        shock_core = build_core(shock_core_base, holdings, watchlist, SHOCK_CORE_LIMIT)
+    if not recovery_core:
+        recovery_core = build_core(recovery_core_base, holdings, watchlist, RECOVERY_CORE_LIMIT)
     if mode == "close_only":
         allowed_universe = "shock_core"
         allowed_tickers: list[str] = []
@@ -246,8 +294,15 @@ LIMIT 1
         "max_new_positions": max_new_positions,
         "max_buys_per_run": max_buys_per_run,
         "avg_down_block": True,
+        "close_only": mode == "close_only",
         "sell_urgency": sell_urgency,
         "llm_style": llm_style,
+        "strategy_families_allowed": (
+            ["forced_exit"] if mode == "close_only"
+            else ["shock_hedge", "index_etf", "forced_exit"] if mode == "shock"
+            else ["shock_rebound", "index_etf", "core_defensive", "forced_exit"] if mode == "recovery"
+            else ["stock_selection", "core_defensive", "forced_exit"]
+        ),
         "session_id": session_id,
         "latest_decision_id": latest_decision_id,
         "latest_decision_time": latest_decision_time,
@@ -264,13 +319,37 @@ LIMIT 1
 
 
 def save_snapshot(snapshot: dict[str, Any]) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(STATE_FILE, snapshot)
+
+
+def sync_adaptive_policy(snapshot: dict[str, Any]) -> None:
+    raw = load_json_file(ADAPTIVE_POLICY_FILE, {})
+    policy = raw if isinstance(raw, dict) else {}
+    policy.update(
+        {
+            "mode": str(snapshot.get("execution_mode", "normal") or "normal"),
+            "execution_mode": str(snapshot.get("execution_mode", "normal") or "normal"),
+            "allowed_universe": str(snapshot.get("allowed_universe", "watchlist") or "watchlist"),
+            "max_new_positions": int(snapshot.get("max_new_positions", 3) or 3),
+            "max_buys_per_run": int(snapshot.get("max_buys_per_run", 3) or 3),
+            "avg_down_block": bool(snapshot.get("avg_down_block", True)),
+            "close_only": bool(snapshot.get("close_only", False)),
+            "sell_urgency": str(snapshot.get("sell_urgency", "normal") or "normal"),
+            "strategy_families_allowed": snapshot.get("strategy_families_allowed", []),
+            "shock_whitelist": snapshot.get("shock_core", []),
+            "recovery_whitelist": snapshot.get("recovery_core", []),
+            "allowed_tickers": snapshot.get("allowed_tickers", []),
+            "reason_codes": snapshot.get("mode_reason_codes", []),
+            "updated_at": str(snapshot.get("updated_at", "") or ""),
+        }
+    )
+    atomic_write_json(ADAPTIVE_POLICY_FILE, policy)
 
 
 def main() -> int:
     snapshot = build_mode_snapshot()
     save_snapshot(snapshot)
+    sync_adaptive_policy(snapshot)
     print(json.dumps(snapshot, ensure_ascii=False))
     return 0
 

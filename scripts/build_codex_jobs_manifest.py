@@ -234,12 +234,12 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
-            "name": "data-execution-mode-3m",
+            "name": "data-execution-mode-2m",
             "enabled": True,
-            "schedule": {"expr": "*/3 8-15 * * 1-5", "tz": "Asia/Seoul"},
+            "schedule": {"expr": "*/2 8-15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
-                "command": f'{env} && {py} {trading_scripts}/market_execution_mode.py >> {logs}/execution-mode.log 2>&1',
+                "command": f'{env} && {py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1',
             },
             "source": "legacy-crontab",
         },
@@ -249,7 +249,37 @@ def data_jobs() -> list[dict]:
             "schedule": {"expr": "*/20 9-15 * * 1-5", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
-                "command": f'{env} && {py} {trading_scripts}/market_execution_mode.py >> {logs}/execution-mode.log 2>&1 && {py} {trading_scripts}/manage_positions.py --execute >> {logs}/position-manager.log 2>&1',
+                "command": f'{env} && {py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1 && {py} {trading_scripts}/manage_positions.py --execute >> {logs}/position-manager.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "shock-position-review-3m",
+            "enabled": True,
+            "schedule": {"expr": "*/3 9-15 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && '
+                    f'{py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1 && '
+                    f'{py} {trading_scripts}/manage_positions.py --execute --only-modes shock,recovery '
+                    f'>> {logs}/position-manager-shock.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "pending-exit-replay-open",
+            "enabled": True,
+            "schedule": {"expr": "0 9 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && '
+                    f'{py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1 && '
+                    f'{py} {trading_scripts}/execute_gpt_orders.py --replay-pending-exit-only '
+                    f'>> {logs}/pending-exit-replay.log 2>&1'
+                ),
             },
             "source": "legacy-crontab",
         },
@@ -261,9 +291,9 @@ def data_jobs() -> list[dict]:
                 "kind": "command",
                 "command": (
                     f'{env} && '
-                    f'{py} {trading_scripts}/market_execution_mode.py >> {logs}/execution-mode.log 2>&1 && '
+                    f'{py} {trading_scripts}/refresh_execution_mode.py >> {logs}/execution-mode.log 2>&1 && '
                     'DECISION_STAGE0_ONLY_CONSTRAINTS="${DECISION_STAGE0_ONLY_CONSTRAINTS:-0}" '
-                    f'{py} {trading_scripts}/decision_operating_pipeline.py --horizon INTRADAY --universe watchlist --limit 30 '
+                    f'{py} {trading_scripts}/decision_operating_pipeline.py --horizon INTRADAY --universe auto --limit 30 '
                     f'>> {logs}/decision-operating.log 2>&1 && '
                     f'{py} {trading_scripts}/send_decision_dryrun_telegram.py '
                     f'>> {logs}/decision-operating.log 2>&1'

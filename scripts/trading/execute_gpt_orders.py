@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 from env_bootstrap import bootstrap_openclaw_env
 from llm_model_config import resolve_model
+from response_enricher import enrich_trading_response
 from response_validator import validate_trading_response
 
 bootstrap_openclaw_env()
@@ -1781,6 +1782,18 @@ def append_journal(event: dict[str, Any]) -> None:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def count_reason_values(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("reason", row.get("status", "")) or "").strip()
+        if not key:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def _load_telegram_notify():
     here = Path(__file__).resolve().parent
     scripts_parent = str(here.parent)
@@ -1879,14 +1892,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--response", default="/tmp/gpt_response.json")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--replay-pending-exit-only", action="store_true")
     args = parser.parse_args()
 
     ensure_feature_snapshot_view()
 
     response_path = Path(args.response)
-    if not response_path.exists():
-        print(json.dumps({"status": "error", "reason": "response_file_missing"}))
-        return 1
 
     kis_profile = load_kis_profile_from_mcporter_config()
     if REQUIRE_REAL_ACCOUNT and kis_profile.get("account_type") != "REAL":
@@ -1902,8 +1913,29 @@ def main() -> int:
         )
         return 1
 
-    data = json.loads(response_path.read_text(encoding="utf-8"))
-    validation_errors = validate_trading_response(data)
+    execution_mode_state = load_execution_mode()
+    if args.replay_pending_exit_only:
+        data = {
+            "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            "market_assessment": "pending exit replay",
+            "regime_action": "defensive",
+            "execution_mode": "close_only",
+            "orders": [],
+            "risk_targets": [],
+            "watch_list": [],
+            "portfolio_advice": "replay queued exits only",
+            "self_evaluation": "system replay path",
+            "next_focus": "pending exit queue",
+        }
+    else:
+        if not response_path.exists():
+            print(json.dumps({"status": "error", "reason": "response_file_missing"}))
+            return 1
+        data = json.loads(response_path.read_text(encoding="utf-8"))
+    data = enrich_trading_response(data, execution_mode_state=execution_mode_state, source_label="executor")
+    if response_path.exists() and not args.replay_pending_exit_only:
+        response_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    validation_errors = validate_trading_response(data, execution_mode_state=execution_mode_state)
     if validation_errors:
         print(
             json.dumps(
@@ -1937,7 +1969,7 @@ def main() -> int:
         print(json.dumps({"status": "error", "reason": "invalid_total_asset"}))
         return 1
     adaptive_policy = load_adaptive_policy()
-    execution_mode = load_execution_mode()
+    execution_mode = execution_mode_state
     min_cash = total_asset * to_float(adaptive_policy.get("min_cash_ratio", 0.15), 0.15)
     base_per_order_cap = float(BASE_PER_ORDER_CAP_KRW)
     per_order_cap = 0.0
@@ -1991,7 +2023,11 @@ def main() -> int:
         key=lambda row: compute_order_priority(row if isinstance(row, dict) else {}),
         reverse=True,
     )
-    decision_id = now_kst().strftime("%Y%m%d_%H%M%S")
+    decision_id = (
+        f"pending_exit_replay_{now_kst().strftime('%Y%m%d_%H%M%S')}"
+        if args.replay_pending_exit_only
+        else now_kst().strftime("%Y%m%d_%H%M%S")
+    )
     kill_state = load_kill_state()
     kill_name = str(kill_state.get("state", "NORMAL")).upper()
     session_id = detect_market_session()
@@ -2424,6 +2460,8 @@ def main() -> int:
         "attempted": attempted,
         "executed": executed,
         "skipped": skipped,
+        "skip_reason_counts": count_reason_values(skipped),
+        "executed_status_counts": count_reason_values(executed),
         "dynamic_exit": {
             "state_file": str(EXIT_STATE_FILE),
             "risk_targets_input": len(risk_targets),
@@ -2476,6 +2514,7 @@ def main() -> int:
             "orders_total": len(orders),
             "executed_count": len(executed),
             "skipped_count": len(skipped),
+            "skip_reason_counts": count_reason_values(skipped),
             "dry_run": args.dry_run,
         }
     )

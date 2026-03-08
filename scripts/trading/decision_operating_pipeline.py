@@ -20,6 +20,7 @@ import re
 import uuid
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -27,6 +28,8 @@ from urllib.request import Request, urlopen
 from env_bootstrap import bootstrap_openclaw_env
 
 bootstrap_openclaw_env()
+EXECUTION_MODE_FILE = Path.home() / ".openclaw" / "state" / "market_execution_mode.json"
+EXECUTION_UNIVERSE_FILE = Path(__file__).with_name("execution_universe.json")
 
 
 def _log(msg: str) -> None:
@@ -627,8 +630,27 @@ LIMIT 8
 
 def load_universe(universe: str, limit: int) -> list[dict[str, str]]:
     lim = max(1, int(limit))
-    if universe != "watchlist":
-        _log(f"universe={universe} 요청 감지: decision 유니버스는 watchlist로 강제합니다")
+    if universe in {"shock_core", "recovery_core"}:
+        try:
+            raw = json.loads(EXECUTION_UNIVERSE_FILE.read_text(encoding="utf-8"))
+            rows = raw.get(universe, []) if isinstance(raw, dict) else []
+            out: list[dict[str, str]] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                ticker = str(row.get("ticker", "") or "").strip()
+                ticker_name = str(row.get("ticker_name", "") or "").strip()
+                if _is_ticker(ticker):
+                    out.append({"ticker": ticker, "ticker_name": ticker_name})
+                if len(out) >= lim:
+                    break
+            if out:
+                return out
+            _log(f"{universe} allowlist가 비어 watchlist로 fallback")
+        except Exception:
+            _log(f"{universe} allowlist 로드 실패, watchlist로 fallback")
+    elif universe != "watchlist":
+        _log(f"universe={universe} 요청 감지: decision 유니버스는 watchlist/shock_core/recovery_core만 허용합니다")
     active_source_raw = os.getenv("WATCHLIST_ACTIVE_SOURCE", "enrich_data").strip()
     active_sources = [s.strip() for s in active_source_raw.split(",") if s.strip()]
     source_filter = ""
@@ -1317,6 +1339,17 @@ def _load_mode_state() -> dict[str, Any]:
     return {}
 
 
+def _load_execution_mode_state() -> dict[str, Any]:
+    try:
+        if EXECUTION_MODE_FILE.exists():
+            raw = json.loads(EXECUTION_MODE_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return raw
+    except Exception:
+        pass
+    return {}
+
+
 def _save_mode_state(state: dict[str, Any]) -> None:
     path = _mode_state_path()
     try:
@@ -1346,7 +1379,7 @@ def _resolve_mode(base_mode: str, state: dict[str, Any], today: dt.date) -> tupl
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--horizon", default="INTRADAY", choices=["INTRADAY", "D1_3", "W1_2"])
-    ap.add_argument("--universe", default="watchlist", choices=["watchlist", "all"])
+    ap.add_argument("--universe", default="auto", choices=["auto", "watchlist", "shock_core", "recovery_core", "all"])
     ap.add_argument("--limit", type=int, default=30)
     ap.add_argument("--mode", default=os.getenv("DECISION_MODE", "strict"), choices=["strict", "balanced", "neutral"])
     ap.add_argument("--model-version", default="decision-operating-spec-p0")
@@ -1355,6 +1388,7 @@ def main() -> int:
     ensure_decision_tables()
     today = dt.date.today()
     mode_state = _load_mode_state()
+    execution_mode_state = _load_execution_mode_state()
     mode, mode_overridden = _resolve_mode(args.mode, mode_state, today)
 
     mode_cfg = {
@@ -1369,9 +1403,16 @@ def main() -> int:
         "yes",
         "on",
     }
-    if args.universe != "watchlist":
-        _log(f"--universe {args.universe} 무시: watchlist로 강제")
-        args.universe = "watchlist"
+    requested_universe = args.universe
+    if requested_universe == "auto":
+        requested_universe = str(execution_mode_state.get("allowed_universe", "watchlist") or "watchlist")
+    if requested_universe == "all":
+        _log("--universe all 무시: auto/watchlist/shock_core/recovery_core만 허용")
+        requested_universe = "watchlist"
+    if requested_universe not in {"watchlist", "shock_core", "recovery_core"}:
+        _log(f"--universe {requested_universe} 무시: watchlist로 강제")
+        requested_universe = "watchlist"
+    args.universe = requested_universe
     rsi_overheat_block_enabled = os.getenv("ENABLE_RSI_OVERHEAT_BLOCK", "0").strip() in {"1", "true", "TRUE", "yes", "YES"}
     prefilter_liquidity_krw = max(0.0, _to_float(os.getenv("PREFILTER_LIQUIDITY_KRW", "1000000000"), 1_000_000_000.0))
 
@@ -1869,7 +1910,9 @@ def main() -> int:
             "buy_threshold": mode_cfg["buy_threshold"],
             "stage2_min": mode_cfg["stage2_min"],
             "stage0_only_constraints": stage0_only_constraints,
-            "universe_forced_watchlist": True,
+            "universe_forced_watchlist": args.universe == "watchlist",
+            "requested_universe": args.universe,
+            "execution_mode_allowed_universe": str(execution_mode_state.get("allowed_universe", "watchlist") or "watchlist"),
             "watchlist_active_source": os.getenv("WATCHLIST_ACTIVE_SOURCE", "enrich_data"),
             "stage2_extreme_only_block": True,
             "stage3_gate_enabled": False,

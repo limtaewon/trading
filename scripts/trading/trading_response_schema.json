@@ -19,6 +19,11 @@
       "type": "string",
       "enum": ["normal", "shock", "recovery", "close_only"]
     },
+    "allowed_universe": {
+      "type": "string",
+      "enum": ["watchlist", "shock_core", "recovery_core"]
+    },
+    "playbook_summary": { "type": "string", "minLength": 1 },
     "timestamp": { "type": "string" },
     "market_assessment": { "type": "string" },
     "regime_action": {
@@ -62,6 +67,10 @@
           },
           "playbook_id": { "type": "string", "maxLength": 64 },
           "priority": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "order_role": {
+            "type": "string",
+            "enum": ["new_entry", "reduce", "forced_exit", "hedge"]
+          },
           "close_only": { "type": "boolean" },
           "expected_holding_window": {
             "type": "string",

@@ -1,0 +1,17 @@
+{
+  "shock_core": [
+    { "ticker": "252670", "ticker_name": "KODEX 200선물인버스2X", "family": "shock_hedge" },
+    { "ticker": "122630", "ticker_name": "KODEX 레버리지", "family": "shock_rebound" },
+    { "ticker": "069500", "ticker_name": "KODEX 200", "family": "index_etf" },
+    { "ticker": "005930", "ticker_name": "삼성전자", "family": "core_defensive" },
+    { "ticker": "000660", "ticker_name": "SK하이닉스", "family": "core_defensive" },
+    { "ticker": "017670", "ticker_name": "SK텔레콤", "family": "core_defensive" }
+  ],
+  "recovery_core": [
+    { "ticker": "122630", "ticker_name": "KODEX 레버리지", "family": "shock_rebound" },
+    { "ticker": "069500", "ticker_name": "KODEX 200", "family": "index_etf" },
+    { "ticker": "005930", "ticker_name": "삼성전자", "family": "core_defensive" },
+    { "ticker": "000660", "ticker_name": "SK하이닉스", "family": "core_defensive" },
+    { "ticker": "017670", "ticker_name": "SK텔레콤", "family": "core_defensive" }
+  ]
+}
