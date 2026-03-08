@@ -23,6 +23,7 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env_bootstrap import bootstrap_openclaw_env
 from codex_exec_guard import run_codex_cached
+from llm_model_config import default_primary_model
 
 bootstrap_openclaw_env()
 
@@ -41,7 +42,7 @@ DEFAULT_DRY_RUN = os.getenv("LLM_RELATION_DRY_RUN", "0").strip() == "1"
 CODEX_EXEC_TIMEOUT = int(os.getenv("CODEX_EXEC_TIMEOUT", "180"))
 CODEX_CACHE_TTL_SEC = int(os.getenv("CODEX_EXEC_CACHE_TTL", "0"))
 MAX_EVENT_CONTEXT = int(os.getenv("LLM_RELATION_MAX_EVENT_CONTEXT", "18000"))
-MODEL_DEFAULT = "openai-codex/gpt-5.3-codex-spark"
+MODEL_DEFAULT = default_primary_model()
 
 
 def _log(msg: str) -> None:

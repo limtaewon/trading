@@ -31,6 +31,7 @@ import requests
 
 from codex_exec_guard import run_codex_cached
 from env_bootstrap import bootstrap_openclaw_env
+from llm_model_config import resolve_model
 
 bootstrap_openclaw_env()
 
@@ -874,7 +875,7 @@ def run_llm_review(prompt: str) -> tuple[dict[str, Any] | None, str]:
         raw = run_codex_cached(
             prompt=prompt,
             codex_bin=os.getenv("CODEX_BIN", "openclaw"),
-            model=os.getenv("POSITION_MANAGER_MODEL", os.getenv("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark")),
+            model=resolve_model("POSITION_MANAGER_MODEL", "CODEX_MODEL"),
             workdir=str(SCRIPT_DIR),
             timeout_sec=POSITION_MANAGER_LLM_TIMEOUT_SEC,
             base_args=[],

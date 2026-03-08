@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env_bootstrap import bootstrap_openclaw_env
 from codex_exec_guard import run_codex_cached
+from llm_model_config import normalize_model_name, resolve_model
 
 bootstrap_openclaw_env()
 
@@ -30,9 +31,7 @@ QUEUE_LOOKBACK_HOURS = max(24, int(os.environ.get("NEWS_RESEARCH_QUEUE_LOOKBACK_
 MAX_DYNAMIC_LIMIT = max(LIMIT, int(os.environ.get("NEWS_RESEARCH_MAX_DYNAMIC_LIMIT", "80")))
 MAX_ITEMS_PER_RUN = max(LIMIT, int(os.environ.get("NEWS_RESEARCH_MAX_ITEMS_PER_RUN", "96")))
 RUN_SLEEP_SEC = max(0.0, float(os.environ.get("NEWS_RESEARCH_RUN_SLEEP_SEC", "0.2")))
-OPENCLAW_BRAIN_MODEL = "openai-codex/gpt-5.3-codex-spark"
-_env_model = os.environ.get("NEWS_RESEARCH_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip()
-MODEL = _env_model or OPENCLAW_BRAIN_MODEL
+MODEL = resolve_model("NEWS_RESEARCH_MODEL", "CODEX_MODEL")
 WORKDIR = os.environ.get("NEWS_CODEX_WORKDIR", os.path.expanduser("~/.openclaw/logs"))
 SINGLE_WORKER_LOCK = os.environ.get("NEWS_RESEARCH_SINGLE_WORKER_LOCK", "1").strip() not in {"0", "false", "False"}
 LOCK_FILE = os.path.expanduser(
@@ -48,16 +47,7 @@ CODEX_EXEC_CACHE_LOCK_WAIT = int(
 
 
 def normalize_codex_model(model: str) -> str:
-    m = (model or "").strip()
-    aliases = {
-        "openai/gpt-5.2": "gpt-5.3-codex-spark",
-        "openai/gpt-5.3": "gpt-5.3-codex-spark",
-        "openai-codex/gpt-5.2": "gpt-5.3-codex-spark",
-        "openai-codex/gpt-5.3": "gpt-5.3-codex-spark",
-        "openai-codex/gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
-        "gpt": "gpt-5.3-codex-spark",
-    }
-    return aliases.get(m, m)
+    return normalize_model_name(model)
 
 CODEX_CANDIDATES = [
     os.environ.get("CODEX_BIN", ""),

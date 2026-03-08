@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env_bootstrap import bootstrap_openclaw_env
 from market_realtime import fetch_naver_realtime_indices, fetch_naver_usdkrw
 from codex_exec_guard import run_codex_cached
+from llm_model_config import resolve_model
 
 bootstrap_openclaw_env()
 
@@ -43,7 +44,7 @@ OPENCLAW_HOME = Path(os.path.expanduser("~/.openclaw"))
 KRX_STOCKS_PATH = OPENCLAW_HOME / "data" / "krx_stocks.json"
 
 CODEX_BIN = os.getenv("CODEX_BIN", os.getenv("OPENCLAW_BIN", "openclaw"))
-CODEX_MODEL = os.getenv("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark")
+CODEX_MODEL = resolve_model("CODEX_MODEL")
 CODEX_EXEC_CACHE_DIR = os.getenv("CODEX_EXEC_CACHE_DIR", os.path.expanduser("~/.openclaw/cache/codex-exec"))
 CODEX_EXEC_CACHE_TTL = int(os.getenv("STOCK_REPORT_CODEX_CACHE_TTL", os.getenv("CODEX_EXEC_CACHE_TTL", "180")))
 CODEX_EXEC_CACHE_LOCK_WAIT = int(

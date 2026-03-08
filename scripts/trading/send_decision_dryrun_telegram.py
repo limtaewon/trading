@@ -24,6 +24,7 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from env_bootstrap import bootstrap_openclaw_env
+from llm_model_config import resolve_model
 
 bootstrap_openclaw_env()
 
@@ -424,7 +425,7 @@ def _run_llm_summary(context: dict[str, Any], timeout_sec: int = 90) -> tuple[di
         raw = run_codex_cached(
             prompt=prompt,
             codex_bin=resolved,
-            model=os.getenv("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark"),
+            model=resolve_model("CODEX_MODEL"),
             workdir=None,
             timeout_sec=max(30, int(timeout_sec)),
             base_args=["--skip-git-repo-check", "--full-auto"],

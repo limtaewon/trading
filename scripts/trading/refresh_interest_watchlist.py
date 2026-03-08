@@ -28,6 +28,7 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 
 from env_bootstrap import bootstrap_openclaw_env
+from llm_model_config import resolve_model
 from codex_exec_guard import run_codex_cached
 
 bootstrap_openclaw_env()
@@ -60,7 +61,7 @@ LLM_TIMEOUT_SEC_DEFAULT = max(30, int(os.environ.get("WATCHLIST_LLM_TIMEOUT_SEC"
 LLM_CACHE_TTL_SEC_DEFAULT = max(0, int(os.environ.get("WATCHLIST_LLM_CACHE_TTL_SEC", "300")))
 LLM_RULE_WEIGHT_DEFAULT = float(os.environ.get("WATCHLIST_RULE_WEIGHT", "0.7"))
 LLM_WEIGHT_DEFAULT = float(os.environ.get("WATCHLIST_LLM_WEIGHT", "0.3"))
-LLM_MODEL_DEFAULT = os.environ.get("WATCHLIST_LLM_MODEL", os.environ.get("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark")).strip()
+LLM_MODEL_DEFAULT = resolve_model("WATCHLIST_LLM_MODEL", "CODEX_MODEL")
 LLM_MAX_ITEMS_DEFAULT = max(5, int(os.environ.get("WATCHLIST_LLM_MAX_ITEMS", "30")))
 CANDIDATE_POOL_DEFAULT = max(30, int(os.environ.get("WATCHLIST_CANDIDATE_POOL", "200")))
 WATCHLIST_ADAPTIVE_WEIGHTING_DEFAULT = os.environ.get("WATCHLIST_ADAPTIVE_WEIGHTING", "1").strip() == "1"

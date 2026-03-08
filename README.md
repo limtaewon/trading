@@ -5,7 +5,7 @@
 
 ## 1) 시스템 목적
 - 장중/장전 스케줄에 맞춰 자동으로 시장 데이터를 수집한다.
-- OpenClaw Agent(`gpt-5.3-codex-spark`, `gpt-5.3-codex` )로 매매 판단 JSON을 생성한다.
+- OpenClaw Agent(`gpt-5.4`)로 매매 판단 JSON을 생성한다.
 - JSON 주문안을 규칙 기반 검증 후 KIS MCP로 실제 주문한다.
 - 긴급 속보 발생 시 즉시 판단 루프를 재트리거한다.
 
@@ -29,7 +29,7 @@
 - 동일 프롬프트 해시 캐시(TTL)와 락을 사용해 중복 호출을 줄인다.
 - 응답 JSON 유효성을 확인하고 `/tmp/gpt_response.json`에 저장한다.
 - 기본 실행은 `openclaw agent`이며, 실패 시 `codex exec` 폴백 경로를 사용한다.
-- 공통 폴백 정책: primary가 `gpt-5.3-codex-spark`일 때 오류/레이트리밋 발생 시 `gpt-5.3-codex`를 1차 폴백 모델로 사용한다.
+- 공통 폴백 정책: 기본 모델과 폴백 모델 모두 공식 확인된 `gpt-5.4`를 사용한다.
 
 ### 2-3. `prepare_gpt_prompt.py`
 - ClickHouse, KIS(mcporter), 워크스페이스 메모리 파일을 합쳐 판단 프롬프트를 만든다.
@@ -208,7 +208,7 @@ bash scripts/ops/deploy_to_runtime.sh
 - 관련 파라미터: `INVESTOR_FLOW_SYMBOL_LIMIT`(기본 30), `INVESTOR_FLOW_WATCHLIST_MULTIPLIER`(기본 3)
 
 ### 11-2-3. 공통 안정화(LLM/ClickHouse)
-- LLM 호출은 기본 `gpt-5.3-codex-spark`, 복구 가능 오류(레이트리밋/세션 만료/컨텍스트 초과) 시 `gpt-5.3-codex`로 자동 폴백한다.
+- LLM 호출 기본모델은 `gpt-5.4`이며, 폴백도 `OPENCLAW_FALLBACK_MODEL` 또는 `gpt-5.4`를 따른다.
 - ClickHouse 연결은 `CLICKHOUSE_URL=http://user:pass@host:8123`와 `CLICKHOUSE_HOST + USER/PASS` 두 형식을 모두 정규화해 인증 오류 재발을 줄인다.
 
 ### 11-3. 두레이 보고 흐름

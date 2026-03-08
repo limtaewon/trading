@@ -15,6 +15,7 @@ from urllib.parse import urlparse, urlunparse
 # ensure local imports work regardless of CWD (cron, manual run, etc.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env_bootstrap import bootstrap_openclaw_env
+from ticker_mapper import TickerMapper
 
 bootstrap_openclaw_env()
 
@@ -35,16 +36,19 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from codex_exec_guard import run_codex_cached
+from llm_model_config import resolve_model
+
+try:
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover
+    fcntl = None
 
 # ─── 설정 ───────────────────────────────────────────────
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "").strip()
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
 NAVER_API_URL = "https://openapi.naver.com/v1/search/news.json"
 
-# LLM 판별은 openClaw 기본 브레인 모델과 동일하게 사용
-OPENCLAW_BRAIN_MODEL = "openai-codex/gpt-5.3-codex-spark"
-_env_model = os.environ.get("NEWS_CODEX_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip()
-CODEX_MODEL = _env_model or OPENCLAW_BRAIN_MODEL
+CODEX_MODEL = resolve_model("NEWS_CODEX_MODEL", "CODEX_MODEL")
 CODEX_TIMEOUT = int(os.environ.get("NEWS_CODEX_TIMEOUT", os.environ.get("CODEX_TIMEOUT", "120")))
 CODEX_WORKDIR = os.environ.get("NEWS_CODEX_WORKDIR", os.path.expanduser("~/.openclaw/logs"))
 CODEX_EXEC_CACHE_DIR = os.path.expanduser(os.environ.get("CODEX_EXEC_CACHE_DIR", "~/.openclaw/cache/codex-exec"))
@@ -114,6 +118,12 @@ CLICKHOUSE_URL = _normalize_clickhouse_url()
 TRADING_BOT_WEBHOOK = os.environ.get("TRADING_BOT_WEBHOOK", "")
 ALERT_LOG = Path.home() / ".openclaw" / "data" / "alert_history.json"
 SIMILARITY_THRESHOLD = 0.2
+BREAKING_MAX_AGE_MIN = max(3, int(os.environ.get("BREAKING_MAX_AGE_MIN", "15")))
+BREAKING_DB_DEDUP_HOURS = max(1, int(os.environ.get("BREAKING_DB_DEDUP_HOURS", "6")))
+BREAKING_TITLE_COOLDOWN_SEC = max(300, int(os.environ.get("BREAKING_TITLE_COOLDOWN_SEC", "7200")))
+BREAKING_TOPIC_COOLDOWN_SEC = max(600, int(os.environ.get("BREAKING_TOPIC_COOLDOWN_SEC", "10800")))
+BREAKING_SINGLE_WORKER_LOCK = os.environ.get("BREAKING_SINGLE_WORKER_LOCK", "1").strip() not in {"0", "false", "False"}
+BREAKING_LOCK_FILE = Path(os.path.expanduser(os.environ.get("BREAKING_LOCK_FILE", "~/.openclaw/state/news_monitor.lock")))
 
 # 보유종목 중요뉴스 → 즉시 Codex 판단 트리거
 URGENT_TRIGGER_ENABLED = os.environ.get("NEWS_URGENT_TRIGGER_ENABLED", "1") == "1"
@@ -164,6 +174,37 @@ def url_hash(url):
     return hashlib.md5(url.encode()).hexdigest()[:16]
 
 
+def _normalized_text(value: str) -> str:
+    text = clean_html(value or "").lower()
+    text = re.sub(r"\[[^\]]+\]", " ", text)
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"[\"'“”‘’]", " ", text)
+    text = re.sub(r"[^0-9a-zA-Z가-힣]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _title_signature(title: str) -> str:
+    norm = _normalized_text(title)
+    if not norm:
+        return ""
+    return hashlib.md5(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def _topic_signature(item: dict) -> str:
+    parts = [
+        str(item.get("impact_type", "") or "").strip().lower(),
+        str(item.get("sentiment", "") or "").strip().lower(),
+        str(item.get("summary", "") or "").strip().lower(),
+        ",".join(sorted(str(t).strip() for t in (item.get("tickers") or []) if str(t).strip())),
+    ]
+    raw = " | ".join(parts)
+    norm = _normalized_text(raw)
+    if not norm:
+        return ""
+    return hashlib.md5(norm.encode("utf-8")).hexdigest()[:16]
+
+
 def _find_codex_bin():
     for cand in CODEX_BIN_CANDIDATES:
         if not cand:
@@ -191,6 +232,76 @@ def _find_mcporter_bin():
 
 
 MCPORTER_BIN = _find_mcporter_bin()
+_ticker_mapper = TickerMapper()
+_ticker_name_by_code = {code: name for name, code in _ticker_mapper.stocks.items()}
+_ticker_text_patterns: list[tuple[str, str]] = []
+for official_name, official_code in _ticker_mapper.stocks.items():
+    variants = {str(official_name or "").strip()}
+    base_name = re.sub(r"\(.*?\)", "", str(official_name or "")).strip()
+    if base_name:
+        variants.add(base_name)
+    for variant in variants:
+        variant = variant.strip()
+        if len(variant) < 4:
+            continue
+        _ticker_text_patterns.append((variant, str(official_code)))
+        compact = variant.replace(" ", "")
+        if compact != variant and len(compact) >= 4:
+            _ticker_text_patterns.append((compact, str(official_code)))
+_ticker_text_patterns.sort(key=lambda item: len(item[0]), reverse=True)
+
+
+def _map_one_ticker(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if re.match(r"^\d{6}$", raw):
+        return raw
+    raw_nospace = raw.replace(" ", "")
+    for candidate in (raw, raw_nospace):
+        if candidate in _ticker_mapper.stocks:
+            code = str(_ticker_mapper.stocks.get(candidate, "") or "")
+            if re.match(r"^\d{6}$", code):
+                return code
+        official = _ticker_mapper.aliases.get(candidate)
+        if official:
+            code = str(_ticker_mapper.stocks.get(official, "") or "")
+            if re.match(r"^\d{6}$", code):
+                return code
+    return ""
+
+
+def _extract_tickers_from_text(text: str, max_items: int = 4) -> list[str]:
+    content = clean_html(text or "")
+    if not content:
+        return []
+    content_nospace = content.replace(" ", "")
+    out: list[str] = []
+    seen: set[str] = set()
+    for pattern, code in _ticker_text_patterns:
+        pattern = str(pattern or "").strip()
+        if len(pattern) < 4:
+            continue
+        pattern_nospace = pattern.replace(" ", "")
+        if pattern not in content and pattern_nospace not in content_nospace:
+            continue
+        if re.match(r"^\d{6}$", code) and code not in seen:
+            out.append(code)
+            seen.add(code)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _ticker_names(tickers: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for tk in tickers:
+        name = _ticker_name_by_code.get(str(tk), str(tk))
+        if name not in seen:
+            out.append(name)
+            seen.add(name)
+    return out
 
 
 def mcporter_call(expr: str) -> dict:
@@ -468,16 +579,81 @@ def load_alert_history():
             with open(ALERT_LOG, "r") as f:
                 data = json.load(f)
             cutoff = time.time() - 86400
-            return {k: v for k, v in data.items() if v > cutoff}
+            if isinstance(data, dict) and all(isinstance(v, (int, float)) for v in data.values()):
+                data = {"urls": data, "titles": {}, "topics": {}}
+            if isinstance(data, dict):
+                out = {"urls": {}, "titles": {}, "topics": {}}
+                for key in ("urls", "titles", "topics"):
+                    section = data.get(key, {})
+                    if isinstance(section, dict):
+                        out[key] = {
+                            str(k): float(v)
+                            for k, v in section.items()
+                            if isinstance(v, (int, float)) and float(v) > cutoff
+                        }
+                return out
     except Exception:
         pass
-    return {}
+    return {"urls": {}, "titles": {}, "topics": {}}
 
 
 def save_alert_history(history):
     ALERT_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(ALERT_LOG, "w") as f:
         json.dump(history, f)
+
+
+def _history_contains_recent(history: dict, section: str, key: str, cooldown_sec: int) -> bool:
+    if not key:
+        return False
+    bucket = history.get(section, {})
+    if not isinstance(bucket, dict):
+        return False
+    ts = bucket.get(key)
+    if not isinstance(ts, (int, float)):
+        return False
+    return (time.time() - float(ts)) < cooldown_sec
+
+
+def _history_mark_now(history: dict, section: str, key: str) -> None:
+    if not key:
+        return
+    bucket = history.setdefault(section, {})
+    if isinstance(bucket, dict):
+        bucket[key] = time.time()
+
+
+def _acquire_worker_lock():
+    if not BREAKING_SINGLE_WORKER_LOCK:
+        return None
+    if fcntl is None:
+        return None
+    BREAKING_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(BREAKING_LOCK_FILE, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fd.close()
+        return False
+    fd.seek(0)
+    fd.truncate()
+    fd.write(str(os.getpid()))
+    fd.flush()
+    return fd
+
+
+def _release_worker_lock(fd) -> None:
+    if not fd:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        fd.close()
+    except Exception:
+        pass
 
 
 # ─── 1. 속보 후보 수집 ──────────────────────────────────
@@ -509,7 +685,7 @@ def fetch_breaking_news():
                 try:
                     pub_dt = parsedate_to_datetime(item.get("pubDate", ""))
                     age_min = (datetime.now(pub_dt.tzinfo) - pub_dt).total_seconds() / 60
-                    if age_min > 30:
+                    if age_min < -5 or age_min > BREAKING_MAX_AGE_MIN:
                         continue
                 except Exception:
                     continue
@@ -525,7 +701,7 @@ def fetch_breaking_news():
             log.error(f"Naver API 실패 [{query}]: {e}")
         time.sleep(0.1)
 
-    log.info(f"속보 후보: {len(all_news)}건 (최근 30분)")
+    log.info(f"속보 후보: {len(all_news)}건 (최근 {BREAKING_MAX_AGE_MIN}분)")
     return all_news
 
 
@@ -533,23 +709,58 @@ def fetch_breaking_news():
 def filter_duplicates(candidates):
     """URL + 임베딩 + 알림이력 3단계 필터"""
     # L1: DB URL
-    query = "SELECT source_url FROM trading.news WHERE collected_at > now() - INTERVAL 2 HOUR"
+    query = (
+        "SELECT source_url, title FROM trading.news "
+        f"WHERE collected_at > now() - INTERVAL {BREAKING_DB_DEDUP_HOURS} HOUR"
+    )
     try:
         resp = requests.get(CLICKHOUSE_URL, params={"query": query}, timeout=10)
         resp.raise_for_status()
-        existing_urls = set(line.strip() for line in resp.text.strip().split("\n") if line.strip())
+        existing_urls = set()
+        existing_title_sigs = set()
+        for line in resp.text.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = line.split("\t", 1)
+            url = parts[0].strip()
+            title = parts[1].strip() if len(parts) > 1 else ""
+            if url:
+                existing_urls.add(url)
+            sig = _title_signature(title)
+            if sig:
+                existing_title_sigs.add(sig)
     except Exception:
         existing_urls = set()
+        existing_title_sigs = set()
 
-    after_url = [n for n in candidates if n["url"] not in existing_urls]
-    log.info(f"  L1 URL: {len(candidates)} -> {len(after_url)}")
+    after_url = []
+    seen_title_sigs: set[str] = set()
+    for item in candidates:
+        sig = _title_signature(item.get("title", ""))
+        if item["url"] in existing_urls:
+            continue
+        if sig and (sig in existing_title_sigs or sig in seen_title_sigs):
+            continue
+        if sig:
+            seen_title_sigs.add(sig)
+            item["title_sig"] = sig
+        after_url.append(item)
+    log.info(f"  L1 URL/제목: {len(candidates)} -> {len(after_url)}")
 
     if not after_url:
         return []
 
     # L2: 알림 이력
     alert_history = load_alert_history()
-    after_alert = [n for n in after_url if url_hash(n["url"]) not in alert_history]
+    after_alert = []
+    for item in after_url:
+        u_hash = url_hash(item["url"])
+        t_sig = item.get("title_sig") or _title_signature(item.get("title", ""))
+        if _history_contains_recent(alert_history, "urls", u_hash, 86400):
+            continue
+        if _history_contains_recent(alert_history, "titles", t_sig, BREAKING_TITLE_COOLDOWN_SEC):
+            continue
+        after_alert.append(item)
     log.info(f"  L2 이력: {len(after_url)} -> {len(after_alert)}")
 
     if not after_alert:
@@ -598,6 +809,40 @@ def filter_duplicates(candidates):
     return final
 
 
+def suppress_recent_topics(items: list[dict]) -> list[dict]:
+    if not items:
+        return []
+    history = load_alert_history()
+    out = []
+    for item in items:
+        u_hash = url_hash(str(item.get("url", "")))
+        t_sig = item.get("title_sig") or _title_signature(str(item.get("title", "")))
+        topic_sig = _topic_signature(item)
+        if _history_contains_recent(history, "urls", u_hash, 86400):
+            continue
+        if _history_contains_recent(history, "titles", t_sig, BREAKING_TITLE_COOLDOWN_SEC):
+            continue
+        if _history_contains_recent(history, "topics", topic_sig, BREAKING_TOPIC_COOLDOWN_SEC):
+            continue
+        item["title_sig"] = t_sig
+        item["topic_sig"] = topic_sig
+        out.append(item)
+    if len(out) != len(items):
+        log.info(f"  L4 토픽 억제: {len(items)} -> {len(out)}")
+    return out
+
+
+def reserve_alert_history(items: list[dict]) -> None:
+    if not items:
+        return
+    history = load_alert_history()
+    for item in items:
+        _history_mark_now(history, "urls", url_hash(str(item.get("url", ""))))
+        _history_mark_now(history, "titles", str(item.get("title_sig", "") or _title_signature(str(item.get("title", "")))))
+        _history_mark_now(history, "topics", str(item.get("topic_sig", "") or _topic_signature(item)))
+    save_alert_history(history)
+
+
 # ─── 3. Codex 속보 판별 ─────────────────────────────────
 BREAKING_PROMPT = """너는 한국 주식시장 속보 판별 시스템이다.
 이 뉴스가 긴급 매매 대응이 필요한 속보인지 판별하라.
@@ -613,7 +858,10 @@ BREAKING_PROMPT = """너는 한국 주식시장 속보 판별 시스템이다.
 - importance 3 이하
 
 반드시 JSON만:
-{"is_breaking": true/false, "importance": 1~5, "sentiment": "positive"/"negative"/"neutral", "impact_type": "market"/"sector"/"stock"/"macro", "tickers": ["6자리코드"], "summary": "30자 이내", "urgency": "즉시 매매 필요 이유 1줄"}"""
+종목이 특정되면 tickers에는 회사명 또는 6자리코드를 최대 3개만 넣고,
+시장 전체/거시 이슈면 빈 배열을 유지하라. 모르면 추측하지 마라.
+
+{"is_breaking": true/false, "importance": 1~5, "sentiment": "positive"/"negative"/"neutral", "impact_type": "market"/"sector"/"stock"/"macro", "tickers": ["회사명 또는 6자리코드"], "summary": "30자 이내", "urgency": "즉시 매매 필요 이유 1줄"}"""
 
 
 def _normalize_breaking_result(result):
@@ -634,10 +882,15 @@ def _normalize_breaking_result(result):
     if impact_type not in ("market", "sector", "stock", "macro"):
         impact_type = "market"
 
-    tickers = result.get("tickers", [])
-    if not isinstance(tickers, list):
-        tickers = []
-    tickers = [str(t) for t in tickers if re.match(r"^\d{6}$", str(t))]
+    raw_tickers = result.get("tickers", [])
+    tickers: list[str] = []
+    if isinstance(raw_tickers, list):
+        seen: set[str] = set()
+        for item in raw_tickers:
+            mapped = _map_one_ticker(str(item))
+            if mapped and mapped not in seen:
+                tickers.append(mapped)
+                seen.add(mapped)
 
     summary = result.get("summary", "")
     if not isinstance(summary, str):
@@ -696,6 +949,14 @@ def check_breaking(news_list):
                 consecutive_fail = 0
 
                 if result.get("is_breaking") and result.get("importance", 0) >= 4:
+                    if not result.get("tickers"):
+                        inferred = _extract_tickers_from_text(
+                            f"{news.get('title', '')}\n{news.get('description', '')}",
+                            max_items=4,
+                        )
+                        if inferred:
+                            result["tickers"] = inferred
+                    result["ticker_names"] = _ticker_names(result.get("tickers", []))
                     result["title"] = news["title"]
                     result["url"] = news["url"]
                     result["pub_date"] = news["pub_date"]
@@ -782,6 +1043,7 @@ def alert_trading_bot(items):
             "summary": item.get("summary", ""),
             "urgency": item.get("urgency", ""),
             "tickers": item.get("tickers", []),
+            "ticker_names": item.get("ticker_names", _ticker_names(item.get("tickers", []))),
             "title": item.get("title", ""),
             "url": item.get("url", ""),
         })
@@ -800,69 +1062,80 @@ def alert_trading_bot(items):
 
 # ─── 메인 ───────────────────────────────────────────────
 def main():
+    worker_lock = _acquire_worker_lock()
+    if worker_lock is False:
+        log.info("다른 속보 모니터 실행 중 → 이번 주기 스킵")
+        return
     start = time.time()
-    log.info("=" * 50)
-    log.info("🔍 속보 모니터 (Gemini 임베딩 중복제거)")
-    log.info("=" * 50)
-
-    if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
-        log.error("NAVER_CLIENT_ID/NAVER_CLIENT_SECRET 미설정으로 속보 모니터 중단")
-        return
-
-    if not CODEX_BIN:
-        log.error("LLM binary not found. 속보 판별 중단.")
-        return
-
-    # 1) 수집
-    candidates = fetch_breaking_news()
-    if not candidates:
-        log.info("최근 30분 내 뉴스 없음.")
-        return
-
-    # 2) 3단계 중복 필터
-    filtered = filter_duplicates(candidates)
-    if not filtered:
-        log.info("모두 중복. 종료.")
-        return
-
-    log.info(f"Codex 판별 대상: {len(filtered)}건")
-
-    # 3) 속보 판별
-    breaking = check_breaking(filtered)
-    if not breaking:
-        log.info("속보 없음. 정상.")
-        log.info(f"완료 ({time.time()-start:.1f}초)")
-        return
-
-    # 4) DB + 알림
-    inserted = insert_breaking(breaking)
-    log.info(f"🚨 속보 {len(breaking)}건 DB ({inserted}건)")
-    alert_trading_bot(breaking)
-    maybe_trigger_codex_for_holdings(breaking)
-    persist_urgent_context(breaking)
-    maybe_send_dooray_breaking_report()
-
-    # 4.5) 텔레그램 알림
     try:
-        from telegram_notify import notify
-        tg_lines = [f"🚨 <b>속보 {len(breaking)}건 감지</b>", ""]
-        for item in breaking:
-            imp = item.get("importance", 3)
-            title = item.get("title", "?")[:50]
-            tickers = ",".join(item.get("tickers", [])[:3]) or "-"
-            tg_lines.append(f"[{imp}] {title}")
-            tg_lines.append(f"  종목: {tickers}")
-        notify("\n".join(tg_lines))
-    except Exception as e:
-        log.warning(f"텔레그램 전송 실패: {e}")
+        log.info("=" * 50)
+        log.info("🔍 속보 모니터 (Gemini 임베딩 중복제거)")
+        log.info("=" * 50)
 
-    # 5) 이력 저장
-    history = load_alert_history()
-    for item in breaking:
-        history[url_hash(item["url"])] = time.time()
-    save_alert_history(history)
+        if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+            log.error("NAVER_CLIENT_ID/NAVER_CLIENT_SECRET 미설정으로 속보 모니터 중단")
+            return
 
-    log.info(f"🚨 완료 ({time.time()-start:.1f}초) — {len(breaking)}건 감지!")
+        if not CODEX_BIN:
+            log.error("LLM binary not found. 속보 판별 중단.")
+            return
+
+        # 1) 수집
+        candidates = fetch_breaking_news()
+        if not candidates:
+            log.info(f"최근 {BREAKING_MAX_AGE_MIN}분 내 뉴스 없음.")
+            return
+
+        # 2) 3단계 중복 필터
+        filtered = filter_duplicates(candidates)
+        if not filtered:
+            log.info("모두 중복. 종료.")
+            return
+
+        log.info(f"Codex 판별 대상: {len(filtered)}건")
+
+        # 3) 속보 판별
+        breaking = check_breaking(filtered)
+        if not breaking:
+            log.info("속보 없음. 정상.")
+            log.info(f"완료 ({time.time()-start:.1f}초)")
+            return
+
+        breaking = suppress_recent_topics(breaking)
+        if not breaking:
+            log.info("기존 속보 토픽과 중복되어 알림 억제.")
+            log.info(f"완료 ({time.time()-start:.1f}초)")
+            return
+
+        # 겹치는 프로세스가 있어도 같은 토픽을 재통과시키지 않도록 먼저 이력 예약.
+        reserve_alert_history(breaking)
+
+        # 4) DB + 알림
+        inserted = insert_breaking(breaking)
+        log.info(f"🚨 속보 {len(breaking)}건 DB ({inserted}건)")
+        alert_trading_bot(breaking)
+        maybe_trigger_codex_for_holdings(breaking)
+        persist_urgent_context(breaking)
+        maybe_send_dooray_breaking_report()
+
+        # 4.5) 텔레그램 알림
+        try:
+            from telegram_notify import notify
+            tg_lines = [f"🚨 <b>속보 {len(breaking)}건 감지</b>", ""]
+            for item in breaking:
+                imp = item.get("importance", 3)
+                title = item.get("title", "?")[:50]
+                ticker_names = item.get("ticker_names", _ticker_names(item.get("tickers", [])))
+                tickers = ", ".join(ticker_names[:3]) or "-"
+                tg_lines.append(f"[{imp}] {title}")
+                tg_lines.append(f"  종목: {tickers}")
+            notify("\n".join(tg_lines))
+        except Exception as e:
+            log.warning(f"텔레그램 전송 실패: {e}")
+
+        log.info(f"🚨 완료 ({time.time()-start:.1f}초) — {len(breaking)}건 감지!")
+    finally:
+        _release_worker_lock(worker_lock)
 
 
 if __name__ == "__main__":

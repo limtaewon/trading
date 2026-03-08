@@ -4,7 +4,7 @@
 # 흐름:
 #   1. prepare_gpt_prompt.py → 프롬프트 생성
 #   2. openclaw agent → GPT 두뇌에 전달 → 구조화된 JSON 응답
-#      (컨텍스트 초과/세션 만료 등 복구 가능 오류는 재시도 후 codex exec 폴백)
+#      (codex exec 폴백은 기본 비활성화)
 #   3. 응답 파일 저장 → codex_cron_router/execute_gpt_orders.py가 주문 실행
 #
 # 사용법:
@@ -27,7 +27,7 @@ SCHEMA_FILE="$SCRIPTS_DIR/trading_response_schema.json"
 LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-openclaw}}"
 CODEX_BIN="${CODEX_BIN:-openclaw}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
-CODEX_MODEL="${CODEX_MODEL:-openai-codex/gpt-5.3-codex-spark}"
+CODEX_MODEL="${CODEX_MODEL:-${OPENCLAW_PRIMARY_MODEL:-gpt-5.4}}"
 TIMEOUT_SEC="${CODEX_TIMEOUT:-180}"  # 3분 타임아웃
 CODEX_CACHE_DIR="${CODEX_EXEC_CACHE_DIR:-$HOME/.openclaw/cache/codex-exec/brain}"
 CODEX_BRAIN_CACHE_TTL="${CODEX_BRAIN_CACHE_TTL:-120}"
@@ -36,13 +36,13 @@ OPENCLAW_SESSION_ID="${OPENCLAW_SESSION_ID:-openclaw-codex-bridge}"
 OPENCLAW_ERR_LOG="/tmp/openclaw_agent_stderr.log"
 OPENCLAW_AGENT_RETRY_MAX="${OPENCLAW_AGENT_RETRY_MAX:-2}"
 OPENCLAW_AGENT_RETRY_DELAY_SEC="${OPENCLAW_AGENT_RETRY_DELAY_SEC:-1}"
-ENABLE_CODEX_EXEC_FALLBACK="${ENABLE_CODEX_EXEC_FALLBACK:-1}"
+ENABLE_CODEX_EXEC_FALLBACK="${ENABLE_CODEX_EXEC_FALLBACK:-0}"
 CODEX_FALLBACK_ON_ANY_ERROR="${CODEX_FALLBACK_ON_ANY_ERROR:-}"
 CODEX_FALLBACK_BIN="${CODEX_FALLBACK_BIN:-codex}"
-CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-${OPENCLAW_FALLBACK_MODEL:-}}"
 if [[ -z "$CODEX_FALLBACK_MODEL" ]]; then
     if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
-        CODEX_FALLBACK_MODEL="gpt-5.3-codex"
+        CODEX_FALLBACK_MODEL="${OPENCLAW_FALLBACK_MODEL:-gpt-5.4}"
     else
         CODEX_FALLBACK_MODEL="$CODEX_MODEL"
     fi
@@ -52,7 +52,7 @@ CODEX_FALLBACK_TIMEOUT_SEC="${CODEX_FALLBACK_TIMEOUT_SEC:-240}"
 if [[ -z "$CODEX_FALLBACK_ON_ANY_ERROR" ]]; then
     # Spark 계열은 quota/rate-limit 오류가 비정형 문자열로 떨어져도 폴백을 타도록 기본 ON.
     if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
-        CODEX_FALLBACK_ON_ANY_ERROR="1"
+        CODEX_FALLBACK_ON_ANY_ERROR="0"
     else
         CODEX_FALLBACK_ON_ANY_ERROR="0"
     fi

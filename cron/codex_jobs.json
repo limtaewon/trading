@@ -4,7 +4,7 @@
   "jobs": [
     {
       "name": "pre-market",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "50 8 * * 1-5",
         "tz": "Asia/Seoul"
@@ -17,7 +17,7 @@
     },
     {
       "name": "trading-0930",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "30 9 * * 1-5",
         "tz": "Asia/Seoul"
@@ -30,7 +30,7 @@
     },
     {
       "name": "trading-1000",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "0 10 * * 1-5",
         "tz": "Asia/Seoul"
@@ -43,7 +43,7 @@
     },
     {
       "name": "trading-1030",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "30 10 * * 1-5",
         "tz": "Asia/Seoul"
@@ -56,7 +56,7 @@
     },
     {
       "name": "trading-1100",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "0 11 * * 1-5",
         "tz": "Asia/Seoul"
@@ -69,7 +69,7 @@
     },
     {
       "name": "trading-1130",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "30 11 * * 1-5",
         "tz": "Asia/Seoul"
@@ -82,7 +82,7 @@
     },
     {
       "name": "trading-1300",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "0 13 * * 1-5",
         "tz": "Asia/Seoul"
@@ -95,7 +95,7 @@
     },
     {
       "name": "trading-1330",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "30 13 * * 1-5",
         "tz": "Asia/Seoul"
@@ -108,7 +108,7 @@
     },
     {
       "name": "trading-1400",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "0 14 * * 1-5",
         "tz": "Asia/Seoul"
@@ -121,7 +121,7 @@
     },
     {
       "name": "trading-1430",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "30 14 * * 1-5",
         "tz": "Asia/Seoul"
@@ -134,7 +134,7 @@
     },
     {
       "name": "trading-1500",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "0 15 * * 1-5",
         "tz": "Asia/Seoul"
@@ -147,7 +147,7 @@
     },
     {
       "name": "daily-report",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "40 15 * * 1-5",
         "tz": "Asia/Seoul"
@@ -160,7 +160,7 @@
     },
     {
       "name": "weekly-review",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "0 10 * * 6",
         "tz": "Asia/Seoul"
@@ -173,7 +173,7 @@
     },
     {
       "name": "[평일] 08:50 장 전 브리핑",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "50 8 * * 1-5",
         "tz": "Asia/Seoul"
@@ -186,7 +186,7 @@
     },
     {
       "name": "[평일] 09:10 장중 1차 점검",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "10 9 * * 1-5",
         "tz": "Asia/Seoul"
@@ -199,7 +199,7 @@
     },
     {
       "name": "backtest-ci-weekly",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "20 10 * * 6",
         "tz": "Asia/Seoul"
@@ -212,7 +212,7 @@
     },
     {
       "name": "adaptive-policy-refresh-hourly",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "5 8-15 * * 1-5",
         "tz": "Asia/Seoul"
@@ -225,7 +225,7 @@
     },
     {
       "name": "news-urgent-trigger",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "0 0 * * *",
         "tz": "Asia/Seoul"
@@ -245,46 +245,7 @@
       },
       "payload": {
         "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/cluster_news.py --window-hours 240 --threshold 0.42 --limit 10000 --min-size 2 >> $HOME/.openclaw/logs/news-cluster.log 2>&1"
-      },
-      "source": "legacy-crontab"
-    },
-    {
-      "name": "data-news-relation-score-20m",
-      "enabled": true,
-      "schedule": {
-        "expr": "3,23,43 9-15 * * 1-5",
-        "tz": "Asia/Seoul"
-      },
-      "payload": {
-        "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/hidden_relation_scorer.py --lookback-hours \"${RELATION_LOOKBACK_HOURS:-168}\" --limit \"${RELATION_FRAME_LIMIT:-6000}\" --max-tickers \"${RELATION_MAX_TICKERS:-500}\" --min-abs-score \"${RELATION_MIN_ABS_SCORE:-0.0}\" >> $HOME/.openclaw/logs/relation-score.log 2>&1"
-      },
-      "source": "legacy-crontab"
-    },
-    {
-      "name": "data-news-research-15m",
-      "enabled": true,
-      "schedule": {
-        "expr": "*/15 8-17 * * 1-5",
-        "tz": "Asia/Seoul"
-      },
-      "payload": {
-        "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && NEWS_RESEARCH_LIMIT=\"${NEWS_RESEARCH_LIMIT:-24}\" NEWS_RESEARCH_BATCH=\"${NEWS_RESEARCH_BATCH:-6}\" NEWS_RESEARCH_MAX_DYNAMIC_LIMIT=\"${NEWS_RESEARCH_MAX_DYNAMIC_LIMIT:-80}\" NEWS_RESEARCH_MAX_ITEMS_PER_RUN=\"${NEWS_RESEARCH_MAX_ITEMS_PER_RUN:-96}\" NEWS_RESEARCH_WINDOW_HOURS=\"${NEWS_RESEARCH_WINDOW_HOURS:-48}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/analyze_news_research.py >> $HOME/.openclaw/logs/news-research.log 2>&1"
-      },
-      "source": "legacy-crontab"
-    },
-    {
-      "name": "data-news-research-night-drain-10m",
-      "enabled": true,
-      "schedule": {
-        "expr": "*/10 0-7,18-23 * * *",
-        "tz": "Asia/Seoul"
-      },
-      "payload": {
-        "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && NEWS_RESEARCH_LIMIT=\"${NEWS_RESEARCH_NIGHT_LIMIT:-48}\" NEWS_RESEARCH_BATCH=\"${NEWS_RESEARCH_NIGHT_BATCH:-8}\" NEWS_RESEARCH_MAX_DYNAMIC_LIMIT=\"${NEWS_RESEARCH_NIGHT_MAX_DYNAMIC_LIMIT:-160}\" NEWS_RESEARCH_MAX_ITEMS_PER_RUN=\"${NEWS_RESEARCH_NIGHT_MAX_ITEMS_PER_RUN:-220}\" NEWS_RESEARCH_WINDOW_HOURS=\"${NEWS_RESEARCH_NIGHT_WINDOW_HOURS:-96}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/analyze_news_research.py >> $HOME/.openclaw/logs/news-research.log 2>&1"
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/cluster_news.py --window-hours 144 --threshold 0.48 --limit 10000 --min-size 2 >> $HOME/.openclaw/logs/news-cluster.log 2>&1"
       },
       "source": "legacy-crontab"
     },
@@ -303,7 +264,7 @@
     },
     {
       "name": "crypto-news-collector-30m",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "*/30 * * * *",
         "tz": "Asia/Seoul"
@@ -355,7 +316,7 @@
     },
     {
       "name": "trading-decision-10m",
-      "enabled": true,
+      "enabled": false,
       "schedule": {
         "expr": "*/10 9-15 * * 1-5",
         "tz": "Asia/Seoul"
@@ -367,10 +328,23 @@
       "source": "openclaw-jobs"
     },
     {
-      "name": "data-news-morning",
+      "name": "position-manager-20m",
       "enabled": true,
       "schedule": {
-        "expr": "0 7 * * 1-5",
+        "expr": "*/20 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-news-weekend-hourly",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 * * * 0,6",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -380,10 +354,36 @@
       "source": "legacy-crontab"
     },
     {
-      "name": "data-news-weekend-hourly",
+      "name": "data-watchlist-run-health-20m",
       "enabled": true,
       "schedule": {
-        "expr": "0 * * * 0,6",
+        "expr": "*/20 8-16 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_watchlist_runs.py --source \"${WATCHLIST_ACTIVE_SOURCE:-enrich_data}\" >> $HOME/.openclaw/logs/watchlist-health.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-watchlist-retention-daily",
+      "enabled": true,
+      "schedule": {
+        "expr": "20 6 * * *",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/prune_interest_watchlist.py --retention-days \"${WATCHLIST_RETENTION_DAYS:-21}\" --run-retention-days \"${WATCHLIST_RUN_RETENTION_DAYS:-45}\" >> $HOME/.openclaw/logs/watchlist-retention.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-news-morning",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 7 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
@@ -419,6 +419,45 @@
       "source": "legacy-crontab"
     },
     {
+      "name": "data-news-relation-score-20m",
+      "enabled": true,
+      "schedule": {
+        "expr": "3,23,43 9-15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/hidden_relation_scorer.py --lookback-hours \"${RELATION_LOOKBACK_HOURS:-168}\" --limit \"${RELATION_FRAME_LIMIT:-6000}\" --max-tickers \"${RELATION_MAX_TICKERS:-500}\" --min-abs-score \"${RELATION_MIN_ABS_SCORE:-0.0}\" >> $HOME/.openclaw/logs/relation-score.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-news-research-15m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/15 8-17 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && NEWS_RESEARCH_LIMIT=\"${NEWS_RESEARCH_LIMIT:-24}\" NEWS_RESEARCH_BATCH=\"${NEWS_RESEARCH_BATCH:-6}\" NEWS_RESEARCH_MAX_DYNAMIC_LIMIT=\"${NEWS_RESEARCH_MAX_DYNAMIC_LIMIT:-80}\" NEWS_RESEARCH_MAX_ITEMS_PER_RUN=\"${NEWS_RESEARCH_MAX_ITEMS_PER_RUN:-96}\" NEWS_RESEARCH_WINDOW_HOURS=\"${NEWS_RESEARCH_WINDOW_HOURS:-48}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/analyze_news_research.py >> $HOME/.openclaw/logs/news-research.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-news-research-night-drain-10m",
+      "enabled": true,
+      "schedule": {
+        "expr": "*/10 0-7,18-23 * * *",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && NEWS_RESEARCH_LIMIT=\"${NEWS_RESEARCH_NIGHT_LIMIT:-48}\" NEWS_RESEARCH_BATCH=\"${NEWS_RESEARCH_NIGHT_BATCH:-8}\" NEWS_RESEARCH_MAX_DYNAMIC_LIMIT=\"${NEWS_RESEARCH_NIGHT_MAX_DYNAMIC_LIMIT:-160}\" NEWS_RESEARCH_MAX_ITEMS_PER_RUN=\"${NEWS_RESEARCH_NIGHT_MAX_ITEMS_PER_RUN:-220}\" NEWS_RESEARCH_WINDOW_HOURS=\"${NEWS_RESEARCH_NIGHT_WINDOW_HOURS:-96}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/analyze_news_research.py >> $HOME/.openclaw/logs/news-research.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
       "name": "data-enrich-pre-market",
       "enabled": true,
       "schedule": {
@@ -445,15 +484,15 @@
       "source": "legacy-crontab"
     },
     {
-      "name": "position-manager-20m",
+      "name": "data-news-pipeline-health-20m",
       "enabled": true,
       "schedule": {
-        "expr": "*/20 9-15 * * 1-5",
+        "expr": "*/20 8-16 * * 1-5",
         "tz": "Asia/Seoul"
       },
       "payload": {
         "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1"
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_news_pipeline_health.py >> $HOME/.openclaw/logs/news-pipeline-health.log 2>&1"
       },
       "source": "legacy-crontab"
     },
@@ -484,19 +523,6 @@
       "source": "legacy-crontab"
     },
     {
-      "name": "data-market-regime-10m",
-      "enabled": true,
-      "schedule": {
-        "expr": "2-59/10 9-16 * * 1-5",
-        "tz": "Asia/Seoul"
-      },
-      "payload": {
-        "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/market_regime.py >> $HOME/.openclaw/logs/market_regime.log 2>&1"
-      },
-      "source": "legacy-crontab"
-    },
-    {
       "name": "data-morning-briefing-0800",
       "enabled": true,
       "schedule": {
@@ -506,6 +532,32 @@
       "payload": {
         "kind": "command",
         "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/morning_briefing.py >> $HOME/.openclaw/logs/briefing.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-weekly-market-report-friday-1800",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 18 * * 5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/weekly_market_report.py --send >> $HOME/.openclaw/logs/weekly-market-report.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-weekend-news-prep-sunday-2300",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 23 * * 0",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && NEWS_RESEARCH_LIMIT=\"${WEEKEND_NEWS_PREP_LIMIT:-48}\" NEWS_RESEARCH_BATCH=\"${WEEKEND_NEWS_PREP_BATCH:-8}\" NEWS_RESEARCH_MAX_DYNAMIC_LIMIT=\"${WEEKEND_NEWS_PREP_MAX_DYNAMIC_LIMIT:-120}\" NEWS_RESEARCH_MAX_ITEMS_PER_RUN=\"${WEEKEND_NEWS_PREP_MAX_ITEMS_PER_RUN:-160}\" NEWS_RESEARCH_WINDOW_HOURS=\"${WEEKEND_NEWS_PREP_WINDOW_HOURS:-72}\" bash $HOME/.openclaw/scripts/trading/weekend_news_prep.sh >> $HOME/.openclaw/logs/weekend-news-prep.log 2>&1"
       },
       "source": "legacy-crontab"
     },
@@ -547,45 +599,6 @@
         "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && bash $HOME/.openclaw/scripts/bybit_futures_cron.sh decision >> $HOME/.openclaw/logs/bybit-futures-decision.log 2>&1"
       },
       "source": "bybit-futures-template"
-    },
-    {
-      "name": "data-watchlist-run-health-20m",
-      "enabled": true,
-      "schedule": {
-        "expr": "*/20 8-16 * * 1-5",
-        "tz": "Asia/Seoul"
-      },
-      "payload": {
-        "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_watchlist_runs.py --source \"${WATCHLIST_ACTIVE_SOURCE:-enrich_data}\" >> $HOME/.openclaw/logs/watchlist-health.log 2>&1"
-      },
-      "source": "legacy-crontab"
-    },
-    {
-      "name": "data-news-pipeline-health-20m",
-      "enabled": true,
-      "schedule": {
-        "expr": "*/20 8-16 * * 1-5",
-        "tz": "Asia/Seoul"
-      },
-      "payload": {
-        "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_news_pipeline_health.py >> $HOME/.openclaw/logs/news-pipeline-health.log 2>&1"
-      },
-      "source": "legacy-crontab"
-    },
-    {
-      "name": "data-watchlist-retention-daily",
-      "enabled": true,
-      "schedule": {
-        "expr": "20 6 * * *",
-        "tz": "Asia/Seoul"
-      },
-      "payload": {
-        "kind": "command",
-        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/prune_interest_watchlist.py --retention-days \"${WATCHLIST_RETENTION_DAYS:-21}\" --run-retention-days \"${WATCHLIST_RUN_RETENTION_DAYS:-45}\" >> $HOME/.openclaw/logs/watchlist-retention.log 2>&1"
-      },
-      "source": "legacy-crontab"
     }
   ]
 }

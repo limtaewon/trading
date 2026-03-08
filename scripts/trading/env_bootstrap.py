@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+from llm_model_config import default_primary_model, infer_fallback_model
+
 
 def _parse_env_line(line: str) -> tuple[str, str] | None:
     s = line.strip()
@@ -119,16 +121,25 @@ def bootstrap_openclaw_env(override: bool = False) -> int:
     os.environ["CLICKHOUSE_URL"] = normalized_url
     os.environ["CLICKHOUSE_HOST"] = normalized_host
 
-    # Global LLM fallback policy:
-    # if primary model is spark/codex-openai family and fallback model is unset,
-    # enforce gpt-5.3-codex as the first fallback target.
+    if not (os.environ.get("LLM_EXEC_BACKEND", "") or "").strip():
+        os.environ["LLM_EXEC_BACKEND"] = "openclaw"
+    if not (os.environ.get("OPENCLAW_LLM_BACKEND", "") or "").strip():
+        os.environ["OPENCLAW_LLM_BACKEND"] = "openclaw"
+    if not (os.environ.get("CODEX_BIN", "") or "").strip():
+        os.environ["CODEX_BIN"] = "openclaw"
+    if not (os.environ.get("CODEX_MODEL", "") or "").strip():
+        os.environ["CODEX_MODEL"] = default_primary_model()
+    if not (os.environ.get("ENABLE_CODEX_EXEC_FALLBACK", "") or "").strip():
+        os.environ["ENABLE_CODEX_EXEC_FALLBACK"] = "0"
+    if not (os.environ.get("CODEX_SPARK_FALLBACK_ON_ANY_ERROR", "") or "").strip():
+        os.environ["CODEX_SPARK_FALLBACK_ON_ANY_ERROR"] = "0"
+    if not (os.environ.get("CODEX_FALLBACK_ON_ANY_ERROR", "") or "").strip():
+        os.environ["CODEX_FALLBACK_ON_ANY_ERROR"] = "0"
+
     codex_model = (os.environ.get("CODEX_MODEL", "") or "").strip()
     fallback_model = (os.environ.get("CODEX_FALLBACK_MODEL", "") or "").strip()
     if not fallback_model:
-        if ("codex-spark" in codex_model) or codex_model.startswith("openai-codex/"):
-            os.environ["CODEX_FALLBACK_MODEL"] = "gpt-5.3-codex"
-        elif not codex_model:
-            os.environ["CODEX_FALLBACK_MODEL"] = "gpt-5.3-codex"
+        os.environ["CODEX_FALLBACK_MODEL"] = infer_fallback_model(codex_model)
 
     # Force a single mcporter config path so scripts never fall back to
     # an unintended default profile (e.g., mock account in ~/config).

@@ -13,11 +13,6 @@ CODEX_CANDIDATES=(
   "$HOME/.npm-global/bin/openclaw"
   "/opt/homebrew/bin/openclaw"
   "/usr/local/bin/openclaw"
-  "$HOME/.npm-global/bin/codex-spark"
-  "/opt/homebrew/bin/codex-spark"
-  "/usr/local/bin/codex-spark"
-  "/usr/bin/codex-spark"
-  "codex-spark"
 )
 
 ok=0
@@ -90,8 +85,6 @@ CODEX_BIN="$(find_codemark_binary || true)"
 if [ -n "$CODEX_BIN" ]; then
   if [[ "$CODEX_BIN" == *openclaw* ]]; then
     pass "openclaw binary: $CODEX_BIN"
-  elif [[ "$CODEX_BIN" == *codex-spark* ]]; then
-    pass "legacy codex-spark binary found: $CODEX_BIN"
   else
     run_check "LLM binary executable" test -x "$CODEX_BIN"
   fi

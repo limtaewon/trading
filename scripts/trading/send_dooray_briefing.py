@@ -30,6 +30,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import requests
 
 from env_bootstrap import bootstrap_openclaw_env
+from llm_model_config import resolve_model
 from market_realtime import fetch_naver_realtime_indices, fetch_naver_usdkrw
 
 bootstrap_openclaw_env()
@@ -223,7 +224,7 @@ def _run_briefing_llm(context: dict, timeout_sec: int = 80) -> tuple[dict | None
         raw = run_codex_cached(
             prompt=prompt,
             codex_bin=resolved,
-            model=os.getenv("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark"),
+            model=resolve_model("CODEX_MODEL"),
             workdir=None,
             timeout_sec=max(30, int(timeout_sec)),
             base_args=["--skip-git-repo-check", "--full-auto"],
@@ -358,7 +359,7 @@ def _run_briefing_llm_text(context: dict, kind: str, timeout_sec: int = 100) -> 
         raw = run_codex_cached(
             prompt=prompt,
             codex_bin=resolved,
-            model=os.getenv("DOORAY_BRIEF_LLM_MODEL", os.getenv("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark")),
+            model=resolve_model("DOORAY_BRIEF_LLM_MODEL", "CODEX_MODEL"),
             workdir=None,
             timeout_sec=max(40, int(timeout_sec)),
             base_args=["--skip-git-repo-check", "--full-auto"],

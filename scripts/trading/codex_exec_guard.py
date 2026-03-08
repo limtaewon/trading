@@ -19,15 +19,17 @@ import time
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from llm_model_config import infer_fallback_model, is_spark_like_model, normalize_model_name
+
 
 DEFAULT_CACHE_TTL_SEC = int(os.environ.get("CODEX_EXEC_CACHE_TTL", "0"))
 DEFAULT_CACHE_DIR = os.path.expanduser(os.environ.get("CODEX_EXEC_CACHE_DIR", "~/.openclaw/cache/codex-exec"))
 DEFAULT_CACHE_LOCK_WAIT = int(os.environ.get("CODEX_EXEC_CACHE_LOCK_WAIT", "20"))
 DEFAULT_OPENCLAW_RETRY_MAX = max(0, int(os.environ.get("OPENCLAW_AGENT_RETRY_MAX", "2")))
 DEFAULT_OPENCLAW_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("OPENCLAW_AGENT_RETRY_DELAY_SEC", "1.0")))
-DEFAULT_ENABLE_CODEX_EXEC_FALLBACK = os.environ.get("ENABLE_CODEX_EXEC_FALLBACK", "1") == "1"
+DEFAULT_ENABLE_CODEX_EXEC_FALLBACK = os.environ.get("ENABLE_CODEX_EXEC_FALLBACK", "0") == "1"
 DEFAULT_CODEX_FALLBACK_ON_ANY_ERROR = os.environ.get("CODEX_FALLBACK_ON_ANY_ERROR", "0") == "1"
-DEFAULT_SPARK_FALLBACK_ON_ANY_ERROR = os.environ.get("CODEX_SPARK_FALLBACK_ON_ANY_ERROR", "1") == "1"
+DEFAULT_SPARK_FALLBACK_ON_ANY_ERROR = os.environ.get("CODEX_SPARK_FALLBACK_ON_ANY_ERROR", "0") == "1"
 
 
 RECOVERABLE_OPENCLAW_ERROR_PATTERNS = (
@@ -75,36 +77,11 @@ def _resolve_openclaw_bin() -> Optional[str]:
     return None
 
 
-def _normalize_model_name(model: str) -> str:
-    m = (model or "").strip()
-    aliases = {
-        "openai/gpt-5.2": "gpt-5.3-codex-spark",
-        "openai/gpt-5.3": "gpt-5.3-codex-spark",
-        "gpt": "gpt-5.3-codex-spark",
-        "openai-codex/gpt-5.2": "gpt-5.3-codex-spark",
-        "openai-codex/gpt-5.3": "gpt-5.3-codex-spark",
-        "openai-codex/gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
-    }
-    return aliases.get(m, m)
-
-
 def _normalize_fallback_model(model: str) -> str:
     override = os.environ.get("CODEX_FALLBACK_MODEL", "").strip()
     if override:
         return override
-    m = (model or "").strip()
-    if not m:
-        return "gpt-5.3-codex"
-    if "codex-spark" in m or m.startswith("openai-codex/"):
-        return "gpt-5.3-codex"
-    return m
-
-
-def _is_spark_like_model(model: str) -> bool:
-    m = (model or "").strip().lower()
-    if not m:
-        return False
-    return ("codex-spark" in m) or m.startswith("openai-codex/")
+    return infer_fallback_model(model)
 
 
 def _is_recoverable_openclaw_error(msg: str) -> bool:
@@ -420,7 +397,7 @@ def _run_with_recovery(
             break
 
     fallback_on_any = DEFAULT_CODEX_FALLBACK_ON_ANY_ERROR or (
-        DEFAULT_SPARK_FALLBACK_ON_ANY_ERROR and _is_spark_like_model(model)
+        DEFAULT_SPARK_FALLBACK_ON_ANY_ERROR and is_spark_like_model(model)
     )
     fallback_allowed = DEFAULT_ENABLE_CODEX_EXEC_FALLBACK and (
         fallback_on_any or _is_recoverable_openclaw_error(last_err)
@@ -485,14 +462,14 @@ def run_codex_cached(
             return _run_codex_exec_fallback(
                 prompt=_inject_schema_hint(prompt, output_schema_path),
                 codex_bin=codex_bin,
-                model=_normalize_model_name(model or ""),
+                model=normalize_model_name(model or ""),
                 workdir=workdir or None,
                 timeout_sec=timeout_sec,
                 output_schema_path=output_schema_path,
             )
         raise RuntimeError("openclaw binary not found")
 
-    normalized_model = _normalize_model_name(model or "")
+    normalized_model = normalize_model_name(model or "")
     base_args_list: List[str] = [*(base_args or [])]
 
     final_prompt = _inject_schema_hint(prompt, output_schema_path)

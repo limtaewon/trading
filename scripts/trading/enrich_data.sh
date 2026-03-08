@@ -218,7 +218,7 @@ if [[ "$MODE" == "all" || "$MODE" == "--quick" ]]; then
 
     echo ""
     echo "▸ 동적 watchlist 재산출..."
-    python3 "$SCRIPT_DIR/refresh_interest_watchlist.py" --limit 30 --source enrich_data 2>&1 | tail -8
+    python3 "$SCRIPT_DIR/refresh_interest_watchlist.py" --limit 30 --source "$WATCHLIST_BUILD_SOURCE" 2>&1 | tail -8
     echo "  완료"
 
     echo ""
@@ -264,3 +264,4 @@ $(date '+%H:%M') | 시장데이터+기술지표+레짐+DART
 elif [[ "$ENRICH_TELEGRAM_ENABLED" == "1" ]]; then
     echo "  텔레그램 요약: telegram_notify 스크립트 미발견(스킵)"
 fi
+WATCHLIST_BUILD_SOURCE="${WATCHLIST_BUILD_SOURCE:-${WATCHLIST_ACTIVE_SOURCE:-enrich_data}}"

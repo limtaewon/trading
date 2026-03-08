@@ -44,16 +44,14 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 import base64
 from codex_exec_guard import run_codex_cached
+from llm_model_config import resolve_model
 
 # ─── 설정 ───────────────────────────────────────────────
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "").strip()
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
 NAVER_API_URL = "https://openapi.naver.com/v1/search/news.json"
 
-# LLM 분석은 openClaw 기본 브레인 모델과 동일하게 사용
-OPENCLAW_BRAIN_MODEL = "openai-codex/gpt-5.3-codex-spark"
-_env_model = os.environ.get("NEWS_CODEX_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip()
-CODEX_MODEL = _env_model or OPENCLAW_BRAIN_MODEL
+CODEX_MODEL = resolve_model("NEWS_CODEX_MODEL", "CODEX_MODEL")
 CODEX_TIMEOUT = int(os.environ.get("NEWS_CODEX_TIMEOUT", os.environ.get("CODEX_TIMEOUT", "120")))
 CODEX_MAX_RETRIES = int(os.environ.get("NEWS_CODEX_MAX_RETRIES", "5"))
 CODEX_RETRY_BASE_SEC = int(os.environ.get("NEWS_CODEX_RETRY_BASE_SEC", "5"))
@@ -1519,7 +1517,7 @@ def analyze_and_insert(news_list, embeddings, trigger_type="cron"):
                     "invalidation": result.get("invalidation", ""),
                     "analysis_confidence": round(analysis_conf, 3),
                     "trigger_type": trigger_type,
-                    "model": CODEX_MODEL or OPENCLAW_BRAIN_MODEL,
+                    "model": CODEX_MODEL,
                     "model_version": EVENT_MODEL_VERSION,
                 }
             )

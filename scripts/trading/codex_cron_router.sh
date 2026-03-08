@@ -40,19 +40,19 @@ DECISION_REPORT="$TRADING_SCRIPTS/send_decision_dryrun_telegram.py"
 COIN_RUNNER="$BASE/scripts/coin_codex_runner.py"
 LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-openclaw}}"
 CODEX_BIN="${CODEX_BIN:-openclaw}"
-CODEX_MODEL="${CODEX_MODEL:-openai-codex/gpt-5.3-codex-spark}"
-CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-}"
+CODEX_MODEL="${CODEX_MODEL:-${OPENCLAW_PRIMARY_MODEL:-gpt-5.4}}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-${OPENCLAW_FALLBACK_MODEL:-}}"
 CODEX_FALLBACK_ON_ANY_ERROR="${CODEX_FALLBACK_ON_ANY_ERROR:-}"
 if [[ -z "$CODEX_FALLBACK_MODEL" ]]; then
     if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
-        CODEX_FALLBACK_MODEL="gpt-5.3-codex"
+        CODEX_FALLBACK_MODEL="${OPENCLAW_FALLBACK_MODEL:-gpt-5.4}"
     else
         CODEX_FALLBACK_MODEL="$CODEX_MODEL"
     fi
 fi
 if [[ -z "$CODEX_FALLBACK_ON_ANY_ERROR" ]]; then
     if [[ "$CODEX_MODEL" == *"codex-spark"* ]] || [[ "$CODEX_MODEL" == openai-codex/* ]]; then
-        CODEX_FALLBACK_ON_ANY_ERROR="1"
+        CODEX_FALLBACK_ON_ANY_ERROR="0"
     else
         CODEX_FALLBACK_ON_ANY_ERROR="0"
     fi

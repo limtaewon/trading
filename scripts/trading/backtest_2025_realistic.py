@@ -26,6 +26,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env_bootstrap import bootstrap_openclaw_env
+from llm_model_config import resolve_model
 
 bootstrap_openclaw_env()
 
@@ -772,7 +773,7 @@ def main() -> int:
     ap.add_argument("--disable-stage4", action="store_true", help="S4 타이밍 레이어를 완전히 비활성화")
     ap.add_argument("--s2-reference-only", action="store_true", help="S2를 차단 게이트가 아닌 참고지표로만 사용")
     ap.add_argument("--llm-decision", action="store_true", help="일자별 LLM 판단으로 BUY/HOLD/REDUCE 결정")
-    ap.add_argument("--llm-model", default=os.getenv("CODEX_MODEL", "openai-codex/gpt-5.3-codex-spark"))
+    ap.add_argument("--llm-model", default=resolve_model("CODEX_MODEL"))
     ap.add_argument("--llm-timeout-sec", type=int, default=90)
     ap.add_argument("--llm-cache-ttl-sec", type=int, default=0)
     ap.add_argument("--llm-candidate-limit", type=int, default=20)

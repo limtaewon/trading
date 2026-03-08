@@ -29,7 +29,7 @@ def load_openclaw_jobs() -> list[dict]:
         out.append(
             {
                 "name": name,
-                "enabled": True,
+                "enabled": j.get("enabled", True) is not False,
                 "schedule": {
                     "expr": schedule.get("expr", ""),
                     "tz": schedule.get("tz", "Asia/Seoul"),
@@ -200,6 +200,19 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "data-watchlist-shadow-gpt54-1615",
+            "enabled": False,
+            "schedule": {"expr": "15 16 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && {py} {trading_scripts}/watchlist_shadow_report.py --notify '
+                    f'>> {logs}/watchlist-shadow.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "data-news-pipeline-health-20m",
             "enabled": True,
             "schedule": {"expr": "*/20 8-16 * * 1-5", "tz": "Asia/Seoul"},
@@ -260,6 +273,34 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "data-weekly-market-report-friday-1800",
+            "enabled": True,
+            "schedule": {"expr": "0 18 * * 5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": f'{env} && {py} {trading_scripts}/weekly_market_report.py --send >> {logs}/weekly-market-report.log 2>&1',
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "data-weekend-news-prep-sunday-2300",
+            "enabled": True,
+            "schedule": {"expr": "0 23 * * 0", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && '
+                    f'NEWS_RESEARCH_LIMIT="${{WEEKEND_NEWS_PREP_LIMIT:-48}}" '
+                    f'NEWS_RESEARCH_BATCH="${{WEEKEND_NEWS_PREP_BATCH:-8}}" '
+                    f'NEWS_RESEARCH_MAX_DYNAMIC_LIMIT="${{WEEKEND_NEWS_PREP_MAX_DYNAMIC_LIMIT:-120}}" '
+                    f'NEWS_RESEARCH_MAX_ITEMS_PER_RUN="${{WEEKEND_NEWS_PREP_MAX_ITEMS_PER_RUN:-160}}" '
+                    f'NEWS_RESEARCH_WINDOW_HOURS="${{WEEKEND_NEWS_PREP_WINDOW_HOURS:-72}}" '
+                    f'bash {trading_scripts}/weekend_news_prep.sh >> {logs}/weekend-news-prep.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "bybit-futures-ws-private-1m",
             "enabled": True,
             "schedule": {"expr": "* * * * *", "tz": "Asia/Seoul"},
@@ -303,6 +344,8 @@ def main() -> int:
         name = str(job.get("name", "")).strip()
         if not name:
             continue
+        if name == "weekly-review":
+            job["enabled"] = False
         dedup[name] = job
     jobs = list(dedup.values())
 

@@ -64,7 +64,7 @@
   큐 적체 시 backlog 기반 동적 처리량(`NEWS_RESEARCH_MAX_DYNAMIC_LIMIT`, `NEWS_RESEARCH_MAX_ITEMS_PER_RUN`)으로 드레인
   codex_jobs `data-news-research-15m`(주간 표준) + `data-news-research-night-drain-10m`(야간 백로그 드레인) 이중 운용
   `news_research`/`news_research_queue` 시계열은 UTC 저장 기준으로 표준화
-  LLM 기본모델은 `gpt-5.3-codex-spark`, 장애/레이트리밋 등 복구 가능 오류 시 `gpt-5.3-codex` 폴백
+  LLM 기본모델은 `gpt-5.4`, 폴백도 `OPENCLAW_FALLBACK_MODEL` 또는 `gpt-5.4`
 - 뉴스 파이프라인 헬스체크:
   monitor_news_pipeline_health.py
   점검항목: market_regime/news/news_cluster_state/news_event_frames/hidden_relation_signals/interest_watchlist_runs

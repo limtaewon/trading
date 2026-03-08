@@ -25,6 +25,7 @@ from urllib import parse, request
 from zoneinfo import ZoneInfo
 
 from env_bootstrap import bootstrap_openclaw_env
+from llm_model_config import resolve_model
 
 bootstrap_openclaw_env()
 
@@ -49,9 +50,7 @@ CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://localhost:8123")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
 CLICKHOUSE_PASS = os.getenv("CLICKHOUSE_PASS", os.getenv("CLICKHOUSE_PASSWORD", ""))
 INPUT_VERSION = os.getenv("TRADING_INPUT_VERSION", "v2")
-FORCED_MODEL_NAME = "gpt-5.3-codex-spark"
-_env_model_name = os.getenv("TRADING_MODEL_NAME", "").strip() or os.getenv("CODEX_MODEL", "").strip()
-MODEL_NAME = FORCED_MODEL_NAME if _env_model_name != FORCED_MODEL_NAME else _env_model_name
+MODEL_NAME = resolve_model("TRADING_MODEL_NAME", "CODEX_MODEL")
 MAX_DATA_STALENESS_MIN = int(os.getenv("MAX_DATA_STALENESS_MIN", "20"))
 BLOCK_ALL_ON_STALE = os.getenv("BLOCK_ALL_ON_STALE", "1") == "1"
 REQUIRE_REAL_ACCOUNT = os.getenv("REQUIRE_REAL_ACCOUNT", "1") == "1"
