@@ -37,6 +37,7 @@ import time
 import logging
 import hashlib
 import shutil
+from pathlib import Path
 from ticker_mapper import TickerMapper
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -45,6 +46,11 @@ from urllib.error import HTTPError, URLError
 import base64
 from codex_exec_guard import run_codex_cached
 from llm_model_config import resolve_model
+
+try:
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover - non-posix fallback
+    fcntl = None
 
 # ─── 설정 ───────────────────────────────────────────────
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "").strip()
@@ -91,6 +97,10 @@ OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "bge-m3")
 
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "20"))
 REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "15"))
+SINGLE_WORKER_LOCK = os.environ.get("COLLECT_NEWS_SINGLE_WORKER_LOCK", "1").strip() not in {"0", "false", "False"}
+LOCK_FILE = os.path.expanduser(
+    os.environ.get("COLLECT_NEWS_LOCK_FILE", "~/.openclaw/state/collect_news.lock")
+)
 
 # ClickHouse (userinfo URL을 쓰되, 내부적으로 Authorization 헤더로 변환해서 요청한다)
 def _normalize_clickhouse_url() -> str:
@@ -396,6 +406,46 @@ def determine_mode():
         return sys.argv[1]
     hour = datetime.now().hour
     return "morning" if hour < 9 else "trading"
+
+
+def _acquire_worker_lock():
+    if not SINGLE_WORKER_LOCK or fcntl is None:
+        return None
+    path = Path(LOCK_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(
+        fd,
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "mode": determine_mode(),
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+    )
+    return fd
+
+
+def _release_worker_lock(fd):
+    if fd is None:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        os.close(fd)
+    except Exception:
+        pass
 
 
 # ─── 1. Naver API ───────────────────────────────────────
@@ -1609,72 +1659,78 @@ def print_report(collected, after_l1, after_l2, stats, elapsed):
 # ─── 메인 ───────────────────────────────────────────────
 def main():
     mode = determine_mode()
+    lock_fd = _acquire_worker_lock()
+    if SINGLE_WORKER_LOCK and fcntl is not None and lock_fd is None:
+        log.warning(f"collect_news already running; skip mode={mode}")
+        return
     start = time.time()
-
-    log.info("=" * 60)
-    log.info(f"뉴스 수집 [{mode.upper()}] (urllib-only)")
-    log.info("=" * 60)
-
-    if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
-        log.error("NAVER_CLIENT_ID/NAVER_CLIENT_SECRET 미설정으로 뉴스 수집 중단")
-        return
-
-    # 1) 수집
-    news = collect_all_news()
-    total_collected = len(news)
-
-    # 1.5) L0: 키워드 사전 필터 (암호화폐, 칼럼, 광고 등 제거)
-    news = filter_by_keyword_l0(news)
-
-    # 2) L1: URL 중복 제거
-    hours = 48 if mode == "morning" else 6
-    if SKIP_L1_DUPLICATE_CHECK:
-        after_l1 = len(news)
-        log.info("SKIP: L1 URL 중복제거 비활성화 (SKIP_L1_DUP=1)")
-    else:
-        existing_urls = get_existing_urls(hours)
-        news = filter_by_url(news, existing_urls)
-        after_l1 = len(news)
-
-    if not news:
-        log.info("신규 뉴스 없음. 종료.")
-        return
-
-    # 3) L2: 임베딩 유사도 중복 제거
-    emb_hours = 12 if mode == "morning" else 6
-    if SKIP_L2_DUPLICATE_CHECK:
-        news = list(news)
-        embeddings = [[] for _ in news]
-        after_l2 = len(news)
-        log.info("SKIP: L2 임베딩 중복제거 비활성화 (SKIP_L2_DUP=1)")
-    else:
-        news, embeddings = filter_by_embedding(news, hours=emb_hours)
-        after_l2 = len(news)
-
-    if not news:
-        log.info("임베딩 중복제거 후 신규 뉴스 없음. 종료.")
-        return
-
-    # 4) L3: 분석 + 삽입
-    trigger = TRIGGER_TYPE_OVERRIDE if TRIGGER_TYPE_OVERRIDE else ("morning" if mode == "morning" else "cron")
-    inserted, stats = analyze_and_insert(news, embeddings, trigger_type=trigger)
-    print_report(total_collected, after_l1, after_l2, stats, time.time() - start)
-
-    # 5) 텔레그램 요약
     try:
-        from telegram_notify import notify
-        sc = stats.get("sentiment", {})
-        total = (sc.get("positive", 0) + sc.get("negative", 0) + sc.get("neutral", 0)) or 1
-        bull = sc.get("positive", 0) / total * 100
-        mood = "🟢강세" if bull > 60 else ("🔴약세" if sc.get("negative", 0) / total * 100 > 60 else "🟡혼조")
-        notify(
-            f"📰 <b>뉴스 수집 [{mode.upper()}]</b>\n"
-            f"수집 {total_collected} → DB {stats.get('inserted', 0)}건\n"
-            f"감성: 📈{sc.get('positive',0)} 📉{sc.get('negative',0)} ➡️{sc.get('neutral',0)}\n"
-            f"시장 온도: {mood} (긍정 {bull:.0f}%)"
-        )
-    except Exception as e:
-        log.warning(f"텔레그램 전송 실패: {e}")
+        log.info("=" * 60)
+        log.info(f"뉴스 수집 [{mode.upper()}] (urllib-only)")
+        log.info("=" * 60)
+
+        if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+            log.error("NAVER_CLIENT_ID/NAVER_CLIENT_SECRET 미설정으로 뉴스 수집 중단")
+            return
+
+        # 1) 수집
+        news = collect_all_news()
+        total_collected = len(news)
+
+        # 1.5) L0: 키워드 사전 필터 (암호화폐, 칼럼, 광고 등 제거)
+        news = filter_by_keyword_l0(news)
+
+        # 2) L1: URL 중복 제거
+        hours = 48 if mode == "morning" else 6
+        if SKIP_L1_DUPLICATE_CHECK:
+            after_l1 = len(news)
+            log.info("SKIP: L1 URL 중복제거 비활성화 (SKIP_L1_DUP=1)")
+        else:
+            existing_urls = get_existing_urls(hours)
+            news = filter_by_url(news, existing_urls)
+            after_l1 = len(news)
+
+        if not news:
+            log.info("신규 뉴스 없음. 종료.")
+            return
+
+        # 3) L2: 임베딩 유사도 중복 제거
+        emb_hours = 12 if mode == "morning" else 6
+        if SKIP_L2_DUPLICATE_CHECK:
+            news = list(news)
+            embeddings = [[] for _ in news]
+            after_l2 = len(news)
+            log.info("SKIP: L2 임베딩 중복제거 비활성화 (SKIP_L2_DUP=1)")
+        else:
+            news, embeddings = filter_by_embedding(news, hours=emb_hours)
+            after_l2 = len(news)
+
+        if not news:
+            log.info("임베딩 중복제거 후 신규 뉴스 없음. 종료.")
+            return
+
+        # 4) L3: 분석 + 삽입
+        trigger = TRIGGER_TYPE_OVERRIDE if TRIGGER_TYPE_OVERRIDE else ("morning" if mode == "morning" else "cron")
+        inserted, stats = analyze_and_insert(news, embeddings, trigger_type=trigger)
+        print_report(total_collected, after_l1, after_l2, stats, time.time() - start)
+
+        # 5) 텔레그램 요약
+        try:
+            from telegram_notify import notify
+            sc = stats.get("sentiment", {})
+            total = (sc.get("positive", 0) + sc.get("negative", 0) + sc.get("neutral", 0)) or 1
+            bull = sc.get("positive", 0) / total * 100
+            mood = "🟢강세" if bull > 60 else ("🔴약세" if sc.get("negative", 0) / total * 100 > 60 else "🟡혼조")
+            notify(
+                f"📰 <b>뉴스 수집 [{mode.upper()}]</b>\n"
+                f"수집 {total_collected} → DB {stats.get('inserted', 0)}건\n"
+                f"감성: 📈{sc.get('positive',0)} 📉{sc.get('negative',0)} ➡️{sc.get('neutral',0)}\n"
+                f"시장 온도: {mood} (긍정 {bull:.0f}%)"
+            )
+        except Exception as e:
+            log.warning(f"텔레그램 전송 실패: {e}")
+    finally:
+        _release_worker_lock(lock_fd)
 
 
 if __name__ == "__main__":

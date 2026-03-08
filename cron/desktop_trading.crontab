@@ -23,7 +23,7 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 18,38,58 9-14 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_execution_mode.py >> $HOME/.openclaw/logs/execution-mode.log 2>&1 && /usr/bin/python3 $HOME/.openclaw/scripts/trading/manage_positions.py --execute >> $HOME/.openclaw/logs/position-manager.log 2>&1
 
 # data-news-weekend-hourly
-0 * * * 0,6 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1
+0 * * * 0,6 source "$HOME/.openclaw/cron/codex_env.sh" && MAX_QUERIES="${WEEKEND_NEWS_MAX_QUERIES:-12}" NEWS_PER_QUERY="${WEEKEND_NEWS_PER_QUERY:-20}" MAX_NEWS_TOTAL="${WEEKEND_NEWS_MAX_TOTAL:-320}" /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1
 
 # data-watchlist-run-health-20m
 9,29,49 8-16 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/monitor_watchlist_runs.py --source "${WATCHLIST_ACTIVE_SOURCE:-enrich_data}" >> $HOME/.openclaw/logs/watchlist-health.log 2>&1

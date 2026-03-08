@@ -70,7 +70,12 @@ def data_jobs() -> list[dict]:
             "schedule": {"expr": "0 * * * 0,6", "tz": "Asia/Seoul"},
             "payload": {
                 "kind": "command",
-                "command": f'{env} && {py} {trading_scripts}/collect_news.py morning >> {logs}/news-collector.log 2>&1',
+                "command": (
+                    f'{env} && MAX_QUERIES="${{WEEKEND_NEWS_MAX_QUERIES:-12}}" '
+                    f'NEWS_PER_QUERY="${{WEEKEND_NEWS_PER_QUERY:-20}}" '
+                    f'MAX_NEWS_TOTAL="${{WEEKEND_NEWS_MAX_TOTAL:-320}}" '
+                    f'{py} {trading_scripts}/collect_news.py morning >> {logs}/news-collector.log 2>&1'
+                ),
             },
             "source": "legacy-crontab",
         },
