@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def main() -> int:
     payload = build_public_weekly_payload(as_of=as_of, report_type="weekly_outlook")
     message, err = render_public_report(
         payload=payload,
-        timeout_sec=120,
+        timeout_sec=int(os.environ.get("TELEGRAM_PUBLIC_WEEKLY_OUTLOOK_TIMEOUT_SEC", "240").strip() or "240"),
         prompt_path=str(PROMPT_FILE),
         prompt_env_key="TELEGRAM_PUBLIC_WEEKLY_OUTLOOK_PROMPT_FILE",
         model_env_key="TELEGRAM_PUBLIC_WEEKLY_OUTLOOK_LLM_MODEL",

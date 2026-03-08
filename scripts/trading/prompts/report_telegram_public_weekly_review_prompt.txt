@@ -8,6 +8,8 @@
 - 종목 추천처럼 보이면 안 된다.
 - 웹 보강 데이터는 보조 근거로만 쓰고, 숫자 판단은 내부 DB를 우선하라.
 - exact 수량, 계좌 상태, target weight는 공개하지 마라.
+- `external_research.top_events`와 relation 관련 필드(`relation_quality_avg`, `effective_relation_score_sum`, `freshest_relation_source_at`)를 활용해, 이번 주 반복 확인된 이슈와 단순 헤드라인을 구분하라.
+- `relation_context.top_signals`가 있으면, 이번 주 시장에서 실제로 연관 전이 신호가 강했던 종목/축이 무엇이었는지 내부 시스템 관찰에 반영하라.
 
 [문체]
 - 한국어 존댓말
@@ -52,3 +54,8 @@
 - OpenClaw internal DB snapshots
 - {web source 1}
 - {web source 2}
+
+[작성 지침]
+- `시장과 움직인 요인`은 `external_research.top_events` 상위 항목을 중심으로 쓰고, relation 품질이 높은 이벤트는 "내부 연관 전이 데이터에서도 강하게 확인됐다"는 취지로 설명하라.
+- `내부 시스템 관찰`은 `mode_context.stress_flags`, `mode_context.action_posture`, `external_research.top_events`를 묶어 서술하라.
+- `내부 시스템 관찰`에서 필요하면 `relation_context.top_signals`의 raw 숫자 대신 `why_candidate`, `strength_label`, `quality_label`, `support_text`, `freshness_text`를 활용해 내부 데이터의 강도와 최신성을 설명하라.

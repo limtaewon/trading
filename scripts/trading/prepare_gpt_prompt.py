@@ -173,6 +173,14 @@ def _build_ch_query(sql: str) -> str:
     return q + "\nFORMAT JSON"
 
 
+def _build_ch_query_no_settings(sql: str) -> str:
+    q = sql.strip().rstrip(";")
+    upper = q.upper()
+    if "FORMAT JSON" in upper:
+        return q
+    return q + "\nFORMAT JSON"
+
+
 def _extract_status_code(err: Exception) -> int | None:
     response = getattr(err, "response", None)
     status = getattr(response, "status_code", None)
@@ -192,6 +200,7 @@ def ch_query(sql: str) -> list[dict]:
     _req = _get_requests()
     url = _build_ch_url()
     query = _build_ch_query(sql)
+    fallback_query = _build_ch_query_no_settings(sql)
     attempts = CH_QUERY_RETRIES + 1
     last_err: Exception | None = None
     for attempt in range(1, attempts + 1):
@@ -208,6 +217,20 @@ def ch_query(sql: str) -> list[dict]:
             last_err = e
             status = _extract_status_code(e)
             retryable = status in {429, 500, 502, 503, 504} or status is None
+            if (
+                status == 500
+                and query != fallback_query
+                and " SETTINGS " in query.upper()
+            ):
+                try:
+                    resp = _req.post(url, data=fallback_query.encode("utf-8"), timeout=CH_QUERY_TIMEOUT_SEC)
+                    resp.raise_for_status()
+                    body = resp.json() if hasattr(resp, "json") else json.loads(resp.text)
+                    return body.get("data", [])
+                except Exception as fallback_err:
+                    last_err = fallback_err
+                    status = _extract_status_code(fallback_err)
+                    retryable = status in {429, 500, 502, 503, 504} or status is None
             if retryable and attempt < attempts:
                 time.sleep(CH_QUERY_RETRY_BACKOFF_SEC * attempt)
                 continue
@@ -301,6 +324,15 @@ def safe_float(val: Any, default: float = 0.0) -> float:
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def _join_str_list(value: Any, sep: str = ", ") -> str:
+    if isinstance(value, list):
+        parts = [str(v).strip() for v in value if str(v).strip()]
+        return sep.join(parts)
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def clamp(v: float, lo: float, hi: float) -> float:
@@ -804,33 +836,42 @@ def get_hidden_relation_signals(limit: int = 15, min_abs_score: float = 0.12) ->
     """숨은 연관성 전이 점수 (최신 스냅샷)."""
     limit = max(1, int(limit))
     min_abs_score = max(0.0, float(min_abs_score))
-    return ch_query(f"""
+    rows = ch_query(f"""
         SELECT
             ticker,
             ticker_name,
-            toString(asof_ts) AS asof_ts,
+            toString(asof_ts) AS asof_ts_s,
             total_relation_score,
+            relation_quality,
             relation_bias,
             direct_event_score,
             transfer_event_score,
             cluster_state_score,
             support_events,
             support_clusters,
-            arrayStringConcat(source_tickers, ', ') AS source_tickers_str,
-            arrayStringConcat(top_roles, ', ') AS top_roles_str,
-            arrayStringConcat(top_channels, ', ') AS top_channels_str
-        FROM trading.v_hidden_relation_signals
-        WHERE abs(total_relation_score) >= {min_abs_score}
+            source_tickers,
+            top_roles,
+            top_channels
+        FROM trading.hidden_relation_signals
+        WHERE asof_ts = (SELECT max(asof_ts) FROM trading.hidden_relation_signals)
+          AND ticker != ''
+          AND abs(total_relation_score) >= {min_abs_score}
         ORDER BY abs(total_relation_score) DESC, support_events DESC
         LIMIT {limit}
     """)
+    for row in rows:
+        row["asof_ts"] = str(row.get("asof_ts_s", row.get("asof_ts", "")) or "")
+        row["source_tickers_str"] = _join_str_list(row.get("source_tickers"))
+        row["top_roles_str"] = _join_str_list(row.get("top_roles"))
+        row["top_channels_str"] = _join_str_list(row.get("top_channels"))
+    return rows
 
 
 def get_hidden_relation_reasonings(limit: int = 12, min_confidence: float = 0.30) -> list[dict]:
     """LLM 기반 인과 추론 보조지표(원인-영향 사슬) 최신 스냅샷."""
     limit = max(1, int(limit))
     min_confidence = max(0.0, min(1.0, float(min_confidence)))
-    return ch_query(f"""
+    rows = ch_query(f"""
         SELECT
             toString(asof_ts) AS asof_ts,
             ticker,
@@ -840,14 +881,26 @@ def get_hidden_relation_reasonings(limit: int = 12, min_confidence: float = 0.30
             summary,
             time_horizon,
             source_cluster,
-            arrayStringConcat(source_tickers, ',') AS source_tickers_str,
-            arrayStringConcat(source_urls, ',') AS source_urls_str,
-            arrayStringConcat(evidence_titles, ',') AS evidence_titles_str
-        FROM trading.v_hidden_relation_reasoning
+            source_max_published_at,
+            source_max_cluster_asof_ts,
+            toString(reason_generated_at) AS reason_generated_at,
+            source_tickers,
+            source_urls,
+            evidence_titles,
+            relation_quality,
+            support_events,
+            support_clusters,
+            effective_relation_score
+        FROM trading.hidden_relation_reasoning
         WHERE toFloat64OrZero(toString(confidence)) >= {min_confidence}
         ORDER BY asof_ts DESC
         LIMIT {limit}
     """)
+    for row in rows:
+        row["source_tickers_str"] = _join_str_list(row.get("source_tickers"), ",")
+        row["source_urls_str"] = _join_str_list(row.get("source_urls"), ",")
+        row["evidence_titles_str"] = _join_str_list(row.get("evidence_titles"), ",")
+    return rows
 
 
 def get_dart_alerts() -> list[dict]:
@@ -868,6 +921,8 @@ def get_data_freshness() -> list[dict]:
         ("news_raw", "SELECT max(collected_at) AS max_ts FROM trading.news_raw"),
         ("technical_signals", "SELECT max(updated_at) AS max_ts FROM trading.technical_signals"),
         ("market_regime", "SELECT max(updated_at) AS max_ts FROM trading.market_regime"),
+        ("hidden_relation_signals", "SELECT max(asof_ts) AS max_ts FROM trading.hidden_relation_signals"),
+        ("hidden_relation_reasoning", "SELECT max(asof_ts) AS max_ts FROM trading.hidden_relation_reasoning"),
         ("dart_disclosure", "SELECT max(collected_at) AS max_ts FROM trading.dart_disclosure"),
     ]
     for source, sql in checks:
@@ -1692,12 +1747,13 @@ def format_hidden_relation_signals(rows: list[dict]) -> str:
     if not rows:
         return "(숨은 연관성 시그널 없음)"
 
-    lines = ["| ticker | 종목명 | rel_score | bias | direct | transfer | cluster | events | src tickers | roles/channels |",
-             "|--------|--------|----------:|------|-------:|---------:|--------:|-------:|-------------|----------------|"]
+    lines = ["| ticker | 종목명 | rel_score | quality | bias | direct | transfer | cluster | events | src tickers | roles/channels |",
+             "|--------|--------|----------:|--------:|------|-------:|---------:|--------:|-------:|-------------|----------------|"]
     for r in rows:
         rc = safe_float(r.get("total_relation_score", 0), 0.0)
+        rq = safe_float(r.get("relation_quality", 0.5), 0.5)
         lines.append(
-            f"| {r.get('ticker','')} | {r.get('ticker_name','')} | {rc:+.3f} | {r.get('relation_bias','')} | "
+            f"| {r.get('ticker','')} | {r.get('ticker_name','')} | {rc:+.3f} | {rq:.2f} | {r.get('relation_bias','')} | "
             f"{safe_float(r.get('direct_event_score',0),0):+.3f} | "
             f"{safe_float(r.get('transfer_event_score',0),0):+.3f} | "
             f"{safe_float(r.get('cluster_state_score',0),0):+.3f} | "
@@ -1712,19 +1768,20 @@ def format_hidden_relation_reasonings(rows: list[dict]) -> str:
         return "(인과 추론 보조지표 없음)"
 
     lines = [
-        "| ticker | 종목명 | conf | time_horizon | 인과사슬 | 요약 | 근원클러스터 | 근원티커 | 근거타이틀 |",
-        "|-------|--------|-----:|--------------|---------|------|-------------|----------|-----------|",
+        "| ticker | 종목명 | conf | quality | time_horizon | 인과사슬 | 요약 | 근원클러스터 | freshness | 근거타이틀 |",
+        "|-------|--------|-----:|--------:|--------------|---------|------|-------------|-----------|-----------|",
     ]
     for r in rows:
         conf = safe_float(r.get("confidence", 0), 0.0)
+        qual = safe_float(r.get("relation_quality", 0.5), 0.5)
         chain = str(r.get("causal_chain", "") or "").replace("\n", " ").strip()[:64]
         summ = str(r.get("summary", "") or "").replace("\n", " ").strip()[:90]
         st = str(r.get("source_cluster", "") or "").strip()[:10]
-        src = str(r.get("source_tickers_str", "") or "").strip()[:40]
+        freshness = str(r.get("source_max_published_at", "") or r.get("reason_generated_at", "") or "").strip()[:19]
         evid = str(r.get("evidence_titles_str", "") or "").strip()[:50]
         lines.append(
-            f"| {r.get('ticker','')} | {r.get('ticker_name','')} | {conf:.2f} | "
-            f"{r.get('time_horizon','')} | {chain} | {summ} | {st} | {src} | {evid} |"
+            f"| {r.get('ticker','')} | {r.get('ticker_name','')} | {conf:.2f} | {qual:.2f} | "
+            f"{r.get('time_horizon','')} | {chain} | {summ} | {st} | {freshness} | {evid} |"
         )
     return "\n".join(lines)
 

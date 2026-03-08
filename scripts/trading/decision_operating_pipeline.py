@@ -330,6 +330,11 @@ def compute_stage0() -> Stage0Result:
             int(os.getenv("STAGE0_MAX_STALE_RELATION_MIN", "720")),
             False,
         ),
+        "hidden_relation_reasoning": (
+            "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(asof_ts), now()), 0)) AS stale FROM trading.hidden_relation_reasoning",
+            int(os.getenv("STAGE0_MAX_STALE_RELATION_REASONING_MIN", "1440")),
+            False,
+        ),
         "dart_disclosure": (
             "SELECT if(count()=0, 99999, greatest(dateDiff('minute', max(collected_at), now()), 0)) AS stale FROM trading.dart_disclosure",
             int(os.getenv("STAGE0_MAX_STALE_DART_MIN", "4320")),

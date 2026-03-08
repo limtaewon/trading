@@ -7,8 +7,9 @@
 3) news_cluster_state 최신성
 4) news_event_frames explain_ready 생성량
 5) hidden_relation_signals 최신성
-6) interest_watchlist_runs 최신 run 상태
-7) monitor_news 실행 SLA/지연/락스킵 상태
+6) hidden_relation_reasoning 최신성/최근 생성량
+7) interest_watchlist_runs 최신 run 상태
+8) monitor_news 실행 SLA/지연/락스킵 상태
 """
 
 from __future__ import annotations
@@ -155,8 +156,10 @@ def main() -> int:
     stale_regime_min = max(60, _to_int(os.environ.get("NEWS_PIPELINE_STALE_REGIME_MIN", "1500"), 1500))
     stale_cluster_min = max(30, _to_int(os.environ.get("NEWS_PIPELINE_STALE_CLUSTER_MIN", "180"), 180))
     stale_relation_min = max(30, _to_int(os.environ.get("NEWS_PIPELINE_STALE_RELATION_MIN", "180"), 180))
+    stale_reasoning_min = max(30, _to_int(os.environ.get("NEWS_PIPELINE_STALE_REASONING_MIN", "360"), 360))
     min_news_3h = max(0, _to_int(os.environ.get("NEWS_PIPELINE_MIN_NEWS_3H", "5"), 5))
     min_frames_explain_6h = max(0, _to_int(os.environ.get("NEWS_PIPELINE_MIN_FRAMES_EXPLAIN_6H", "3"), 3))
+    min_reasoning_24h = max(0, _to_int(os.environ.get("NEWS_PIPELINE_MIN_REASONING_24H", "3"), 3))
     monitor_stale_min = max(10, _to_int(os.environ.get("NEWS_MONITOR_STALE_MIN", "30"), 30))
     monitor_success_stale_min = max(10, _to_int(os.environ.get("NEWS_MONITOR_SUCCESS_STALE_MIN", "90"), 90))
     monitor_runtime_warn_sec = max(30, _to_int(os.environ.get("NEWS_MONITOR_RUNTIME_WARN_SEC", "180"), 180))
@@ -226,7 +229,29 @@ WHERE published_at >= now() - INTERVAL 6 HOUR
     else:
         fail.append("hidden_relation_signals_missing")
 
-    # 6) watchlist latest run health
+    # 6) hidden relation reasoning freshness
+    if _table_exists("hidden_relation_reasoning"):
+        rows = _ch_query(
+            "SELECT "
+            "if(count()=0, 99999, greatest(dateDiff('minute', max(asof_ts), now()), 0)) AS age_min, "
+            "countIf(asof_ts >= now() - INTERVAL 24 HOUR) AS rows_24h, "
+            "round(avg(toFloat64(confidence)), 4) AS avg_conf "
+            "FROM trading.hidden_relation_reasoning"
+        )
+        age = _to_int((rows[0] if rows else {}).get("age_min"), 99999)
+        rows_24h = _to_int((rows[0] if rows else {}).get("rows_24h"), 0)
+        avg_conf = float((rows[0] if rows else {}).get("avg_conf") or 0.0)
+        checks["relation_reasoning_age_min"] = age
+        checks["relation_reasoning_rows_24h"] = rows_24h
+        checks["relation_reasoning_avg_conf"] = avg_conf
+        if age > stale_reasoning_min:
+            warn.append(f"relation_reasoning_stale({age}m)")
+        if rows_24h < min_reasoning_24h:
+            warn.append(f"relation_reasoning_low({rows_24h}/24h)")
+    else:
+        warn.append("hidden_relation_reasoning_missing")
+
+    # 7) watchlist latest run health
     if _table_exists("interest_watchlist_runs"):
         src = os.environ.get("WATCHLIST_ACTIVE_SOURCE", "enrich_data").strip()
         src_list = [s.strip() for s in src.split(",") if s.strip()]
@@ -255,7 +280,7 @@ LIMIT 1
     else:
         warn.append("watchlist_run_table_missing")
 
-    # 7) monitor_news runtime health
+    # 8) monitor_news runtime health
     monitor_state = _load_monitor_state()
     if not monitor_state:
         warn.append("news_monitor_state_missing")

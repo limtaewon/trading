@@ -170,6 +170,163 @@ def by_code(rows: list[dict[str, Any]], code_key: str) -> dict[str, list[dict[st
     return out
 
 
+def get_relation_snapshot(limit: int = 8, min_effective_score: float = 0.8) -> list[dict[str, Any]]:
+    sql = f"""
+SELECT
+    ticker,
+    ticker_name,
+    total_relation_score,
+    relation_quality,
+    relation_bias,
+    support_events,
+    support_clusters,
+    abs(total_relation_score) * (0.5 + 0.5 * ifNull(relation_quality, 0.5)) AS effective_relation_score,
+    top_channels
+FROM trading.hidden_relation_signals
+WHERE asof_ts = (SELECT max(asof_ts) FROM trading.hidden_relation_signals)
+  AND abs(total_relation_score) * (0.5 + 0.5 * ifNull(relation_quality, 0.5)) >= {float(min_effective_score)}
+ORDER BY effective_relation_score DESC, support_events DESC, support_clusters DESC
+LIMIT {int(limit)}
+FORMAT JSON
+"""
+    rows = ch_query(sql)
+    for row in rows:
+        channels = row.get("top_channels")
+        if isinstance(channels, list):
+            row["top_channels_str"] = ", ".join(str(v).strip() for v in channels if str(v).strip())
+        else:
+            row["top_channels_str"] = str(channels or "").strip()
+    return rows
+
+
+def get_relation_reasoning_snapshot(limit: int = 8, min_confidence: float = 0.55) -> list[dict[str, Any]]:
+    sql = f"""
+SELECT
+    ticker,
+    ticker_name,
+    confidence,
+    summary,
+    time_horizon,
+    relation_quality,
+    support_events,
+    support_clusters,
+    effective_relation_score,
+    source_max_published_at,
+    source_max_cluster_asof_ts
+FROM trading.hidden_relation_reasoning
+WHERE toFloat64OrZero(toString(confidence)) >= {float(min_confidence)}
+ORDER BY asof_ts DESC, effective_relation_score DESC
+LIMIT {int(limit)}
+FORMAT JSON
+"""
+    return ch_query(sql)
+
+
+def relation_strength_label(score: float) -> str:
+    if score >= 7.0:
+        return "매우 강한 편"
+    if score >= 4.0:
+        return "강한 편"
+    if score >= 2.0:
+        return "보통 이상"
+    return "초기 단계"
+
+
+def relation_quality_label(quality: float) -> str:
+    if quality >= 0.85:
+        return "신뢰도 높음"
+    if quality >= 0.65:
+        return "신뢰도 양호"
+    if quality >= 0.45:
+        return "신뢰도 보통"
+    return "신뢰도 낮음"
+
+
+def relation_bias_text(bias: str) -> str:
+    value = str(bias or "").strip().lower()
+    if value == "positive":
+        return "긍정 전이"
+    if value == "negative":
+        return "부정 전이"
+    return "중립 전이"
+
+
+def relation_channel_text(channels: str) -> str:
+    mapping = {
+        "sentiment": "시장 심리",
+        "risk": "리스크 인식",
+        "valuation": "밸류에이션",
+        "demand": "수요",
+        "supply": "공급",
+        "liquidity": "유동성",
+        "policy": "정책",
+        "revenue": "실적",
+        "cost": "비용",
+    }
+    items = [mapping.get(part.strip(), part.strip()) for part in str(channels or "").split(",") if part.strip()]
+    deduped: list[str] = []
+    for item in items:
+        if item and item not in deduped:
+            deduped.append(item)
+    return ", ".join(deduped[:4])
+
+
+def relation_channel_phrase(channel: str, bias: str) -> str:
+    positive = {
+        "시장 심리": "투자심리 개선",
+        "리스크 인식": "위험회피 완화",
+        "밸류에이션": "밸류 재평가",
+        "수요": "수요 기대 확대",
+        "공급": "공급 여건 개선",
+        "유동성": "수급 여건 개선",
+        "정책": "정책 기대 강화",
+        "실적": "실적 개선 기대",
+        "비용": "비용 부담 완화",
+    }
+    negative = {
+        "시장 심리": "투자심리 악화",
+        "리스크 인식": "위험회피 확대",
+        "밸류에이션": "밸류 부담 재평가",
+        "수요": "수요 둔화 우려",
+        "공급": "공급 차질 우려",
+        "유동성": "수급 위축 가능성",
+        "정책": "정책 불확실성",
+        "실적": "실적 둔화 우려",
+        "비용": "비용 부담 확대",
+    }
+    neutral = {
+        "시장 심리": "투자심리 변화",
+        "리스크 인식": "리스크 인식 변화",
+        "밸류에이션": "밸류 재조정",
+        "수요": "수요 변화",
+        "공급": "공급 변화",
+        "유동성": "수급 변화",
+        "정책": "정책 변수",
+        "실적": "실적 변수",
+        "비용": "비용 변수",
+    }
+    bias_key = str(bias or "").strip().lower()
+    if bias_key == "positive":
+        return positive.get(channel, channel)
+    if bias_key == "negative":
+        return negative.get(channel, channel)
+    return neutral.get(channel, channel)
+
+
+def relation_channel_reason(channels: str, bias: str) -> str:
+    raw_items = [part.strip() for part in relation_channel_text(channels).split(",") if part.strip()]
+    items = [relation_channel_phrase(item, bias) for item in raw_items]
+    if not items:
+        return ""
+    if len(items) == 1:
+        tail = f"{items[0]} 요인이 중심으로 작동했습니다"
+    elif len(items) == 2:
+        tail = f"{items[0]}, {items[1]} 요인이 함께 작동했습니다"
+    else:
+        tail = f"{items[0]}, {items[1]}, {items[2]} 요인이 함께 작동했습니다"
+    return f"{relation_bias_text(bias)} 관점에서는 {tail}"
+
+
 def summarize_actions(
     stress_flags: list[str],
     watchlist: list[dict[str, Any]],
@@ -214,6 +371,8 @@ def build_report(as_of: date) -> tuple[str, Path]:
     latest_watchlist = get_latest_watchlist(week_end)
     latest_run = get_latest_decision_run(week_end)
     top_decisions = get_top_decisions(str(latest_run.get("decision_id") or ""))
+    relation_rows = get_relation_snapshot(limit=8, min_effective_score=1.0)
+    relation_reasonings = get_relation_reasoning_snapshot(limit=8, min_confidence=0.6)
 
     market_map = by_code(market_rows, "index_code")
 
@@ -303,9 +462,47 @@ def build_report(as_of: date) -> tuple[str, Path]:
             action = str(row.get("action") or "").strip()
             lines.append(f"- {name}({code}) | {action}")
 
+    if relation_rows:
+        lines.append("")
+        lines.append("6) 숨은관계/연관 전이 상위")
+        reasoning_map = {str(r.get("ticker") or "").strip(): r for r in relation_reasonings}
+        for row in relation_rows[:5]:
+            code = str(row.get("ticker") or "").strip()
+            name = stock_names.get(code, str(row.get("ticker_name") or code))
+            quality = float(row.get("relation_quality") or 0.0)
+            eff = float(row.get("effective_relation_score") or 0.0)
+            support_events = int(float(row.get("support_events") or 0))
+            bias = str(row.get("relation_bias") or "").strip()
+            channels = str(row.get("top_channels_str") or "").strip()
+            reason = reasoning_map.get(code) or {}
+            summary = str(reason.get("summary") or "").strip()
+            source_fresh = str(reason.get("source_max_published_at") or "").strip()
+            support_clusters = int(float(row.get("support_clusters") or 0))
+            strength = relation_strength_label(eff)
+            quality_text = relation_quality_label(quality)
+            bias_text = relation_bias_text(bias)
+            channel_reason = relation_channel_reason(channels, bias)
+            if summary:
+                lines.append(f"- {name}({code}): {summary}")
+                lines.append(
+                    f"  · 내부 데이터 기준으로는 {bias_text} 축에서 이벤트 {support_events}건, 클러스터 {support_clusters}건이 반복 확인됐습니다."
+                )
+                if channel_reason:
+                    lines.append(f"  · 반복 포착된 내부 축: {channel_reason}.")
+                lines.append(f"  · 신호 해석: 연관 전이 강도는 {strength}, 근거는 {quality_text}입니다.")
+            else:
+                lines.append(
+                    f"- {name}({code}): {bias_text} 축에서 이벤트 {support_events}건, 클러스터 {support_clusters}건이 반복 확인된 후보입니다."
+                )
+                if channel_reason:
+                    lines.append(f"  · 반복 포착된 내부 축: {channel_reason}.")
+                lines.append(f"  · 신호 해석: 연관 전이 강도는 {strength}, 근거는 {quality_text}입니다.")
+            if source_fresh:
+                lines.append(f"  · 근거 최신 시각: {source_fresh}")
+
     if top_decisions:
         lines.append("")
-        lines.append("6) 금요일 기준 내부 BUY 상위")
+        lines.append("7) 금요일 기준 내부 BUY 상위")
         for row in top_decisions[:5]:
             code = str(row.get("ticker") or "").strip()
             name = stock_names.get(code, code)

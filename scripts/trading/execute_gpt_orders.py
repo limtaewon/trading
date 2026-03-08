@@ -80,6 +80,9 @@ MIN_EVENT_EVIDENCE_REFS = max(1, int(os.getenv("MIN_EVENT_EVIDENCE_REFS", "1")))
 BASE_PER_ORDER_CAP_KRW = int(os.getenv("BASE_PER_ORDER_CAP_KRW", "0"))
 ENABLE_RELATION_SCORE_BUY_FILTER = os.getenv("ENABLE_RELATION_SCORE_BUY_FILTER", "1") == "1"
 MIN_RELATION_SCORE_BUY = float(os.getenv("MIN_RELATION_SCORE_BUY", "-0.20"))
+ENABLE_RELATION_QUALITY_BUY_FILTER = os.getenv("ENABLE_RELATION_QUALITY_BUY_FILTER", "1") == "1"
+MIN_RELATION_QUALITY_BUY = float(os.getenv("MIN_RELATION_QUALITY_BUY", "0.35"))
+MIN_RELATION_SUPPORT_EVENTS_BUY = max(0, int(os.getenv("MIN_RELATION_SUPPORT_EVENTS_BUY", "1")))
 ENABLE_DYNAMIC_EXIT_ENFORCEMENT = os.getenv("ENABLE_DYNAMIC_EXIT_ENFORCEMENT", "1") == "1"
 DYNAMIC_EXIT_COOLDOWN_MIN = max(1, int(os.getenv("DYNAMIC_EXIT_COOLDOWN_MIN", "120")))
 DYNAMIC_EXIT_MAX_TP = float(os.getenv("DYNAMIC_EXIT_MAX_TP", "0.60"))
@@ -155,6 +158,15 @@ def to_float(v: Any, default: float = 0.0) -> float:
         return float(v)
     except Exception:
         return default
+
+
+def _join_str_list(value: Any, sep: str = ",") -> str:
+    if isinstance(value, list):
+        parts = [str(v).strip() for v in value if str(v).strip()]
+        return sep.join(parts)
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def to_int(v: Any, default: int = 0) -> int:
@@ -1423,9 +1435,10 @@ def get_hidden_relation_signal(ticker: str) -> dict[str, Any] | None:
     rows = ch_select(
         "SELECT "
         "total_relation_score, relation_bias, direct_event_score, transfer_event_score, "
-        "cluster_state_score, support_events, support_clusters "
-        "FROM trading.v_hidden_relation_signals "
-        f"WHERE ticker='{t}' "
+        "cluster_state_score, relation_quality, support_events, support_clusters "
+        "FROM trading.hidden_relation_signals "
+        "WHERE asof_ts = (SELECT max(asof_ts) FROM trading.hidden_relation_signals) "
+        f"AND ticker='{t}' "
         "LIMIT 1"
     )
     if not rows:
@@ -1439,6 +1452,7 @@ def get_hidden_relation_signal(ticker: str) -> dict[str, Any] | None:
         "direct_event_score": to_float(r.get("direct_event_score", 0.0), 0.0),
         "transfer_event_score": to_float(r.get("transfer_event_score", 0.0), 0.0),
         "cluster_state_score": to_float(r.get("cluster_state_score", 0.0), 0.0),
+        "relation_quality": to_float(r.get("relation_quality", 0.5), 0.5),
         "support_events": to_int(r.get("support_events", 0), 0),
         "support_clusters": to_int(r.get("support_clusters", 0), 0),
     }
@@ -1456,15 +1470,19 @@ def get_hidden_relation_reasoning(ticker: str) -> dict[str, Any] | None:
     rows = ch_select(
         "SELECT "
         "toString(asof_ts) AS asof_ts, "
+        "toString(reason_generated_at) AS reason_generated_at, "
+        "source_max_published_at, "
+        "source_max_cluster_asof_ts, "
         "ticker_name, "
         "confidence, "
         "causal_chain, "
         "summary, "
         "time_horizon, "
         "source_cluster, "
-        "arrayStringConcat(source_tickers, ',') AS source_tickers_str "
-        "FROM trading.v_hidden_relation_reasoning "
+        "source_tickers "
+        "FROM trading.hidden_relation_reasoning "
         f"WHERE ticker='{t}' "
+        "ORDER BY asof_ts DESC "
         "LIMIT 1"
     )
     if not rows:
@@ -1474,13 +1492,16 @@ def get_hidden_relation_reasoning(ticker: str) -> dict[str, Any] | None:
     r = rows[0]
     out = {
         "asof_ts": str(r.get("asof_ts", "")),
+        "reason_generated_at": str(r.get("reason_generated_at", "") or "").strip(),
+        "source_max_published_at": str(r.get("source_max_published_at", "") or "").strip(),
+        "source_max_cluster_asof_ts": str(r.get("source_max_cluster_asof_ts", "") or "").strip(),
         "ticker_name": str(r.get("ticker_name", "") or ""),
         "confidence": to_float(r.get("confidence", 0.0), 0.0),
         "causal_chain": str(r.get("causal_chain", "") or "").strip(),
         "summary": str(r.get("summary", "") or "").strip(),
         "time_horizon": str(r.get("time_horizon", "") or "").strip(),
         "source_cluster": str(r.get("source_cluster", "") or "").strip(),
-        "source_tickers_str": str(r.get("source_tickers_str", "") or "").strip(),
+        "source_tickers_str": _join_str_list(r.get("source_tickers")),
     }
     REASONING_CACHE[t] = out
     return out
@@ -2099,8 +2120,10 @@ def main() -> int:
         rsi = get_rsi14(ticker) if action == "BUY" else None
         relation_sig = get_hidden_relation_signal(ticker)
         relation_score = to_float(relation_sig.get("total_relation_score", 0.0), 0.0) if relation_sig else 0.0
+        relation_quality = to_float(relation_sig.get("relation_quality", 0.5), 0.5) if relation_sig else 0.5
         relation_bias = str(relation_sig.get("relation_bias", "neutral")) if relation_sig else "unknown"
         relation_events = to_int(relation_sig.get("support_events", 0), 0) if relation_sig else 0
+        relation_clusters = to_int(relation_sig.get("support_clusters", 0), 0) if relation_sig else 0
         relation_reasoning = get_hidden_relation_reasoning(ticker)
         relation_reasoning_conf = to_float(
             relation_reasoning.get("confidence", 0.0), 0.0
@@ -2159,11 +2182,15 @@ def main() -> int:
             "take_profit_pct": take_profit_pct,
             "stop_loss_pct": stop_loss_pct,
             "relation_score": round(relation_score, 6),
+            "relation_quality": round(relation_quality, 4),
             "relation_bias": relation_bias,
             "relation_support_events": relation_events,
+            "relation_support_clusters": relation_clusters,
             "relation_reasoning_conf": round(relation_reasoning_conf, 4),
             "relation_reasoning_chain": (relation_reasoning.get("causal_chain", "") if relation_reasoning else "")[:120],
             "relation_reasoning_summary": (relation_reasoning.get("summary", "") if relation_reasoning else "")[:160],
+            "relation_reasoning_source_max_published_at": str((relation_reasoning or {}).get("source_max_published_at", "") or ""),
+            "relation_reasoning_source_max_cluster_asof_ts": str((relation_reasoning or {}).get("source_max_cluster_asof_ts", "") or ""),
             "rule_reason": rule_reason,
             "execution_mode": mode_name,
             "strategy_family": strategy_family,
@@ -2217,6 +2244,13 @@ def main() -> int:
         if action == "BUY" and ENABLE_RELATION_SCORE_BUY_FILTER and relation_sig is not None:
             if relation_score < MIN_RELATION_SCORE_BUY:
                 skipped.append({**item, "reason": f"relation_score_too_low:{relation_score:.3f}"})
+                continue
+        if action == "BUY" and ENABLE_RELATION_QUALITY_BUY_FILTER and relation_sig is not None:
+            if relation_quality < MIN_RELATION_QUALITY_BUY:
+                skipped.append({**item, "reason": f"relation_quality_too_low:{relation_quality:.3f}"})
+                continue
+            if MIN_RELATION_SUPPORT_EVENTS_BUY > 0 and relation_events < MIN_RELATION_SUPPORT_EVENTS_BUY:
+                skipped.append({**item, "reason": f"relation_support_events_too_low:{relation_events}"})
                 continue
         if action == "BUY" and REQUIRE_EVENT_EXPLAIN_FOR_BUY:
             missing_meta: list[str] = []

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, urlsplit, urlunsplit
 
 # ensure local imports work regardless of CWD (cron, manual run, etc.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -148,6 +148,9 @@ MAX_PAGES = int(os.environ.get("MAX_PAGES", "1"))          # pages per query (NA
 MAX_NEWS_TOTAL = int(os.environ.get("MAX_NEWS_TOTAL", "1500"))  # hard cap to prevent runaway backfills
 BACKFILL_START_DATE = os.environ.get("BACKFILL_START_DATE", "").strip()  # YYYY-MM-DD (inclusive)
 BACKFILL_END_DATE = os.environ.get("BACKFILL_END_DATE", "").strip()      # YYYY-MM-DD (inclusive)
+L1_DUP_HOURS_MORNING = int(os.environ.get("L1_DUP_HOURS_MORNING", "336"))
+L1_DUP_HOURS_TRADING = int(os.environ.get("L1_DUP_HOURS_TRADING", "168"))
+L1_DUP_HOURS_FALLBACK = int(os.environ.get("L1_DUP_HOURS_FALLBACK", "168"))
 SKIP_L1_DUPLICATE_CHECK = os.environ.get("SKIP_L1_DUP", "0").strip() == "1"
 SKIP_L2_DUPLICATE_CHECK = os.environ.get("SKIP_L2_DUP", "0").strip() == "1"
 _NEWS_RESEARCH_QUEUE_READY = False
@@ -170,6 +173,7 @@ SEARCH_QUERIES = {
     "macro": [
         "한국은행 기준금리", "미국 연준 금리", "원달러 환율",
         "국제유가 WTI", "미국 고용 경제지표", "중국 경제 PMI",
+        "미국 CPI 소비자물가지수", "미국 PCE 물가지수", "미국 국채금리 10년물",
     ],
     "global": [
         "나스닥 S&P500", "닛케이 일본 증시", "달러 인덱스",
@@ -186,12 +190,36 @@ SEARCH_QUERIES = {
     "risk": [
         "무역 관세 수출규제", "북한 지정학 리스크",
         "부동산 PF 부실", "IPO 상장 공모",
+        "중동 전쟁 호르무즈", "미국 관세 무역전쟁",
     ],
     "theme": [
         "로봇 자율주행 테슬라", "원전 SMR 에너지",
         "K방산 수출 계약", "ETF 자금 유입 유출",
     ],
 }
+
+PRIORITY_QUERY_SPECS: list[tuple[str, str]] = [
+    ("market", "코스피 지수"),
+    ("market", "코스닥 지수"),
+    ("market", "증시 전망"),
+    ("flow", "외국인 매수 매도"),
+    ("flow", "기관 매수 매도"),
+    ("macro", "원달러 환율"),
+    ("macro", "국제유가 WTI"),
+    ("macro", "미국 CPI 소비자물가지수"),
+    ("macro", "미국 연준 금리"),
+    ("risk", "중동 전쟁 호르무즈"),
+    ("global", "달러 인덱스"),
+    ("global", "나스닥 S&P500"),
+    ("sector", "반도체 삼성전자 SK하이닉스"),
+    ("sector", "조선 방산 수주"),
+    ("risk", "무역 관세 수출규제"),
+    ("macro", "미국 고용 경제지표"),
+    ("macro", "미국 PCE 물가지수"),
+    ("macro", "미국 국채금리 10년물"),
+    ("flow", "공매도 거래"),
+    ("theme", "ETF 자금 유입 유출"),
+]
 
 
 def _parse_extra_queries(raw: str) -> list[str]:
@@ -216,6 +244,34 @@ def get_search_queries() -> dict[str, list[str]]:
     if extra:
         merged["on_demand"] = extra
     return merged
+
+
+def get_search_query_specs() -> list[dict[str, str]]:
+    queries = get_search_queries()
+    specs: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    remaining: list[dict[str, str]] = []
+
+    for category, query in PRIORITY_QUERY_SPECS:
+        if category not in queries:
+            continue
+        if query not in queries.get(category, []):
+            continue
+        key = (category, query)
+        if key in seen:
+            continue
+        specs.append({"category": category, "query": query})
+        seen.add(key)
+
+    for category, keywords in queries.items():
+        for query in keywords:
+            key = (category, query)
+            if key in seen:
+                continue
+            remaining.append({"category": category, "query": query})
+            seen.add(key)
+
+    return specs + remaining
 
 logging.basicConfig(
     level=logging.INFO,
@@ -354,6 +410,38 @@ def clean_html(text):
     return text.strip()
 
 
+_TRACKING_QUERY_KEYS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "ref", "referrer",
+    "rss", "output", "ns", "from", "oc", "spm",
+}
+
+
+def normalize_news_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        p = urlsplit(raw)
+        scheme = (p.scheme or "https").lower()
+        netloc = (p.netloc or "").lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        path = p.path or "/"
+        query_pairs = []
+        for k, v in parse_qsl(p.query, keep_blank_values=True):
+            key = str(k or "").strip().lower()
+            if not key or key in _TRACKING_QUERY_KEYS:
+                continue
+            query_pairs.append((k, v))
+        query_pairs.sort()
+        clean_query = urlencode(query_pairs, doseq=True)
+        normalized = urlunsplit((scheme, netloc, path, clean_query, ""))
+        return normalized.rstrip("?")
+    except Exception:
+        return raw
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -471,8 +559,8 @@ def collect_all_news():
     seen_urls = set()
     category_stats = {}
     qcount = 0
-    queries = get_search_queries()
-    if not queries:
+    query_specs = get_search_query_specs()
+    if not query_specs:
         log.warning("수집 쿼리가 비어 있음 (NEWS_REPLACE_DEFAULT_QUERIES=1 + NEWS_EXTRA_QUERIES 미설정)")
         return all_news
 
@@ -493,80 +581,86 @@ def collect_all_news():
         except Exception:
             log.warning(f"Invalid BACKFILL_END_DATE={BACKFILL_END_DATE!r}; expected YYYY-MM-DD")
 
-    for category, keywords in queries.items():
-        for query in keywords:
-            if MAX_QUERIES and qcount >= MAX_QUERIES:
-                log.info(f"SMOKE: MAX_QUERIES={MAX_QUERIES} reached, stopping early")
-                return all_news
+    for spec in query_specs:
+        category = str(spec.get("category") or "").strip()
+        query = str(spec.get("query") or "").strip()
+        if not category or not query:
+            continue
+        if MAX_QUERIES and qcount >= MAX_QUERIES:
+            log.info(f"SMOKE: MAX_QUERIES={MAX_QUERIES} reached, stopping early")
+            return all_news
 
-            new_count_total = 0
-            stop_query = False
+        new_count_total = 0
+        stop_query = False
 
-            for page in range(MAX_PAGES):
-                start = page * NEWS_PER_QUERY + 1
-                items = fetch_naver_news(query, display=NEWS_PER_QUERY, start=start)
-                qcount += 1 if page == 0 else 0
+        for page in range(MAX_PAGES):
+            start = page * NEWS_PER_QUERY + 1
+            items = fetch_naver_news(query, display=NEWS_PER_QUERY, start=start)
+            qcount += 1 if page == 0 else 0
 
-                if not items:
-                    break
+            if not items:
+                break
 
-                new_count = 0
-                for item in items:
-                    # backfill cutoff / date window
+            new_count = 0
+            for item in items:
+                # backfill cutoff / date window
+                pub_dt = None
+                pub_date = None
+                try:
+                    pub_dt = _to_utc_dt(item.get("pubDate", ""))
+                    pub_date = pub_dt.date()
+                except Exception:
                     pub_dt = None
                     pub_date = None
-                    try:
-                        pub_dt = _to_utc_dt(item.get("pubDate", ""))
-                        pub_date = pub_dt.date()
-                    except Exception:
-                        pub_dt = None
-                        pub_date = None
 
-                    if cutoff_dt and pub_dt and pub_dt < cutoff_dt:
-                        stop_query = True
-                        continue
+                if cutoff_dt and pub_dt and pub_dt < cutoff_dt:
+                    stop_query = True
+                    continue
 
-                    # Explicit date window (inclusive): BACKFILL_START_DATE ~ BACKFILL_END_DATE
-                    if backfill_end_date and pub_date and pub_date > backfill_end_date:
-                        # Newer than requested end-date; keep paging (results are desc by date)
-                        continue
-                    if backfill_start_date and pub_date and pub_date < backfill_start_date:
-                        # Older than requested start-date; can stop this query early
-                        stop_query = True
-                        continue
+                # Explicit date window (inclusive): BACKFILL_START_DATE ~ BACKFILL_END_DATE
+                if backfill_end_date and pub_date and pub_date > backfill_end_date:
+                    # Newer than requested end-date; keep paging (results are desc by date)
+                    continue
+                if backfill_start_date and pub_date and pub_date < backfill_start_date:
+                    # Older than requested start-date; can stop this query early
+                    stop_query = True
+                    continue
 
-                    url = item.get("originallink") or item.get("link", "")
-                    if url in seen_urls:
-                        continue
-                    seen_urls.add(url)
-                    all_news.append({
-                        "title": clean_html(item.get("title", "")),
-                        "description": clean_html(item.get("description", "")),
-                        "url": url,
-                        "pub_date": item.get("pubDate", ""),
-                        "category": category,
-                    })
-                    new_count += 1
+                raw_url = item.get("originallink") or item.get("link", "")
+                url = normalize_news_url(raw_url)
+                if not url:
+                    continue
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                all_news.append({
+                    "title": clean_html(item.get("title", "")),
+                    "description": clean_html(item.get("description", "")),
+                    "url": url,
+                    "pub_date": item.get("pubDate", ""),
+                    "category": category,
+                })
+                new_count += 1
 
-                    if MAX_NEWS_TOTAL and len(all_news) >= MAX_NEWS_TOTAL:
-                        log.info(f"CAP: MAX_NEWS_TOTAL={MAX_NEWS_TOTAL} reached, stopping collection")
-                        return all_news
+                if MAX_NEWS_TOTAL and len(all_news) >= MAX_NEWS_TOTAL:
+                    log.info(f"CAP: MAX_NEWS_TOTAL={MAX_NEWS_TOTAL} reached, stopping collection")
+                    return all_news
 
-                new_count_total += new_count
+            new_count_total += new_count
 
-                # If backfill cutoff reached, stop paging further for this query.
-                if stop_query:
-                    break
+            # If backfill cutoff reached, stop paging further for this query.
+            if stop_query:
+                break
 
-                # Naver API pagination safety (max start <= 1000)
-                if start + NEWS_PER_QUERY > 1000:
-                    break
+            # Naver API pagination safety (max start <= 1000)
+            if start + NEWS_PER_QUERY > 1000:
+                break
 
-                time.sleep(0.15)
-
-            category_stats[category] = category_stats.get(category, 0) + new_count_total
-            log.info(f"  [{category:12s}] {query:24s} -> 신규 {new_count_total}건 (pages {MAX_PAGES}, cutoff {BACKFILL_DAYS}d, window {BACKFILL_START_DATE or '-'}~{BACKFILL_END_DATE or '-'})")
             time.sleep(0.15)
+
+        category_stats[category] = category_stats.get(category, 0) + new_count_total
+        log.info(f"  [{category:12s}] {query:24s} -> 신규 {new_count_total}건 (pages {MAX_PAGES}, cutoff {BACKFILL_DAYS}d, window {BACKFILL_START_DATE or '-'}~{BACKFILL_END_DATE or '-'})")
+        time.sleep(0.15)
 
     log.info("-" * 40)
     for cat, cnt in category_stats.items():
@@ -621,7 +715,7 @@ def get_existing_urls(hours=48):
             text = http_get_text(CLICKHOUSE_URL, params={"query": query}, timeout=20)
             for line in text.strip().split("\n"):
                 if line.strip():
-                    urls.add(line.strip())
+                    urls.add(normalize_news_url(line.strip()))
         except Exception:
             pass
     return urls
@@ -629,7 +723,7 @@ def get_existing_urls(hours=48):
 
 def filter_by_url(news_list, existing_urls):
     before = len(news_list)
-    filtered = [n for n in news_list if n["url"] not in existing_urls]
+    filtered = [n for n in news_list if normalize_news_url(n.get("url", "")) not in existing_urls]
     skipped = before - len(filtered)
     if skipped > 0:
         log.info(f"L1 URL 중복제거: {skipped}건 스킵, {len(filtered)}건 남음")
@@ -1681,7 +1775,9 @@ def main():
         news = filter_by_keyword_l0(news)
 
         # 2) L1: URL 중복 제거
-        hours = 48 if mode == "morning" else 6
+        hours = L1_DUP_HOURS_MORNING if mode == "morning" else L1_DUP_HOURS_TRADING
+        if hours <= 0:
+            hours = L1_DUP_HOURS_FALLBACK
         if SKIP_L1_DUPLICATE_CHECK:
             after_l1 = len(news)
             log.info("SKIP: L1 URL 중복제거 비활성화 (SKIP_L1_DUP=1)")

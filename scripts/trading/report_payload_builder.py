@@ -267,7 +267,17 @@ def get_candidate_rows(decision_id: str, limit: int = 3) -> list[dict[str, Any]]
         f"""
 WITH
   latest_tech AS (SELECT max(date) AS d FROM trading.technical_signals),
-  latest_rel AS (SELECT max(asof_ts) AS ts FROM trading.hidden_relation_signals)
+  latest_rel AS (SELECT max(asof_ts) AS ts FROM trading.hidden_relation_signals),
+  latest_reasoning AS (
+    SELECT
+      ticker,
+      argMax(summary, asof_ts) AS relation_summary,
+      argMax(toFloat64(confidence), asof_ts) AS relation_confidence,
+      argMax(source_max_published_at, asof_ts) AS relation_source_max_published_at,
+      argMax(source_max_cluster_asof_ts, asof_ts) AS relation_source_max_cluster_asof_ts
+    FROM trading.hidden_relation_reasoning
+    GROUP BY ticker
+  )
 SELECT
   c.ticker AS ticker,
   any(ts.ticker_name) AS ticker_name,
@@ -280,9 +290,18 @@ SELECT
   max(toFloat64(ts.ma20)) AS ma20,
   max(toFloat64(ts.ma60)) AS ma60,
   max(toFloat64(ifNull(hrs.total_relation_score, 0))) AS rel_score,
+  max(toFloat64(ifNull(hrs.relation_quality, 0.5))) AS relation_quality,
+  max(toFloat64(ifNull(hrs.support_events, 0))) AS support_events,
+  max(toFloat64(ifNull(hrs.support_clusters, 0))) AS support_clusters,
+  max(toFloat64(abs(ifNull(hrs.total_relation_score, 0)) * (0.5 + 0.5 * ifNull(hrs.relation_quality, 0.5)))) AS effective_relation_score,
   any(ifNull(hrs.relation_bias, 'neutral')) AS rel_bias,
+  any(ifNull(hrs.top_channels, [])) AS top_channels,
   argMax(toFloat64(vfs.foreign_net_flow), vfs.ts) AS foreign_flow,
   argMax(toFloat64(vfs.inst_net_flow), vfs.ts) AS inst_flow,
+  any(ifNull(lr.relation_summary, '')) AS relation_summary,
+  any(toFloat64(ifNull(lr.relation_confidence, 0))) AS relation_confidence,
+  any(ifNull(lr.relation_source_max_published_at, '')) AS relation_source_max_published_at,
+  any(ifNull(lr.relation_source_max_cluster_asof_ts, '')) AS relation_source_max_cluster_asof_ts,
   any(c.absolute_block_reason) AS absolute_block_reason
 FROM trading.decision_candidate c
 LEFT JOIN trading.technical_signals ts
@@ -291,12 +310,60 @@ LEFT JOIN trading.technical_signals ts
 LEFT JOIN trading.hidden_relation_signals hrs
   ON hrs.ticker = c.ticker
  AND hrs.asof_ts = (SELECT ts FROM latest_rel)
+LEFT JOIN latest_reasoning lr
+  ON lr.ticker = c.ticker
 LEFT JOIN trading.v_feature_snapshot vfs
   ON vfs.symbol = c.ticker
  AND vfs.ts >= now() - INTERVAL 2 DAY
 WHERE c.decision_id = '{decision_id}'
 GROUP BY c.ticker, c.action, c.total_score
 ORDER BY c.total_score DESC
+LIMIT {max(1, int(limit))}
+"""
+    )
+
+
+def get_relation_rows(limit: int = 8, min_abs_score: float = 0.16) -> list[dict[str, Any]]:
+    return ch_query(
+        f"""
+SELECT
+  ticker,
+  ticker_name,
+  toString(asof_ts) AS asof_ts_s,
+  total_relation_score,
+  relation_quality,
+  relation_bias,
+  support_events,
+  support_clusters,
+  abs(total_relation_score) * (0.5 + 0.5 * ifNull(relation_quality, 0.5)) AS effective_relation_score,
+  top_channels
+FROM trading.hidden_relation_signals
+WHERE asof_ts = (SELECT max(asof_ts) FROM trading.hidden_relation_signals)
+  AND abs(total_relation_score) >= {float(min_abs_score)}
+ORDER BY effective_relation_score DESC, support_events DESC, support_clusters DESC
+LIMIT {max(1, int(limit))}
+"""
+    )
+
+
+def get_relation_reasonings(limit: int = 8, min_confidence: float = 0.30) -> list[dict[str, Any]]:
+    return ch_query(
+        f"""
+SELECT
+  ticker,
+  ticker_name,
+  toString(asof_ts) AS asof_ts_s,
+  confidence,
+  summary,
+  source_max_published_at,
+  source_max_cluster_asof_ts,
+  relation_quality,
+  support_events,
+  support_clusters,
+  effective_relation_score
+FROM trading.hidden_relation_reasoning
+WHERE toFloat64OrZero(toString(confidence)) >= {float(min_confidence)}
+ORDER BY asof_ts DESC, effective_relation_score DESC
 LIMIT {max(1, int(limit))}
 """
     )
@@ -502,17 +569,28 @@ def _candidate_reason(row: dict[str, Any]) -> str:
     parts: list[str] = []
     signal = _to_str(row.get("signal"))
     if signal and signal != "neutral":
-        parts.append(f"기술 {signal}")
-    rel_score = _to_float(row.get("relation_score"))
-    if rel_score > 0:
-        parts.append(f"연관 {rel_score:.1f}")
+        parts.append("기술 흐름이 양호합니다")
+    effective_relation_score = _to_float(row.get("effective_relation_score"))
+    relation_quality = _to_float(row.get("relation_quality"), 0.5)
+    support_events = _to_int(row.get("support_events"), 0)
+    support_clusters = _to_int(row.get("support_clusters"), 0)
+    relation_summary = _to_str(row.get("relation_summary"))
+    channel_reason = _relation_channel_reason(row.get("channels") or [], _to_str(row.get("relation_bias"), "neutral"))
+    if effective_relation_score >= 4.0 and relation_quality >= 0.65:
+        parts.append(f"내부 연관 전이 신호가 강하고, 이벤트 {support_events}건과 클러스터 {support_clusters}건에서 반복 확인됐습니다")
+    elif effective_relation_score >= 2.0:
+        parts.append("내부 연관 전이 신호가 보통 이상으로 확인됩니다")
+    if relation_summary:
+        parts.append(relation_summary)
+    elif channel_reason:
+        parts.append(channel_reason)
     foreign_flow = _to_float(row.get("flow", {}).get("foreign"))
     inst_flow = _to_float(row.get("flow", {}).get("institution"))
     if foreign_flow > 0 or inst_flow > 0:
-        parts.append("수급 유입")
+        parts.append("수급은 일부 유입 신호가 있습니다")
     elif foreign_flow < 0 or inst_flow < 0:
-        parts.append("수급 약세")
-    return ", ".join(parts[:3]) or "후보 근거 요약 부족"
+        parts.append("수급은 아직 엇갈리거나 약한 편입니다")
+    return " ".join(parts[:2]) or "후보 근거 요약이 아직 제한적입니다."
 
 
 def _candidate_action_reason(row: dict[str, Any], mode_context: dict[str, Any]) -> str:
@@ -549,10 +627,28 @@ def _build_candidate_context(candidate_rows: list[dict[str, Any]], mode_context:
                 "foreign": _to_float(row.get("foreign_flow")),
                 "institution": _to_float(row.get("inst_flow")),
             },
+            "relation": {
+                "effective_score": _to_float(row.get("effective_relation_score")),
+                "quality": _to_float(row.get("relation_quality"), 0.5),
+                "support_events": _to_int(row.get("support_events"), 0),
+                "support_clusters": _to_int(row.get("support_clusters"), 0),
+                "bias": _to_str(row.get("rel_bias"), "neutral"),
+                "summary": _to_str(row.get("relation_summary")),
+                "confidence": _to_float(row.get("relation_confidence")),
+                "source_max_published_at": _to_str(row.get("relation_source_max_published_at")),
+                "source_max_cluster_asof_ts": _to_str(row.get("relation_source_max_cluster_asof_ts")),
+                "channels": row.get("top_channels") or [],
+            },
             "thesis": _candidate_reason(
                 {
                     "signal": row.get("signal"),
-                    "relation_score": _to_float(row.get("rel_score")),
+                    "effective_relation_score": _to_float(row.get("effective_relation_score")),
+                    "relation_quality": _to_float(row.get("relation_quality"), 0.5),
+                    "support_events": _to_int(row.get("support_events"), 0),
+                    "support_clusters": _to_int(row.get("support_clusters"), 0),
+                    "relation_summary": _to_str(row.get("relation_summary")),
+                    "channels": row.get("top_channels") or [],
+                    "relation_bias": _to_str(row.get("rel_bias"), "neutral"),
                     "flow": {
                         "foreign": _to_float(row.get("foreign_flow")),
                         "institution": _to_float(row.get("inst_flow")),
@@ -581,6 +677,205 @@ def _build_candidate_context(candidate_rows: list[dict[str, Any]], mode_context:
         "selection_policy": mode_context.get("one_line_policy", "현재 정책 기준 따름"),
         "top_candidates": top_candidates,
         "avoid_list": avoid_list[:2],
+    }
+
+
+def _relation_strength_label(score: float) -> str:
+    if score >= 7.0:
+        return "매우 강한 편"
+    if score >= 4.0:
+        return "강한 편"
+    if score >= 2.0:
+        return "보통 이상"
+    return "초기 단계"
+
+
+def _relation_quality_label(quality: float) -> str:
+    if quality >= 0.85:
+        return "신뢰도 높음"
+    if quality >= 0.65:
+        return "신뢰도 양호"
+    if quality >= 0.45:
+        return "신뢰도 보통"
+    return "신뢰도 낮음"
+
+
+def _relation_bias_text(bias: str) -> str:
+    value = _to_str(bias).lower()
+    if value == "positive":
+        return "긍정 전이"
+    if value == "negative":
+        return "부정 전이"
+    return "중립 전이"
+
+
+def _relation_channel_text(channels: Any) -> str:
+    mapping = {
+        "sentiment": "시장 심리",
+        "risk": "리스크 인식",
+        "valuation": "밸류에이션",
+        "demand": "수요",
+        "supply": "공급",
+        "liquidity": "유동성",
+        "policy": "정책",
+        "revenue": "실적",
+        "cost": "비용",
+    }
+    raw_items = channels if isinstance(channels, list) else str(channels or "").split(",")
+    items = [mapping.get(_to_str(item), _to_str(item)) for item in raw_items if _to_str(item)]
+    deduped: list[str] = []
+    for item in items:
+        if item and item not in deduped:
+            deduped.append(item)
+    return ", ".join(deduped[:4])
+
+
+def _relation_channel_phrase(channel: str, bias: str) -> str:
+    positive = {
+        "시장 심리": "투자심리 개선",
+        "리스크 인식": "위험회피 완화",
+        "밸류에이션": "밸류 재평가",
+        "수요": "수요 기대 확대",
+        "공급": "공급 여건 개선",
+        "유동성": "수급 여건 개선",
+        "정책": "정책 기대 강화",
+        "실적": "실적 개선 기대",
+        "비용": "비용 부담 완화",
+    }
+    negative = {
+        "시장 심리": "투자심리 악화",
+        "리스크 인식": "위험회피 확대",
+        "밸류에이션": "밸류 부담 재평가",
+        "수요": "수요 둔화 우려",
+        "공급": "공급 차질 우려",
+        "유동성": "수급 위축 가능성",
+        "정책": "정책 불확실성",
+        "실적": "실적 둔화 우려",
+        "비용": "비용 부담 확대",
+    }
+    neutral = {
+        "시장 심리": "투자심리 변화",
+        "리스크 인식": "리스크 인식 변화",
+        "밸류에이션": "밸류 재조정",
+        "수요": "수요 변화",
+        "공급": "공급 변화",
+        "유동성": "수급 변화",
+        "정책": "정책 변수",
+        "실적": "실적 변수",
+        "비용": "비용 변수",
+    }
+    bias_key = _to_str(bias).lower()
+    if bias_key == "positive":
+        return positive.get(channel, channel)
+    if bias_key == "negative":
+        return negative.get(channel, channel)
+    return neutral.get(channel, channel)
+
+
+def _relation_channel_reason(channels: Any, bias: str) -> str:
+    raw_items = [part.strip() for part in _relation_channel_text(channels).split(",") if part.strip()]
+    items = [_relation_channel_phrase(item, bias) for item in raw_items]
+    if not items:
+        return ""
+    if len(items) == 1:
+        tail = f"{items[0]} 요인이 중심으로 작동했습니다"
+    elif len(items) == 2:
+        tail = f"{items[0]}, {items[1]} 요인이 함께 작동했습니다"
+    else:
+        tail = f"{items[0]}, {items[1]}, {items[2]} 요인이 함께 작동했습니다"
+    return f"{_relation_bias_text(bias)} 관점에서는 {tail}."
+
+
+def _relation_support_text(events: int, clusters: int) -> str:
+    parts: list[str] = []
+    if events > 0:
+        parts.append(f"이벤트 {events}건")
+    if clusters > 0:
+        parts.append(f"클러스터 {clusters}건")
+    if not parts:
+        return "근거 축적이 아직 제한적입니다."
+    return ", ".join(parts) + "에서 반복 확인됐습니다."
+
+
+def _relation_freshness_text(source_at: str, cluster_at: str) -> str:
+    ts = _to_str(source_at) or _to_str(cluster_at)
+    return f"근거 최신 시각 {ts}" if ts else "최신성 정보 부족"
+
+
+def _build_relation_context(
+    relation_rows: list[dict[str, Any]],
+    reasoning_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reasoning_map = {_to_str(r.get("ticker")): r for r in reasoning_rows}
+    top_signals: list[dict[str, Any]] = []
+    latest_reasoning_asof = ""
+    for row in reasoning_rows:
+        ts = _to_str(row.get("asof_ts_s"))
+        if ts and ts > latest_reasoning_asof:
+            latest_reasoning_asof = ts
+
+    for row in relation_rows[:8]:
+        code = _to_str(row.get("ticker"))
+        reason = reasoning_map.get(code) or {}
+        effective = _to_float(row.get("effective_relation_score"))
+        quality = _to_float(row.get("relation_quality"), 0.5)
+        support_events = _to_int(row.get("support_events"), 0)
+        support_clusters = _to_int(row.get("support_clusters"), 0)
+        summary = _to_str(reason.get("summary"))
+        bias = _to_str(row.get("relation_bias"), "neutral")
+        strength_label = _relation_strength_label(effective)
+        quality_label = _relation_quality_label(quality)
+        support_text = _relation_support_text(support_events, support_clusters)
+        freshness_text = _relation_freshness_text(
+            _to_str(reason.get("source_max_published_at")),
+            _to_str(reason.get("source_max_cluster_asof_ts")),
+        )
+        name = _to_str(row.get("ticker_name"), code)
+        channels = row.get("top_channels") or []
+        channel_text = _relation_channel_text(channels)
+        channel_reason = _relation_channel_reason(channels, bias)
+        if summary:
+            why_candidate = (
+                f"{summary} {_relation_bias_text(bias)} 축에서 {support_text} "
+                + (f"{channel_reason} " if channel_reason else "")
+                + f"{freshness_text}."
+            ).strip()
+        else:
+            why_candidate = (
+                f"{name}은(는) {_relation_bias_text(bias)} 축에서 {support_text} "
+                + (f"{channel_reason} " if channel_reason else "")
+                + (f"특히 {channel_text} 요인이 함께 반영됩니다. " if (not channel_reason and channel_text) else "")
+                + f"내부 연관 전이 신호는 {strength_label}, 근거는 {quality_label}입니다."
+            ).strip()
+        top_signals.append(
+            {
+                "ticker": code,
+                "name": name,
+                "effective_relation_score": round(effective, 3),
+                "relation_quality": round(quality, 3),
+                "relation_bias": bias,
+                "support_events": support_events,
+                "support_clusters": support_clusters,
+                "reason_summary": summary,
+                "reason_confidence": _to_float(reason.get("confidence")),
+                "source_max_published_at": _to_str(reason.get("source_max_published_at")),
+                "source_max_cluster_asof_ts": _to_str(reason.get("source_max_cluster_asof_ts")),
+                "strength_label": strength_label,
+                "quality_label": quality_label,
+                "bias_text": _relation_bias_text(bias),
+                "support_text": support_text,
+                "freshness_text": freshness_text,
+                "channel_reason": channel_reason,
+                "channel_text": channel_text,
+                "why_candidate": why_candidate,
+            }
+        )
+
+    return {
+        "top_signals": top_signals,
+        "latest_reasoning_asof": latest_reasoning_asof,
+        "rows_signals": len(relation_rows),
+        "rows_reasonings": len(reasoning_rows),
     }
 
 
@@ -769,6 +1064,10 @@ def build_report_payload(
         "mode_context": mode_context,
         "event_context": event_context,
         "candidate_context": candidate_context,
+        "relation_context": _build_relation_context(
+            get_relation_rows(limit=max(6, top_candidates * 3), min_abs_score=0.16),
+            get_relation_reasonings(limit=max(6, top_candidates * 3), min_confidence=0.30),
+        ),
         "execution_context": execution_context,
         "guidance_context": _build_guidance_context(mode_context, market_context),
         "ops_context": ops_context,

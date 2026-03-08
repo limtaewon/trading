@@ -131,6 +131,15 @@ def _safe_int(v: Any, default: int = 0) -> int:
         return default
 
 
+def _join_str_list(value: Any, sep: str = ",") -> str:
+    if isinstance(value, list):
+        parts = [str(v).strip() for v in value if str(v).strip()]
+        return sep.join(parts)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def _ensure_table() -> None:
     _ch_execute(
         """
@@ -147,6 +156,13 @@ def _ensure_table() -> None:
             source_tickers         Array(String) DEFAULT [],
             source_urls            Array(String) DEFAULT [],
             evidence_titles        Array(String) DEFAULT [],
+            relation_quality       Float32 DEFAULT 0.5,
+            support_events         UInt16 DEFAULT 0,
+            support_clusters       UInt16 DEFAULT 0,
+            effective_relation_score Float32 DEFAULT 0,
+            source_max_published_at String DEFAULT '',
+            source_max_cluster_asof_ts String DEFAULT '',
+            reason_generated_at    DateTime DEFAULT now(),
             updated_at             DateTime DEFAULT now()
         )
         ENGINE = ReplacingMergeTree(asof_ts)
@@ -154,6 +170,16 @@ def _ensure_table() -> None:
         COMMENT 'LLM이 생성한 인과 추론 보조지표'
         """
     )
+    for ddl in (
+        "ALTER TABLE trading.hidden_relation_reasoning ADD COLUMN IF NOT EXISTS relation_quality Float32 DEFAULT 0.5",
+        "ALTER TABLE trading.hidden_relation_reasoning ADD COLUMN IF NOT EXISTS support_events UInt16 DEFAULT 0",
+        "ALTER TABLE trading.hidden_relation_reasoning ADD COLUMN IF NOT EXISTS support_clusters UInt16 DEFAULT 0",
+        "ALTER TABLE trading.hidden_relation_reasoning ADD COLUMN IF NOT EXISTS effective_relation_score Float32 DEFAULT 0",
+        "ALTER TABLE trading.hidden_relation_reasoning ADD COLUMN IF NOT EXISTS source_max_published_at String DEFAULT ''",
+        "ALTER TABLE trading.hidden_relation_reasoning ADD COLUMN IF NOT EXISTS source_max_cluster_asof_ts String DEFAULT ''",
+        "ALTER TABLE trading.hidden_relation_reasoning ADD COLUMN IF NOT EXISTS reason_generated_at DateTime DEFAULT now()",
+    ):
+        _ch_execute(ddl)
 
 
 def _build_schema_file() -> str:
@@ -206,24 +232,35 @@ def _build_schema_file() -> str:
 def _collect_candidate_signals(min_score: float, top_tickers: int) -> list[dict[str, Any]]:
     min_score = max(0.0, float(min_score))
     top_tickers = max(1, int(top_tickers))
-    return _ch_select(
+    rows = _ch_select(
         f"""
         SELECT
             ticker,
             ticker_name,
             abs(total_relation_score) AS abs_score,
             total_relation_score,
+            relation_quality,
             support_events,
             support_clusters,
             relation_bias,
-            arrayStringConcat(source_tickers, ',') AS source_tickers_str
-        FROM trading.v_hidden_relation_signals
-        WHERE abs(total_relation_score) >= {min_score}
+            abs(total_relation_score) * (0.5 + 0.5 * ifNull(relation_quality, 0.5)) AS effective_relation_score,
+            source_tickers
+        FROM trading.hidden_relation_signals
+        WHERE asof_ts = (SELECT max(asof_ts) FROM trading.hidden_relation_signals)
+          AND abs(total_relation_score) * (0.5 + 0.5 * ifNull(relation_quality, 0.5)) >= {min_score}
           AND ticker != ''
-        ORDER BY abs_score DESC, support_events DESC
+          AND (
+            ifNull(support_events, 0) >= 2
+            OR ifNull(support_clusters, 0) >= 1
+            OR ifNull(relation_quality, 0.5) >= 0.65
+          )
+        ORDER BY effective_relation_score DESC, support_events DESC, support_clusters DESC
         LIMIT {top_tickers}
         """
     )
+    for row in rows:
+        row["source_tickers_str"] = _join_str_list(row.get("source_tickers"))
+    return rows
 
 
 @dataclass
@@ -233,6 +270,43 @@ class CandidateContext:
     relation: dict[str, Any]
     events: list[dict[str, Any]]
     states: list[dict[str, Any]]
+
+
+def _chunked(rows: list[CandidateContext], size: int) -> list[list[CandidateContext]]:
+    chunk = max(1, int(size))
+    return [rows[i:i + chunk] for i in range(0, len(rows), chunk)]
+
+
+def _latest_text(rows: list[dict[str, Any]], key: str) -> str:
+    latest = ""
+    for row in rows:
+        val = str(row.get(key, "") or "").strip()
+        if val and val > latest:
+            latest = val
+    return latest
+
+
+def _augment_reasonings(parsed: list[dict[str, Any]], contexts: list[CandidateContext]) -> list[dict[str, Any]]:
+    ctx_map = {c.ticker: c for c in contexts}
+    out: list[dict[str, Any]] = []
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for row in parsed:
+        ticker = str(row.get("ticker", "")).strip()
+        ctx = ctx_map.get(ticker)
+        if not ctx:
+            out.append(row)
+            continue
+        rel = ctx.relation or {}
+        merged = dict(row)
+        merged["relation_quality"] = round(_safe_float(rel.get("relation_quality", 0.5), 0.5), 4)
+        merged["support_events"] = _safe_int(rel.get("support_events", 0))
+        merged["support_clusters"] = _safe_int(rel.get("support_clusters", 0))
+        merged["effective_relation_score"] = round(_safe_float(rel.get("effective_relation_score", 0.0), 0.0), 6)
+        merged["source_max_published_at"] = _latest_text(ctx.events, "published_at_s")
+        merged["source_max_cluster_asof_ts"] = _latest_text(ctx.states, "asof_ts_s")
+        merged["reason_generated_at"] = generated_at
+        out.append(merged)
+    return out
 
 
 def _collect_event_context(ticker: str, hours: int, limit: int) -> list[dict[str, Any]]:
@@ -306,6 +380,8 @@ def _build_prompt(candidates: list[CandidateContext]) -> str:
         lines.append(
             "- relation_score: "
             f"{_safe_float(relation.get('total_relation_score', 0), 0):+.3f}, "
+            f"effective={_safe_float(relation.get('effective_relation_score', 0), 0):+.3f}, "
+            f"quality={_safe_float(relation.get('relation_quality', 0.5), 0.5):.2f}, "
             f"bias={relation.get('relation_bias', 'neutral')}, "
             f"events={_safe_int(relation.get('support_events', 0))}, "
             f"clusters={_safe_int(relation.get('support_clusters', 0))}, "
@@ -447,6 +523,8 @@ def _collect_context(candidates: list[dict[str, Any]], lookback_hours: int, even
                 ticker_name=str(r.get("ticker_name", "")).strip(),
                 relation={
                     "total_relation_score": _safe_float(r.get("total_relation_score", 0.0)),
+                    "effective_relation_score": _safe_float(r.get("effective_relation_score", 0.0)),
+                    "relation_quality": _safe_float(r.get("relation_quality", 0.5), 0.5),
                     "relation_bias": str(r.get("relation_bias", "neutral")),
                     "support_events": _safe_int(r.get("support_events", 0)),
                     "support_clusters": _safe_int(r.get("support_clusters", 0)),
@@ -466,12 +544,21 @@ def main() -> None:
     parser.add_argument("--top-tickers", type=int, default=30)
     parser.add_argument("--events-per-ticker", type=int, default=5)
     parser.add_argument("--states-per-ticker", type=int, default=3)
-    parser.add_argument("--codex-bin", default=os.getenv("CODEX_BIN", "openclaw"))
+    parser.add_argument(
+        "--codex-bin",
+        default=(
+            os.getenv("TRADING_CODEX_BIN")
+            or os.getenv("CODEX_TRADING_BIN")
+            or os.getenv("CODEX_BIN")
+            or "codex"
+        ),
+    )
     parser.add_argument("--model", default=os.getenv("CODEX_MODEL", MODEL_DEFAULT))
     parser.add_argument("--cache-ttl-sec", type=int, default=CODEX_CACHE_TTL_SEC)
     parser.add_argument("--timeout-sec", type=int, default=CODEX_EXEC_TIMEOUT)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--max-events-context", type=int, default=MAX_EVENT_CONTEXT)
+    parser.add_argument("--batch-size", type=int, default=int(os.getenv("LLM_RELATION_BATCH_SIZE", "6")))
     parser.add_argument("--workdir", default=str(Path.home()))
     args = parser.parse_args()
 
@@ -501,23 +588,27 @@ def main() -> None:
         LOGGER.warning("No candidate contexts available.")
         return
 
-    prompt = _build_prompt(contexts)
-    if len(prompt) > max_events_context:
-        prompt = prompt[:max_events_context]
-
-    raw = _call_llm(
-        prompt=prompt,
-        timeout_sec=args.timeout_sec,
-        cache_ttl_sec=args.cache_ttl_sec,
-        workdir=args.workdir,
-        codex_bin=args.codex_bin,
-        model=args.model or MODEL_DEFAULT,
-    )
-    if not raw.strip():
-        LOGGER.warning("empty LLM output")
-        return
-
-    parsed = _parse_llm_output(raw)
+    parsed: list[dict[str, Any]] = []
+    for idx, batch in enumerate(_chunked(contexts, args.batch_size), start=1):
+        prompt = _build_prompt(batch)
+        if len(prompt) > max_events_context:
+            prompt = prompt[:max_events_context]
+        raw = _call_llm(
+            prompt=prompt,
+            timeout_sec=args.timeout_sec,
+            cache_ttl_sec=args.cache_ttl_sec,
+            workdir=args.workdir,
+            codex_bin=args.codex_bin,
+            model=args.model or MODEL_DEFAULT,
+        )
+        if not raw.strip():
+            LOGGER.warning("empty LLM output batch=%d", idx)
+            continue
+        batch_rows = _parse_llm_output(raw)
+        if not batch_rows:
+            LOGGER.warning("empty parsed reasonings batch=%d", idx)
+            continue
+        parsed.extend(_augment_reasonings(batch_rows, batch))
     if not parsed:
         LOGGER.warning("empty parsed reasonings")
         return

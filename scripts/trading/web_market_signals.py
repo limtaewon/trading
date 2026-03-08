@@ -111,16 +111,20 @@ def _fetch_query(topic: str, query: str, timeout_sec: int = 5) -> list[WebSignal
     return out
 
 
-def fetch_web_market_signals(limit: int = 12, timeout_sec: int = 5) -> list[dict[str, Any]]:
-    """Fetch macro web headlines for supplementary context.
-
-    Returns deduplicated list with stable keys. Never raises.
-    """
+def fetch_google_news_signals(
+    queries: list[tuple[str, str]],
+    limit: int = 12,
+    timeout_sec: int = 5,
+    per_query: int = 12,
+) -> list[dict[str, Any]]:
+    """Fetch deduplicated Google News RSS results for custom query sets."""
     lim = max(1, int(limit))
+    each = max(1, int(per_query))
     all_items: list[WebSignal] = []
-    for topic, query in TOPIC_QUERIES:
+    for topic, query in queries:
         try:
-            all_items.extend(_fetch_query(topic=topic, query=query, timeout_sec=timeout_sec))
+            rows = _fetch_query(topic=topic, query=query, timeout_sec=timeout_sec)
+            all_items.extend(rows[:each])
         except Exception:
             continue
 
@@ -135,6 +139,14 @@ def fetch_web_market_signals(limit: int = 12, timeout_sec: int = 5) -> list[dict
 
     dedup.sort(key=lambda x: str(x.get("published_at", "")), reverse=True)
     return dedup[:lim]
+
+
+def fetch_web_market_signals(limit: int = 12, timeout_sec: int = 5) -> list[dict[str, Any]]:
+    """Fetch macro web headlines for supplementary context.
+
+    Returns deduplicated list with stable keys. Never raises.
+    """
+    return fetch_google_news_signals(TOPIC_QUERIES, limit=limit, timeout_sec=timeout_sec)
 
 
 if __name__ == "__main__":

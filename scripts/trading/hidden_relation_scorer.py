@@ -490,8 +490,17 @@ def build_scores(lookback_hours: int, limit: int, max_tickers: int) -> list[dict
         age_h = max(0.0, (now - pub_dt).total_seconds() / 3600.0)
         decay = max(0.20, math.exp(-age_h / 96.0))
 
+        event_type = str(r.get("event_type", "") or "other").strip()
+        horizon = str(r.get("time_horizon", "") or "1-3d").strip()
         sentiment = str(r.get("sentiment", "") or "neutral").strip().lower()
-        sent_sign = 1.0 if sentiment == "positive" else (-1.0 if sentiment == "negative" else 0.0)
+        if sentiment == "positive":
+            sent_sign = 1.0
+        elif sentiment == "negative":
+            sent_sign = -1.0
+        elif event_type in {"policy", "regulation", "supply_chain", "macro_data", "index_flow", "guidance"}:
+            sent_sign = 0.18
+        else:
+            sent_sign = 0.0
         if sent_sign == 0.0:
             continue
 
@@ -502,8 +511,6 @@ def build_scores(lookback_hours: int, limit: int, max_tickers: int) -> list[dict
         channels = _as_str_list(r.get("channels", []), max_items=10, max_len=24)
         channel_w = _channel_weight(channels)
 
-        event_type = str(r.get("event_type", "") or "other").strip()
-        horizon = str(r.get("time_horizon", "") or "1-3d").strip()
         mem_w, calib = quality_map.get((event_type, horizon), (1.0, 0.5))
         base = sent_sign * importance * conf_w * decay * channel_w * mem_w
 

@@ -59,6 +59,17 @@ def _blocked_actions_text(actions: list[str]) -> str:
 
 
 def _candidate_public_reason(candidate: dict[str, Any]) -> str:
+    relation = candidate.get("relation")
+    if isinstance(relation, dict):
+        summary = str(relation.get("summary") or "").strip()
+        quality = float(relation.get("quality") or 0)
+        effective = float(relation.get("effective_score") or 0)
+        events = int(float(relation.get("support_events") or 0))
+        clusters = int(float(relation.get("support_clusters") or 0))
+        if summary and quality >= 0.65 and effective >= 2.0:
+            return f"내부 연관 데이터에서 반복 확인된 이유는 {summary}"
+        if effective >= 4.0:
+            return f"내부 연관 신호가 강하게 잡히고 있고, 이벤트 {events}건과 클러스터 {clusters}건에서 반복 확인됩니다."
     thesis = str(candidate.get("thesis") or "").strip()
     flow = candidate.get("flow")
     technical = candidate.get("technical")
@@ -158,12 +169,14 @@ def render_public_market_message(payload: dict[str, Any]) -> str:
     mode_context = _ctx(payload, "mode_context")
     event_context = _ctx(payload, "event_context")
     candidate_context = _ctx(payload, "candidate_context")
+    relation_context = _ctx(payload, "relation_context")
     guidance_context = _ctx(payload, "guidance_context")
 
     index = _ctx(market_context, "index")
     macro = _ctx(market_context, "macro")
     market_phase = _ctx(market_context, "market_phase")
     top_candidates = candidate_context.get("top_candidates", [])
+    top_relations = relation_context.get("top_signals", [])
     triggers = _ctx(mode_context, "mode_change_triggers").get("bullish_reenable", [])
     report_date = _generated_date(payload)
     risk_text = _stress_risk_text(market_context)
@@ -178,6 +191,14 @@ def render_public_market_message(payload: dict[str, Any]) -> str:
             name = str(candidate.get("name") or candidate.get("ticker") or "-").strip()
             reason = _candidate_public_reason(candidate)
             watch_lines.append(f"- {name}: {reason} 지금은 바로 추격하기보다 흐름이 이어지는지 확인이 먼저입니다.")
+    if not watch_lines and isinstance(top_relations, list):
+        for relation in top_relations[:2]:
+            if not isinstance(relation, dict):
+                continue
+            name = str(relation.get("name") or relation.get("ticker") or "-").strip()
+            why = str(relation.get("why_candidate") or "").strip()
+            if why:
+                watch_lines.append(f"- {name}: {why} 지금은 신규 진입보다 확인과 관찰이 우선입니다.")
 
     headline = str(market_phase.get("summary") or "시장 해석 데이터가 부족합니다.").strip()
     event_line = _event_summary(event_context, market_context)
