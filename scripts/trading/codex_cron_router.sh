@@ -38,8 +38,10 @@ PROMPT_FILE="$BASE/workspace/CODEX_PERSISTENT_MEMORY.md"
 ORDER_EXEC="$TRADING_SCRIPTS/execute_gpt_orders.py"
 DECISION_REPORT="$TRADING_SCRIPTS/send_decision_dryrun_telegram.py"
 COIN_RUNNER="$BASE/scripts/coin_codex_runner.py"
-LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-openclaw}}"
-CODEX_BIN="${CODEX_BIN:-openclaw}"
+LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-codex_exec}}"
+TRADING_CODEX_BIN="${TRADING_CODEX_BIN:-${CODEX_TRADING_BIN:-${CODEX_BIN:-codex}}}"
+CODEX_BIN="$TRADING_CODEX_BIN"
+OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 CODEX_MODEL="${CODEX_MODEL:-${OPENCLAW_PRIMARY_MODEL:-gpt-5.4}}"
 CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-${OPENCLAW_FALLBACK_MODEL:-}}"
 CODEX_FALLBACK_ON_ANY_ERROR="${CODEX_FALLBACK_ON_ANY_ERROR:-}"
@@ -236,33 +238,46 @@ if [[ "$PAYLOAD_KIND" == "systemEvent" ]]; then
     fi
     fi
     elif [[ "$PAYLOAD_KIND" == "agentTurn" ]]; then
-        if [[ "${LLM_BACKEND}" != "openclaw" ]]; then
-            STATUS="error"
-            ERROR_MSG="agentTurn requires openclaw backend"
-        else
-            # Briefing/announce run
-            TMP_PROMPT="/tmp/codex_agentturn_prompt_$$.txt"
-            TMP_OUT="/tmp/codex_agentturn_out_$$.txt"
+        # Briefing/announce run
+        TMP_PROMPT="/tmp/codex_agentturn_prompt_$$.txt"
+        TMP_OUT="/tmp/codex_agentturn_out_$$.txt"
 
-            {
-                echo "너는 한국 주식시장 운영 에이전트다."
-                echo "아래 지시사항대로 사용자에게 보낼 메시지를 작성하라."
+        {
+            echo "너는 한국 주식시장 운영 에이전트다."
+            echo "아래 지시사항대로 사용자에게 보낼 메시지를 작성하라."
+            echo ""
+            if [[ -f "$PROMPT_FILE" ]]; then
+                echo "## 영구 메모리"
+                cat "$PROMPT_FILE"
                 echo ""
-                if [[ -f "$PROMPT_FILE" ]]; then
-                    echo "## 영구 메모리"
-                    cat "$PROMPT_FILE"
-                    echo ""
+            fi
+            echo "## 지시사항"
+            echo "$EVENT_TEXT"
+            echo ""
+            echo "출력 규칙:"
+            echo "- 한국어 평문"
+            echo "- 불필요한 서론 금지"
+            echo "- 지시사항의 줄수 제한 준수"
+        } > "$TMP_PROMPT"
+
+        if [[ "$LLM_BACKEND" == "codex_exec" ]]; then
+            if "$CODEX_BIN" exec \
+                --skip-git-repo-check \
+                --dangerously-bypass-approvals-and-sandbox \
+                --model "$CODEX_MODEL" \
+                --output-last-message "$TMP_OUT" \
+                - < "$TMP_PROMPT" >> "$LOG_FILE" 2>&1; then
+                MSG="$(cat "$TMP_OUT")"
+                if ! python3 "$BASE/scripts/telegram_notify.py" "$MSG" >> "$LOG_FILE" 2>&1; then
+                    STATUS="error"
+                    ERROR_MSG="telegram notify failed"
                 fi
-                echo "## 지시사항"
-                echo "$EVENT_TEXT"
-                echo ""
-                echo "출력 규칙:"
-                echo "- 한국어 평문"
-                echo "- 불필요한 서론 금지"
-                echo "- 지시사항의 줄수 제한 준수"
-            } > "$TMP_PROMPT"
-
-            if python3 - "$CODEX_BIN" "$OPENCLAW_SESSION_ID" "$TMP_PROMPT" "$TMP_OUT" "$CODEX_MODEL" "$CODEX_FALLBACK_MODEL" "$CODEX_FALLBACK_ON_ANY_ERROR" <<'PY' >> "$LOG_FILE" 2>&1; then
+            else
+                STATUS="error"
+                ERROR_MSG="codex exec for agentTurn failed"
+            fi
+        elif [[ "$LLM_BACKEND" == "openclaw" ]]; then
+            if python3 - "$OPENCLAW_BIN" "$OPENCLAW_SESSION_ID" "$TMP_PROMPT" "$TMP_OUT" "$CODEX_MODEL" "$CODEX_FALLBACK_MODEL" "$CODEX_FALLBACK_ON_ANY_ERROR" <<'PY' >> "$LOG_FILE" 2>&1; then
 import json
 import pathlib
 import subprocess
@@ -351,8 +366,11 @@ PY
                 STATUS="error"
                 ERROR_MSG="openclaw agent for agentTurn failed"
             fi
-            rm -f "$TMP_PROMPT" "$TMP_OUT"
+        else
+            STATUS="error"
+            ERROR_MSG="unsupported LLM_BACKEND for agentTurn"
         fi
+        rm -f "$TMP_PROMPT" "$TMP_OUT"
 elif [[ "$PAYLOAD_KIND" == "command" ]]; then
     CMD="$(printf '%s' "$JOB_JSON" | jq -r '.payload.command // ""')"
     if [[ -z "$CMD" ]]; then

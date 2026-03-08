@@ -125,6 +125,24 @@ def _cache_key(
     return _sha256_text(json.dumps(payload, sort_keys=True, ensure_ascii=False))
 
 
+def _cache_key_direct_codex(
+    prompt: str,
+    codex_bin: str,
+    model: str,
+    workdir: str,
+    output_schema_path: Optional[str] = None,
+) -> str:
+    payload = {
+        "backend": "codex_exec",
+        "codex_bin": str(Path(codex_bin).resolve()) if codex_bin and Path(codex_bin).exists() else codex_bin,
+        "model": model or "",
+        "workdir": workdir or "",
+        "schema": _schema_signature(output_schema_path),
+        "prompt": prompt,
+    }
+    return _sha256_text(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+
+
 def _cache_file(cache_root: Path, key: str) -> Path:
     return cache_root / f"{key}.json"
 
@@ -520,6 +538,68 @@ def run_codex_cached(
                 workdir=workdir or None,
                 timeout_sec=timeout_sec,
                 base_args=base_args_list,
+                output_schema_path=output_schema_path,
+            )
+
+    return output
+
+
+def run_codex_exec_cached(
+    *,
+    prompt: str,
+    codex_bin: str,
+    model: Optional[str],
+    workdir: Optional[str],
+    timeout_sec: int,
+    output_schema_path: Optional[str] = None,
+    cache_dir: Optional[str] = None,
+    cache_ttl_sec: int = DEFAULT_CACHE_TTL_SEC,
+    cache_lock_wait_sec: int = DEFAULT_CACHE_LOCK_WAIT,
+) -> str:
+    normalized_model = normalize_model_name(model or "")
+    final_prompt = _inject_schema_hint(prompt, output_schema_path)
+
+    key = _cache_key_direct_codex(
+        prompt=final_prompt,
+        codex_bin=codex_bin,
+        model=normalized_model,
+        workdir=workdir or "",
+        output_schema_path=output_schema_path,
+    )
+
+    root = Path(cache_dir or DEFAULT_CACHE_DIR)
+    cache_root = root / "cache"
+    lock_root = root / "locks"
+    cache_file = _cache_file(cache_root, key)
+
+    if cache_ttl_sec > 0:
+        cached = _read_cache(cache_file, ttl_sec=cache_ttl_sec)
+        if cached is not None:
+            return cached
+
+    output = ""
+    with _file_lock(lock_root / f"{key}.lock", wait_sec=cache_lock_wait_sec):
+        if cache_ttl_sec > 0:
+            cached = _read_cache(cache_file, ttl_sec=cache_ttl_sec)
+            if cached is not None:
+                output = cached
+            else:
+                output = _run_codex_exec_fallback(
+                    prompt=final_prompt,
+                    codex_bin=codex_bin,
+                    model=normalized_model,
+                    workdir=workdir or None,
+                    timeout_sec=timeout_sec,
+                    output_schema_path=output_schema_path,
+                )
+                _write_cache(cache_file, output)
+        else:
+            output = _run_codex_exec_fallback(
+                prompt=final_prompt,
+                codex_bin=codex_bin,
+                model=normalized_model,
+                workdir=workdir or None,
+                timeout_sec=timeout_sec,
                 output_schema_path=output_schema_path,
             )
 

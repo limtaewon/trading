@@ -1,10 +1,10 @@
 #!/bin/bash
-# codex_brain.sh — OpenClaw 2-Tier 두뇌 상담 (Codex CLI 버전)
+# codex_brain.sh — 매매 판단 두뇌 실행기
 #
 # 흐름:
 #   1. prepare_gpt_prompt.py → 프롬프트 생성
-#   2. openclaw agent → GPT 두뇌에 전달 → 구조화된 JSON 응답
-#      (codex exec 폴백은 기본 비활성화)
+#   2. codex exec 직접 호출 → 구조화된 JSON 응답
+#      (필요 시 openclaw agent로 우회 가능)
 #   3. 응답 파일 저장 → codex_cron_router/execute_gpt_orders.py가 주문 실행
 #
 # 사용법:
@@ -25,8 +25,8 @@ PROMPT_FILE="${OPENCLAW_PROMPT_FILE:-$DEFAULT_PROMPT_FILE}"
 RESPONSE_FILE="${OPENCLAW_RESPONSE_FILE:-$DEFAULT_RESPONSE_FILE}"
 SCHEMA_FILE="$SCRIPTS_DIR/trading_response_schema.json"
 EXECUTION_MODE_FILE="${OPENCLAW_EXECUTION_MODE_FILE:-$HOME/.openclaw/state/market_execution_mode.json}"
-LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-openclaw}}"
-CODEX_BIN="${CODEX_BIN:-openclaw}"
+LLM_BACKEND="${LLM_EXEC_BACKEND:-${OPENCLAW_LLM_BACKEND:-codex_exec}}"
+TRADING_CODEX_BIN="${TRADING_CODEX_BIN:-${CODEX_TRADING_BIN:-${CODEX_BIN:-codex}}}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 CODEX_MODEL="${CODEX_MODEL:-${OPENCLAW_PRIMARY_MODEL:-gpt-5.4}}"
 TIMEOUT_SEC="${CODEX_TIMEOUT:-180}"  # 3분 타임아웃
@@ -115,6 +115,25 @@ resolve_codex_fallback_bin() {
     return 1
 }
 
+resolve_trading_codex_bin() {
+    for cand in \
+        "$TRADING_CODEX_BIN" \
+        "/opt/homebrew/bin/codex" \
+        "/usr/local/bin/codex" \
+        "/usr/bin/codex" \
+        "codex"; do
+        if [ -n "$cand" ] && command -v "$cand" >/dev/null 2>&1; then
+            command -v "$cand"
+            return 0
+        fi
+        if [ -x "$cand" ] 2>/dev/null; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
 run_codex_exec_fallback() {
     local fallback_bin
     local fallback_log="/tmp/codex_exec_fallback.log"
@@ -154,6 +173,48 @@ run_codex_exec_fallback() {
         fi
     fi
     tail -n 30 "$fallback_log" 2>/dev/null | while read -r line; do log "  $line"; done
+    return 1
+}
+
+run_codex_exec_primary() {
+    local direct_bin
+    local direct_log="/tmp/codex_exec_primary.log"
+    if ! direct_bin="$(resolve_trading_codex_bin)"; then
+        log "  codex exec 직접 호출 바이너리를 찾지 못함"
+        return 1
+    fi
+    log "  codex exec 직접 호출: $direct_bin"
+    : > "$direct_log"
+    if run_with_timeout "${TIMEOUT_SEC}" \
+        "$direct_bin" exec \
+        --skip-git-repo-check \
+        --dangerously-bypass-approvals-and-sandbox \
+        --model "$CODEX_MODEL" \
+        --output-schema "$SCHEMA_FILE" \
+        --output-last-message "$RESPONSE_FILE" \
+        - < "$PROMPT_FILE" >"$direct_log" 2>&1; then
+        if [[ -s "$RESPONSE_FILE" ]]; then
+            return 0
+        fi
+        log "  codex exec 직접 호출 응답이 비어 있음"
+    fi
+
+    if rg -qi "invalid_json_schema|invalid schema for response_format" "$direct_log"; then
+        log "  codex output-schema 비호환 감지 → schema 없이 재시도"
+        if run_with_timeout "${TIMEOUT_SEC}" \
+            "$direct_bin" exec \
+            --skip-git-repo-check \
+            --dangerously-bypass-approvals-and-sandbox \
+            --model "$CODEX_MODEL" \
+            --output-last-message "$RESPONSE_FILE" \
+            - < "$PROMPT_FILE" >>"$direct_log" 2>&1; then
+            if [[ -s "$RESPONSE_FILE" ]]; then
+                return 0
+            fi
+            log "  codex exec 직접 호출 재시도 응답도 비어 있음"
+        fi
+    fi
+    tail -n 30 "$direct_log" 2>/dev/null | while read -r line; do log "  $line"; done
     return 1
 }
 
@@ -219,7 +280,7 @@ PY
 }
 
 # ── 1단계: 프롬프트 생성 ────────────────────────────────────────────────────
-log "=== OpenClaw Codex Brain 시작 ==="
+log "=== Trading Codex Brain 시작 ==="
 log "[1/3] 프롬프트 생성 중..."
 
 python3 "$SCRIPTS_DIR/prepare_gpt_prompt.py" --output "$PROMPT_FILE" 2>&1 | while read -r line; do
@@ -250,7 +311,63 @@ CACHE_HIT="${CACHE_HIT:-0}"
 # ── 2단계: LLM 호출 ─────────────────────────────────────────────────────
 log "[2/3] LLM 호출 중..."
 
-if [[ "${LLM_BACKEND}" == "openclaw" ]]; then
+if [[ "${LLM_BACKEND}" == "codex_exec" ]]; then
+    if [[ "${CACHE_HIT}" != "1" ]]; then
+        WAITED=0
+        LOCK_OK=0
+        while true; do
+            if [[ -d "$CACHE_LOCK_DIR" ]]; then
+                LOCK_PID=""
+                if [[ -f "$CACHE_LOCK_DIR/pid" ]]; then
+                    LOCK_PID="$(cat "$CACHE_LOCK_DIR/pid" 2>/dev/null || true)"
+                fi
+                if [[ -n "$LOCK_PID" ]] && ! ps -p "$LOCK_PID" >/dev/null 2>&1; then
+                    rm -rf "$CACHE_LOCK_DIR" >/dev/null 2>&1 || true
+                elif [[ -z "$LOCK_PID" ]]; then
+                    rm -rf "$CACHE_LOCK_DIR" >/dev/null 2>&1 || true
+                fi
+            fi
+
+            if mkdir "$CACHE_LOCK_DIR" 2>/dev/null; then
+                LOCK_OK=1
+                echo "$$" > "$CACHE_LOCK_DIR/pid"
+                break
+            fi
+            if codex_cache_fresh "$CACHE_FILE" "$CODEX_BRAIN_CACHE_TTL"; then
+                cp "$CACHE_FILE" "$RESPONSE_FILE"
+                CACHE_HIT=1
+                break
+            fi
+            if (( WAITED >= CODEX_BRAIN_LOCK_WAIT )); then
+                break
+            fi
+            sleep 1
+            WAITED=$((WAITED + 1))
+        done
+
+        if [[ "${CACHE_HIT}" != "1" ]]; then
+            if [[ "$LOCK_OK" -ne 1 ]] && codex_cache_fresh "$CACHE_FILE" "$CODEX_BRAIN_CACHE_TTL"; then
+                cp "$CACHE_FILE" "$RESPONSE_FILE"
+                CACHE_HIT=1
+            fi
+        fi
+
+        if [[ "${CACHE_HIT}" != "1" ]]; then
+            if run_codex_exec_primary; then
+                cp "$RESPONSE_FILE" "$CACHE_FILE"
+            elif [[ "$ENABLE_CODEX_EXEC_FALLBACK" == "1" ]] && run_codex_exec_fallback; then
+                cp "$RESPONSE_FILE" "$CACHE_FILE"
+            else
+                [[ "${LOCK_OK:-0}" -eq 1 ]] && rm -rf "$CACHE_LOCK_DIR" || true
+                die "codex exec 직접 호출 실패"
+            fi
+        fi
+
+        if [[ "${LOCK_OK:-0}" -eq 1 ]]; then
+            rm -rf "$CACHE_LOCK_DIR" || true
+        fi
+    fi
+elif [[ "${LLM_BACKEND}" == "openclaw" ]]; then
     if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
         for try_path in \
             "$HOME/.npm-global/bin/openclaw" \
@@ -471,7 +588,7 @@ PY
         fi
     fi
 else
-    die "codex 브레인 실행기는 openclaw 우선 경로만 지원합니다. LLM_BACKEND=openclaw 로 설정하세요."
+    die "지원하지 않는 LLM_BACKEND=${LLM_BACKEND} (codex_exec 또는 openclaw)"
 fi
 
 # ── 3단계: 응답 검증 ───────────────────────────────────────────────────────

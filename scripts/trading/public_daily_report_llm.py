@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from codex_exec_guard import run_codex_cached
+from codex_exec_guard import run_codex_exec_cached
 from llm_model_config import resolve_model
 
 
@@ -43,7 +43,11 @@ def render_public_report(
     prompt_env_key: str = "TELEGRAM_PUBLIC_DAILY_PROMPT_FILE",
     model_env_key: str = "TELEGRAM_PUBLIC_DAILY_LLM_MODEL",
 ) -> tuple[str, str]:
-    codex_bin = os.getenv("CODEX_BIN", os.getenv("OPENCLAW_BIN", "openclaw")).strip() or "openclaw"
+    codex_bin = (
+        os.getenv("REPORT_CODEX_BIN", "").strip()
+        or os.getenv("CODEX_REPORT_BIN", "").strip()
+        or "codex"
+    )
     resolved = shutil.which(codex_bin) or codex_bin
     if not shutil.which(resolved) and not Path(resolved).exists():
         return "", f"codex_not_found:{resolved}"
@@ -63,17 +67,16 @@ def render_public_report(
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as sf:
             schema_path = sf.name
             json.dump(schema, sf, ensure_ascii=False)
-        raw = run_codex_cached(
+        raw = run_codex_exec_cached(
             prompt=prompt,
             codex_bin=resolved,
             model=resolve_model(model_env_key, "CODEX_MODEL"),
             workdir=None,
             timeout_sec=max(40, int(timeout_sec)),
-            base_args=["--skip-git-repo-check", "--full-auto"],
             output_schema_path=schema_path,
-            cache_dir=os.getenv("CODEX_EXEC_CACHE_DIR", os.path.expanduser("~/.openclaw/cache/codex-exec")),
-            cache_ttl_sec=int(os.getenv("TELEGRAM_PUBLIC_DAILY_CACHE_TTL", os.getenv("CODEX_EXEC_CACHE_TTL", "180"))),
-            cache_lock_wait_sec=int(os.getenv("CODEX_EXEC_CACHE_LOCK_WAIT", "20")),
+            cache_dir=os.getenv("REPORT_CODEX_CACHE_DIR", os.path.expanduser("~/.openclaw/cache/codex-exec/reporting")),
+            cache_ttl_sec=int(os.getenv("REPORT_CODEX_CACHE_TTL", os.getenv("TELEGRAM_PUBLIC_DAILY_CACHE_TTL", os.getenv("CODEX_EXEC_CACHE_TTL", "180")))),
+            cache_lock_wait_sec=int(os.getenv("REPORT_CODEX_CACHE_LOCK_WAIT", os.getenv("CODEX_EXEC_CACHE_LOCK_WAIT", "20"))),
         )
         obj = _parse_first_json_object(raw)
         if not obj:

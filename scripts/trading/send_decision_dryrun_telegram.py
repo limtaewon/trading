@@ -362,11 +362,16 @@ def _run_llm_summary(context: dict[str, Any], timeout_sec: int = 90) -> tuple[di
         sys.path.insert(0, here)
 
     try:
-        from codex_exec_guard import run_codex_cached  # type: ignore
+        from codex_exec_guard import run_codex_exec_cached  # type: ignore
     except Exception as e:
         return None, f"import_failed:{type(e).__name__}:{e}"
 
-    codex_bin = os.getenv("CODEX_BIN", os.getenv("OPENCLAW_BIN", "openclaw")).strip() or "openclaw"
+    codex_bin = (
+        os.getenv("REPORT_CODEX_BIN", "").strip()
+        or os.getenv("CODEX_REPORT_BIN", "").strip()
+        or os.getenv("CODEX_BIN", "").strip()
+        or "codex"
+    )
     resolved = shutil.which(codex_bin) or codex_bin
     if not shutil.which(resolved) and not Path(resolved).exists():
         return None, f"codex_not_found:{resolved}"
@@ -422,18 +427,17 @@ def _run_llm_summary(context: dict[str, Any], timeout_sec: int = 90) -> tuple[di
             schema_path = sf.name
             json.dump(schema, sf, ensure_ascii=False)
 
-        raw = run_codex_cached(
+        raw = run_codex_exec_cached(
             prompt=prompt,
-            codex_bin=resolved,
+            codex_bin=os.getenv("REPORT_CODEX_BIN", os.getenv("CODEX_REPORT_BIN", resolved)).strip() or resolved,
             model=resolve_model("CODEX_MODEL"),
             workdir=None,
             timeout_sec=max(30, int(timeout_sec)),
-            base_args=["--skip-git-repo-check", "--full-auto"],
             output_schema_path=schema_path,
-            cache_dir=os.getenv("CODEX_EXEC_CACHE_DIR", os.path.expanduser("~/.openclaw/cache/codex-exec")),
-            cache_ttl_sec=int(os.getenv("STOCK_REPORT_CODEX_CACHE_TTL", os.getenv("CODEX_EXEC_CACHE_TTL", "180"))),
+            cache_dir=os.getenv("REPORT_CODEX_CACHE_DIR", os.path.expanduser("~/.openclaw/cache/codex-exec/reporting")),
+            cache_ttl_sec=int(os.getenv("STOCK_REPORT_CODEX_CACHE_TTL", os.getenv("REPORT_CODEX_CACHE_TTL", os.getenv("CODEX_EXEC_CACHE_TTL", "180")))),
             cache_lock_wait_sec=int(
-                os.getenv("STOCK_REPORT_CODEX_CACHE_LOCK_WAIT", os.getenv("CODEX_EXEC_CACHE_LOCK_WAIT", "20"))
+                os.getenv("STOCK_REPORT_CODEX_CACHE_LOCK_WAIT", os.getenv("REPORT_CODEX_CACHE_LOCK_WAIT", os.getenv("CODEX_EXEC_CACHE_LOCK_WAIT", "20")))
             ),
         )
         obj = _parse_first_json_object(raw)

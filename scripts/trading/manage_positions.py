@@ -29,7 +29,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
-from codex_exec_guard import run_codex_cached
+from codex_exec_guard import run_codex_exec_cached
 from env_bootstrap import bootstrap_openclaw_env
 from llm_model_config import resolve_model
 
@@ -891,15 +891,14 @@ def run_llm_review(prompt: str) -> tuple[dict[str, Any] | None, str]:
     if not POSITION_SCHEMA_FILE.exists():
         return None, "schema_missing"
     try:
-        raw = run_codex_cached(
+        raw = run_codex_exec_cached(
             prompt=prompt,
-            codex_bin=os.getenv("CODEX_BIN", "openclaw"),
+            codex_bin=os.getenv("POSITION_MANAGER_CODEX_BIN", os.getenv("CODEX_TRADING_BIN", os.getenv("CODEX_BIN", "codex"))),
             model=resolve_model("POSITION_MANAGER_MODEL", "CODEX_MODEL"),
             workdir=str(SCRIPT_DIR),
             timeout_sec=POSITION_MANAGER_LLM_TIMEOUT_SEC,
-            base_args=[],
             output_schema_path=str(POSITION_SCHEMA_FILE),
-            cache_dir=os.getenv("CODEX_EXEC_CACHE_DIR", str(HOME / ".openclaw" / "cache" / "codex-exec")),
+            cache_dir=os.getenv("TRADING_CODEX_CACHE_DIR", str(HOME / ".openclaw" / "cache" / "codex-exec" / "trading")),
             cache_ttl_sec=POSITION_MANAGER_CACHE_TTL_SEC,
         )
     except Exception as e:
