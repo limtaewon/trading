@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import hashlib
 import html
 import json
 import os
@@ -28,9 +29,29 @@ from llm_model_config import resolve_model
 
 bootstrap_openclaw_env()
 
+STATE_FILE = Path.home() / ".openclaw" / "state" / "reporting" / "owner_decision_digest.json"
+
 
 def _log(msg: str) -> None:
     print(f"{dt.datetime.now().strftime('%H:%M:%S')} [dryrun-report] {msg}", flush=True)
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    try:
+        if path.exists():
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(obj, dict):
+                return obj
+    except Exception:
+        pass
+    return {}
+
+
+def _save_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _ch_url_and_headers() -> tuple[str, dict[str, str]]:
@@ -870,6 +891,14 @@ LIMIT 20
 
 
 def build_message(decision_id: str, top_n: int, clusters_n: int) -> str:
+    stable_candidates: list[dict[str, Any]] = []
+    try:
+        from query_decision_candidates import get_candidates as _stable_get_candidates
+
+        stable_candidates = _stable_get_candidates(decision_id, max(1, int(top_n)))
+    except Exception:
+        stable_candidates = []
+
     run_rows = _safe_ch_select(
         f"""
 SELECT
@@ -988,6 +1017,31 @@ ORDER BY c.total_score DESC
 LIMIT {int(max(top_n * 6, 60))}
 """
         )
+    if not cand_rows_all and stable_candidates:
+        cand_rows_all = [
+            {
+                "ticker": str(row.get("ticker") or ""),
+                "ticker_name": str(row.get("ticker_name") or row.get("ticker") or ""),
+                "action": str(row.get("action") or ""),
+                "total_score": _float(row.get("total_score"), 0.0),
+                "absolute_block_reason": [
+                    x.strip() for x in str(row.get("absolute_block_reason") or "").split(",") if x.strip()
+                ],
+                "stage5_fail_codes": [
+                    x.strip() for x in str(row.get("fail_codes") or "").split(",") if x.strip()
+                ],
+                "stage5_exec_multiplier": 1.0,
+                "liquidity_source": str(row.get("liquidity_source") or ""),
+                "stage3_evidence_count": 0,
+                "stage3_score_capped": 0,
+                "primary_cluster_id": str(row.get("primary_cluster_id") or ""),
+                "stage2_stock_flow_score": 0.0,
+                "stage3_event_score": 0.0,
+                "stage4_timing_score": 0.0,
+                "stage5_risk_score": 0.0,
+            }
+            for row in stable_candidates
+        ]
     cand_rows = cand_rows_all[: max(1, int(top_n))]
     candidate_tickers = {
         str(r.get("ticker") or "")
@@ -1344,6 +1398,18 @@ GROUP BY cluster_id
         lines.append("- 장마감 수급(참고): 데이터 미수집/유효값 없음(당일 장마감 수급 해석 보류)")
     lines.extend(_market_direction_interpretation(kp, qp, flow_rows, stage2_debug))
     lines.append("")
+    if stable_candidates:
+        lines.append("<b>후보 액션 요약(직접조회)</b>")
+        for i, row in enumerate(stable_candidates[: max(1, int(top_n))], 1):
+            name = str(row.get("ticker_name") or row.get("ticker") or "")
+            ticker = str(row.get("ticker") or "")
+            action = str(row.get("action") or "-")
+            score = _float(row.get("total_score"), 0.0)
+            block_reason = str(row.get("absolute_block_reason") or "").strip()
+            lines.append(f"{i}. {name}({ticker}) - {action} / {score:.2f}")
+            if block_reason:
+                lines.append(f"   - 제약: {block_reason}")
+        lines.append("")
     lines.append("<b>🚀 유망주 요약</b>")
     if not cand_rows:
         lines.append("- 후보 데이터 없음")
@@ -1747,6 +1813,34 @@ ORDER BY action
     )
 
 
+def _build_notification_signature(decision_id: str, top_n: int) -> str:
+    try:
+        from query_decision_candidates import get_candidates as stable_get_candidates, get_decision as stable_get_decision
+    except Exception:
+        return ""
+
+    decision = stable_get_decision(decision_id)
+    candidates = stable_get_candidates(decision_id, max(1, int(top_n)))
+    payload = {
+        "absolute_block_reason": str(
+            ", ".join(str(x).strip() for x in (decision.get("absolute_block_reason") or []) if str(x).strip())
+            if isinstance(decision.get("absolute_block_reason"), list)
+            else (decision.get("absolute_block_reason") or "")
+        ),
+        "top_candidates": [
+            {
+                "ticker": str(row.get("ticker") or ""),
+                "action": str(row.get("action") or ""),
+                "block_reason": str(row.get("absolute_block_reason") or ""),
+                "fail_codes": str(row.get("fail_codes") or ""),
+            }
+            for row in candidates[: max(1, int(top_n))]
+        ],
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def resolve_decision_id(decision_id: str) -> str:
     if decision_id:
         return decision_id
@@ -1779,9 +1873,24 @@ def main() -> int:
         _log("dry-run 모드: 텔레그램 전송 스킵")
         return 0
 
+    signature = _build_notification_signature(decision_id, max(1, args.top_candidates))
+    state = _load_json(STATE_FILE)
+    if signature and state.get("signature") == signature:
+        _log("변화 없음: owner 텔레그램 전송 스킵")
+        return 0
+
     notify_html, notify_plain = _load_telegram_notify()
     ok = bool(notify_html(msg))
     if ok:
+        if signature:
+            _save_json(
+                STATE_FILE,
+                {
+                    "signature": signature,
+                    "decision_id": decision_id,
+                    "sent_at": dt.datetime.now().isoformat(timespec="seconds"),
+                },
+            )
         _log("텔레그램 전송 성공(HTML)")
         return 0
 
@@ -1789,12 +1898,30 @@ def main() -> int:
     plain_msg = _strip_html_for_plain(msg)
     ok_plain = bool(notify_plain(plain_msg))
     if ok_plain:
+        if signature:
+            _save_json(
+                STATE_FILE,
+                {
+                    "signature": signature,
+                    "decision_id": decision_id,
+                    "sent_at": dt.datetime.now().isoformat(timespec="seconds"),
+                },
+            )
         _log("텔레그램 전송 성공(plain fallback)")
         return 0
 
     compact_msg = _build_compact_message(decision_id)
     ok_compact = bool(notify_plain(compact_msg))
     if ok_compact:
+        if signature:
+            _save_json(
+                STATE_FILE,
+                {
+                    "signature": signature,
+                    "decision_id": decision_id,
+                    "sent_at": dt.datetime.now().isoformat(timespec="seconds"),
+                },
+            )
         _log("텔레그램 전송 성공(compact fallback)")
         return 0
 
