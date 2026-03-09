@@ -206,6 +206,36 @@ def data_jobs() -> list[dict]:
             "source": "legacy-crontab",
         },
         {
+            "name": "data-watchlist-refresh-20m",
+            "enabled": True,
+            "schedule": {"expr": "15,35,55 9-14 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && {py} {trading_scripts}/refresh_interest_watchlist.py '
+                    '--limit "${WATCHLIST_LIMIT:-30}" '
+                    '--source "${WATCHLIST_ACTIVE_SOURCE:-gpt54_shadow}" '
+                    '>> $HOME/.openclaw/logs/watchlist-refresh.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
+            "name": "data-watchlist-refresh-close-1515",
+            "enabled": True,
+            "schedule": {"expr": "15 15 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && {py} {trading_scripts}/refresh_interest_watchlist.py '
+                    '--limit "${WATCHLIST_LIMIT:-30}" '
+                    '--source "${WATCHLIST_ACTIVE_SOURCE:-gpt54_shadow}" '
+                    '>> $HOME/.openclaw/logs/watchlist-refresh.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "data-watchlist-run-health-20m",
             "enabled": True,
             "schedule": {"expr": "9,29,49 8-16 * * 1-5", "tz": "Asia/Seoul"},

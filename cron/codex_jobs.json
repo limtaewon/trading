@@ -497,6 +497,32 @@
       "source": "legacy-crontab"
     },
     {
+      "name": "data-watchlist-refresh-20m",
+      "enabled": true,
+      "schedule": {
+        "expr": "15,35,55 9-14 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_interest_watchlist.py --limit \"${WATCHLIST_LIMIT:-30}\" --source \"${WATCHLIST_ACTIVE_SOURCE:-gpt54_shadow}\" >> $HOME/.openclaw/logs/watchlist-refresh.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
+      "name": "data-watchlist-refresh-close-1515",
+      "enabled": true,
+      "schedule": {
+        "expr": "15 15 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/refresh_interest_watchlist.py --limit \"${WATCHLIST_LIMIT:-30}\" --source \"${WATCHLIST_ACTIVE_SOURCE:-gpt54_shadow}\" >> $HOME/.openclaw/logs/watchlist-refresh.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
       "name": "data-watchlist-shadow-gpt54-1615",
       "enabled": false,
       "schedule": {

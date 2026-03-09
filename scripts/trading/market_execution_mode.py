@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -103,9 +104,24 @@ def load_json_file(path: Path, default: Any) -> Any:
 
 def atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _parse_csv_tickers(raw: str) -> list[str]:

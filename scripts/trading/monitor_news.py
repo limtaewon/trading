@@ -67,6 +67,7 @@ CODEX_BIN_CANDIDATES = [
 ]
 # 정기 브리핑만 운영할 때를 기본값으로 둔다(필요 시 env=1로 재활성화).
 DOORAY_BREAKING_REPORT_ENABLED = os.environ.get("DOORAY_BREAKING_REPORT_ENABLED", "0") == "1"
+PUBLIC_BREAKING_TELEGRAM_ENABLED = os.environ.get("PUBLIC_BREAKING_TELEGRAM_ENABLED", "1") == "1"
 DOORAY_BREAKING_REPORT_SCRIPT = os.environ.get(
     "DOORAY_BREAKING_REPORT_SCRIPT",
     str(Path.home() / ".openclaw" / "scripts" / "trading" / "send_dooray_briefing.py"),
@@ -1368,7 +1369,7 @@ def main():
 
         # 4.5) 텔레그램 알림
         try:
-            from telegram_notify import notify
+            from telegram_notify import notify, notify_public
             tg_lines = [f"🚨 <b>속보 {len(breaking)}건 감지</b>", ""]
             for item in breaking:
                 imp = item.get("importance", 3)
@@ -1377,7 +1378,10 @@ def main():
                 tickers = ", ".join(ticker_names[:3]) or "-"
                 tg_lines.append(f"[{imp}] {title}")
                 tg_lines.append(f"  종목: {tickers}")
-            notify("\n".join(tg_lines))
+            tg_text = "\n".join(tg_lines)
+            notify(tg_text)
+            if PUBLIC_BREAKING_TELEGRAM_ENABLED:
+                notify_public(tg_text)
         except Exception as e:
             log.warning(f"텔레그램 전송 실패: {e}")
 
