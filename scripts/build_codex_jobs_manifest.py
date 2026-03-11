@@ -55,6 +55,25 @@ def data_jobs() -> list[dict]:
     cluster_limit = "10000"
     return [
         {
+            "name": "data-news-preopen-light",
+            "enabled": True,
+            "schedule": {"expr": "0 6 * * 1-5", "tz": "Asia/Seoul"},
+            "payload": {
+                "kind": "command",
+                "command": (
+                    f'{env} && MAX_QUERIES="${{PREOPEN_LIGHT_NEWS_MAX_QUERIES:-8}}" '
+                    f'NEWS_PER_QUERY="${{PREOPEN_LIGHT_NEWS_PER_QUERY:-12}}" '
+                    f'MAX_NEWS_TOTAL="${{PREOPEN_LIGHT_NEWS_MAX_TOTAL:-120}}" '
+                    f'BATCH_SIZE="${{PREOPEN_LIGHT_NEWS_BATCH_SIZE:-8}}" '
+                    f'REQUEST_DELAY="${{PREOPEN_LIGHT_NEWS_REQUEST_DELAY:-2}}" '
+                    f'NEWS_CODEX_TIMEOUT="${{PREOPEN_LIGHT_NEWS_CODEX_TIMEOUT:-45}}" '
+                    f'NEWS_CODEX_MAX_RETRIES="${{PREOPEN_LIGHT_NEWS_CODEX_MAX_RETRIES:-3}}" '
+                    f'{py} {trading_scripts}/collect_news.py morning >> {logs}/news-collector.log 2>&1'
+                ),
+            },
+            "source": "legacy-crontab",
+        },
+        {
             "name": "data-news-morning",
             "enabled": True,
             "schedule": {"expr": "0 7 * * 1-5", "tz": "Asia/Seoul"},

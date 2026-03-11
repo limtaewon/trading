@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -52,6 +53,12 @@ RECOVERABLE_OPENCLAW_ERROR_PATTERNS = (
     "rate limit",
     "too many requests",
     "quota exceeded",
+    "timed out after",
+    "timeout",
+    "gateway closed",
+    "abnormal closure",
+    "session file locked",
+    "no close frame",
 )
 
 
@@ -261,6 +268,81 @@ def _resolve_codex_fallback_bin(codex_bin: str) -> Optional[str]:
     return None
 
 
+def _terminate_process_group(proc: subprocess.Popen[str], grace_sec: float = 3.0) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        return
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    try:
+        proc.wait(timeout=max(0.1, grace_sec))
+        return
+    except Exception:
+        pass
+
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        return
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    try:
+        proc.wait(timeout=1.0)
+    except Exception:
+        pass
+
+
+def _run_process(
+    cmd: Sequence[str],
+    *,
+    input_text: Optional[str] = None,
+    timeout_sec: int,
+    cwd: Optional[str] = None,
+) -> subprocess.CompletedProcess[str]:
+    popen_kwargs: dict[str, object] = {
+        "text": True,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "cwd": cwd or None,
+    }
+    if input_text is not None:
+        popen_kwargs["stdin"] = subprocess.PIPE
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(list(cmd), **popen_kwargs)
+    try:
+        try:
+            stdout, stderr = proc.communicate(input=input_text, timeout=timeout_sec)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_group(proc)
+            stdout, stderr = proc.communicate()
+            raise RuntimeError(f"process timed out after {timeout_sec}s") from exc
+    except Exception:
+        if proc.poll() is None:
+            _terminate_process_group(proc)
+        raise
+
+    return subprocess.CompletedProcess(list(cmd), proc.returncode, stdout, stderr)
+
+
 def _run_openclaw_agent(
     prompt: str,
     timeout_sec: int,
@@ -282,12 +364,10 @@ def _run_openclaw_agent(
     if thinking:
         cmd.extend(["--thinking", thinking])
 
-    run = subprocess.run(
+    run = _run_process(
         cmd,
-        text=True,
-        capture_output=True,
-        timeout=timeout_sec + 20,
-        check=False,
+        input_text=None,
+        timeout_sec=timeout_sec + 20,
         cwd=workdir or None,
     )
     if run.returncode != 0:
@@ -341,13 +421,10 @@ def _run_codex_exec_fallback(
         if use_schema and output_schema_path and Path(output_schema_path).exists():
             cmd.extend(["--output-schema", output_schema_path])
         cmd.append("-")
-        run = subprocess.run(
+        run = _run_process(
             cmd,
-            input=prompt,
-            text=True,
-            capture_output=True,
-            timeout=max(timeout_sec, int(os.environ.get("CODEX_FALLBACK_TIMEOUT_SEC", "240"))),
-            check=False,
+            input_text=prompt,
+            timeout_sec=max(timeout_sec, int(os.environ.get("CODEX_FALLBACK_TIMEOUT_SEC", "240"))),
             cwd=workdir or None,
         )
         if run.returncode != 0:

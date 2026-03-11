@@ -380,6 +380,19 @@
       "source": "legacy-crontab"
     },
     {
+      "name": "data-news-preopen-light",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 6 * * 1-5",
+        "tz": "Asia/Seoul"
+      },
+      "payload": {
+        "kind": "command",
+        "command": "source \"$HOME/.openclaw/cron/codex_env.sh\" && MAX_QUERIES=\"${PREOPEN_LIGHT_NEWS_MAX_QUERIES:-8}\" NEWS_PER_QUERY=\"${PREOPEN_LIGHT_NEWS_PER_QUERY:-12}\" MAX_NEWS_TOTAL=\"${PREOPEN_LIGHT_NEWS_MAX_TOTAL:-120}\" BATCH_SIZE=\"${PREOPEN_LIGHT_NEWS_BATCH_SIZE:-8}\" REQUEST_DELAY=\"${PREOPEN_LIGHT_NEWS_REQUEST_DELAY:-2}\" NEWS_CODEX_TIMEOUT=\"${PREOPEN_LIGHT_NEWS_CODEX_TIMEOUT:-45}\" NEWS_CODEX_MAX_RETRIES=\"${PREOPEN_LIGHT_NEWS_CODEX_MAX_RETRIES:-3}\" /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1"
+      },
+      "source": "legacy-crontab"
+    },
+    {
       "name": "data-news-morning",
       "enabled": true,
       "schedule": {

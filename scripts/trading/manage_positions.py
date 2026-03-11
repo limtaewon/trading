@@ -13,6 +13,7 @@ Flow:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -44,6 +45,7 @@ STATE_ROOT = HOME / ".openclaw" / "state"
 POSITION_STATE_FILE = STATE_ROOT / "position_manager_state.json"
 POSITION_REVIEW_DIR = STATE_ROOT / "position_manager" / "reviews"
 POSITION_LATEST_FILE = STATE_ROOT / "position_manager" / "latest_review.json"
+POSITION_BRIEF_STATE_FILE = STATE_ROOT / "reporting" / "position_manager_digest.json"
 DYNAMIC_EXIT_STATE_FILE = STATE_ROOT / "stock_dynamic_exits.json"
 EXECUTION_MODE_STATE_FILE = STATE_ROOT / "market_execution_mode.json"
 PERSISTENT_MEMORY_PATH = HOME / ".openclaw" / "workspace" / "CODEX_PERSISTENT_MEMORY.md"
@@ -76,12 +78,17 @@ POSITION_MANAGER_MIN_CONF = max(0.4, min(0.95, float(os.getenv("POSITION_MANAGER
 POSITION_MANAGER_LLM_TIMEOUT_SEC = max(30, int(os.getenv("POSITION_MANAGER_LLM_TIMEOUT_SEC", "140")))
 POSITION_MANAGER_CACHE_TTL_SEC = max(0, int(os.getenv("POSITION_MANAGER_LLM_CACHE_TTL_SEC", "120")))
 POSITION_MANAGER_NOTIFY_TELEGRAM = os.getenv("POSITION_MANAGER_NOTIFY_TELEGRAM", "1") == "1"
+POSITION_MANAGER_NOTIFY_ONLY_ON_CHANGE = os.getenv("POSITION_MANAGER_NOTIFY_ONLY_ON_CHANGE", "1") == "1"
+POSITION_MANAGER_NOTIFY_PNL_STEP_PCT = max(0.1, float(os.getenv("POSITION_MANAGER_NOTIFY_PNL_STEP_PCT", "0.5")))
 POSITION_MANAGER_DEFAULT_TP = max(0.03, min(0.5, float(os.getenv("POSITION_MANAGER_DEFAULT_TP", "0.12"))))
 POSITION_MANAGER_DEFAULT_SL = float(os.getenv("POSITION_MANAGER_DEFAULT_SL", "-0.06"))
 if POSITION_MANAGER_DEFAULT_SL >= 0:
     POSITION_MANAGER_DEFAULT_SL = -abs(POSITION_MANAGER_DEFAULT_SL)
 POSITION_MANAGER_MIN_ORDER_QTY = max(1, int(os.getenv("POSITION_MANAGER_MIN_ORDER_QTY", "1")))
 POSITION_MANAGER_MARKET_VIEW_MAX_CHARS = max(120, int(os.getenv("POSITION_MANAGER_MARKET_VIEW_MAX_CHARS", "320")))
+OWNER_MANUAL_ACCUMULATION_STYLE = os.getenv("OWNER_MANUAL_ACCUMULATION_STYLE", "1") == "1"
+OWNER_LONG_TERM_TICKERS_RAW = os.getenv("OWNER_LONG_TERM_TICKERS", "017670")
+MANUAL_ONLY_TICKERS_RAW = os.getenv("MANUAL_ONLY_TICKERS", "")
 
 VALID_ACTIONS = {
     "HOLD",
@@ -181,11 +188,58 @@ def is_ticker(v: str) -> bool:
     return bool(re.fullmatch(r"\d{6}", v or ""))
 
 
+def parse_ticker_csv(raw: str) -> set[str]:
+    out: set[str] = set()
+    for token in str(raw or "").split(","):
+        s = token.strip()
+        if is_ticker(s):
+            out.add(s)
+    return out
+
+
 def normalize_text(s: Any, max_len: int = 280) -> str:
     txt = str(s or "").replace("\n", " ").strip()
     if len(txt) > max_len:
         txt = txt[:max_len]
     return txt
+
+
+OWNER_LONG_TERM_TICKERS = parse_ticker_csv(OWNER_LONG_TERM_TICKERS_RAW)
+MANUAL_ONLY_TICKERS = parse_ticker_csv(MANUAL_ONLY_TICKERS_RAW)
+
+
+ACTION_LABELS = {
+    "HOLD": "유지",
+    "REDUCE": "비중축소",
+    "EXIT": "전량정리",
+    "ADD": "추가매수",
+    "TIGHTEN_STOP": "손절기준 강화",
+    "TAKE_PROFIT_PARTIAL": "부분익절",
+    "NO_ACTION_REVIEW_LATER": "지금은 보류, 재점검",
+}
+
+BLOCK_LABELS = {
+    "LOW_CONFIDENCE": "확신도 부족",
+    "ADD_DISABLED": "추가매수 비활성",
+    "CLOSE_ONLY_ACTION_BLOCK": "청산 위주 모드",
+    "SHOCK_MODE_ADD_BLOCK": "충격장 추가매수 금지",
+    "SHOCK_MODE_PARTIAL_REMAP": "충격장 부분익절은 비중축소로 전환",
+    "RECOVERY_ADD_GATED": "회복장 추가매수 조건 미충족",
+    "COOLDOWN_ACTIVE": "쿨다운 적용 중",
+    "DAILY_ACTION_LIMIT": "당일 행동 한도 도달",
+    "NO_REENTRY_SAME_DAY": "당일 재진입 금지",
+    "MAX_ACTIONS_EXCEEDED": "행동 한도 초과",
+    "MANUAL_ONLY_TICKER": "수동 관리 종목",
+}
+
+RISK_FLAG_LABELS = {
+    "macro_stress": "전역 매크로 스트레스",
+    "near_overbought": "단기 과열",
+    "institutional_selling": "기관 매도 압력",
+    "recent_same_day_action": "당일 동일 종목 재조정 이력",
+    "below_ma20": "20일선 하회",
+    "technical_sell_signal": "기술 신호 약세",
+}
 
 
 def read_text_file(path: Path, max_chars: int = 12000) -> str:
@@ -198,6 +252,22 @@ def read_text_file(path: Path, max_chars: int = 12000) -> str:
         return txt.strip()
     except Exception:
         return ""
+
+
+def load_json_dict(path: Path) -> dict[str, Any]:
+    try:
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return raw
+    except Exception:
+        pass
+    return {}
+
+
+def save_json_dict(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def normalize_text_list(v: Any, max_items: int = 6, max_len: int = 160) -> list[str]:
@@ -213,6 +283,176 @@ def normalize_text_list(v: Any, max_items: int = 6, max_len: int = 160) -> list[
         if len(out) >= max_items:
             break
     return out
+
+
+def action_label(action: str) -> str:
+    return ACTION_LABELS.get(str(action or "").upper().strip(), str(action or "").upper().strip() or "유지")
+
+
+def block_label(code: str) -> str:
+    return BLOCK_LABELS.get(str(code or "").strip(), str(code or "").strip())
+
+
+def risk_flag_label(code: str) -> str:
+    return RISK_FLAG_LABELS.get(str(code or "").strip(), str(code or "").strip())
+
+
+def format_reason_snippet(text: Any, max_len: int = 120) -> str:
+    raw = normalize_text(text, max_len=max_len * 2)
+    txt = raw
+    for sep in (". ", "다. ", "; "):
+        if sep in raw:
+            txt = raw.split(sep, 1)[0].strip()
+            if not txt.endswith("다") and sep.strip().startswith("다"):
+                txt += "다"
+            break
+    txt = normalize_text(txt, max_len=max_len)
+    if not txt:
+        return "-"
+    return txt
+
+
+def humanize_evidence_ref(text: Any) -> str:
+    raw = normalize_text(text, max_len=120)
+    if not raw:
+        return ""
+    replacements = [
+        ("MARKET_REGIME.action_posture=defensive", "시장 방어 모드"),
+        ("MARKET_REGIME: action_posture=defensive", "시장 방어 모드"),
+        ("MARKET_REGIME: regime_label=SIDEWAYS, action_posture", "박스권 + 방어 모드"),
+        ("POLICY: allow_add=false", "자동 추가매수 비활성"),
+        ("POLICY.cooldown_min=45", "45분 쿨다운"),
+        ("do_not_overtrade=true", "과매매 방지"),
+        ("technical.signal=sell", "기술 신호 약세"),
+        ("current_price=", "현재가 "),
+        ("technical.ma20=", "20일선 "),
+        ("technical.rsi14=", "RSI "),
+        ("technical.change_pct=", "등락률 "),
+        ("technical.bb_pct=", "볼린저 위치 "),
+        ("technical.vol_ratio=", "거래량 배수 "),
+        ("flow.foreign_net_flow=", "외국인 순매수 "),
+        ("inst_net_flow=", "기관 순매수 "),
+        ("news.pos_cnt=", "긍정 뉴스 "),
+        ("neg_cnt=", "부정 뉴스 "),
+    ]
+    txt = raw
+    for src, dst in replacements:
+        txt = txt.replace(src, dst)
+    txt = txt.replace(" / ", ", ")
+    txt = txt.replace("  ", " ").strip(" ,")
+    return normalize_text(txt, max_len=64)
+
+
+def format_owner_style_note() -> str:
+    parts: list[str] = []
+    if OWNER_MANUAL_ACCUMULATION_STYLE:
+        parts.append("수동매매는 급락장에서 소액 분할 접근을 선호")
+        parts.append("자동매매는 평균단가 낮추기 금지(avg_down_block) 유지")
+    if OWNER_LONG_TERM_TICKERS:
+        parts.append(f"장기보유 관점 종목: {_display_long_term_names()}")
+    if MANUAL_ONLY_TICKERS:
+        parts.append(f"자동매매 제외 종목: {', '.join(sorted(MANUAL_ONLY_TICKERS))}")
+    return " | ".join(parts)
+
+
+def _display_long_term_names() -> str:
+    if not OWNER_LONG_TERM_TICKERS:
+        return ""
+    base_names = {
+        "017670": "SK텔레콤",
+        "005930": "삼성전자",
+        "000660": "SK하이닉스",
+    }
+    return ", ".join(base_names.get(ticker, ticker) for ticker in sorted(OWNER_LONG_TERM_TICKERS))
+
+
+def build_owner_style_prompt() -> str:
+    lines: list[str] = []
+    if OWNER_MANUAL_ACCUMULATION_STYLE:
+        lines.append("- 수동매매 선호: 급락장에서는 후보 종목을 소액 분할로 접근할 수 있다.")
+        lines.append("- 단, 자동매매 규칙은 별개다. avg_down_block=true 또는 allow_add=false면 자동 추가매수는 제안하지 마라.")
+        lines.append("- 자동매매가 ADD를 못 하더라도, 수동 관찰 메모가 필요하면 HOLD 또는 NO_ACTION_REVIEW_LATER로 남겨라.")
+    if OWNER_LONG_TERM_TICKERS:
+        lines.append(f"- 장기보유 관점 종목: {_display_long_term_names()}")
+        lines.append("- 장기보유 관점 종목은 단기 기술 약세만으로 성급히 EXIT/REDUCE 하지 말고, 뉴스/수급/추세 훼손 여부를 함께 보라.")
+    if MANUAL_ONLY_TICKERS:
+        lines.append(f"- 수동 관리 전용 종목: {', '.join(sorted(MANUAL_ONLY_TICKERS))}")
+        lines.append("- 수동 관리 전용 종목은 자동 주문 후보로 제안하지 말고 HOLD 또는 NO_ACTION_REVIEW_LATER로만 정리하라.")
+    return "\n".join(lines).strip()
+
+
+def build_position_digest_signature(
+    contexts: list[PositionContext],
+    action_rows: list[dict[str, Any]],
+    execution_mode: str,
+) -> tuple[str, dict[str, Any]]:
+    pnl_step = max(POSITION_MANAGER_NOTIFY_PNL_STEP_PCT, 0.1)
+    pnl_buckets: list[dict[str, Any]] = []
+    for c in sorted(contexts, key=lambda x: x.holding.ticker):
+        pnl = round(c.holding.pnl_rate, 3)
+        pnl_bucket = int(round(pnl / pnl_step))
+        pnl_buckets.append(
+            {
+                "ticker": c.holding.ticker,
+                "qty": int(c.holding.qty),
+                "pnl_bucket": pnl_bucket,
+                "pnl_rate": pnl,
+            }
+        )
+    actions = []
+    for row in sorted(action_rows, key=lambda x: str(x.get("ticker", ""))):
+        actions.append(
+            {
+                "ticker": str(row.get("ticker", "")),
+                "action": str(row.get("action", "")),
+                "qty": int(to_int(row.get("order_qty", 0), 0)),
+                "block_codes": [str(x) for x in (row.get("block_codes", []) if isinstance(row.get("block_codes"), list) else [])],
+            }
+        )
+    payload = {
+        "execution_mode": str(execution_mode or "normal"),
+        "pnl_step_pct": pnl_step,
+        "pnl_buckets": pnl_buckets,
+        "actions": actions,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest(), payload
+
+
+def should_send_position_brief_content(
+    action_rows: list[dict[str, Any]],
+    exec_result: dict[str, Any] | None,
+) -> bool:
+    actionable_actions = {"ADD", "REDUCE", "EXIT", "TAKE_PROFIT_PARTIAL"}
+    for row in action_rows:
+        action = str(row.get("action", "") or "").upper().strip()
+        if action in actionable_actions:
+            return True
+    if not isinstance(exec_result, dict):
+        return False
+    for key in ("attempted", "executed", "skipped"):
+        rows = exec_result.get(key, [])
+        if isinstance(rows, list) and rows:
+            return True
+    return False
+
+
+def should_send_position_brief(signature: str, snapshot: dict[str, Any]) -> bool:
+    if not POSITION_MANAGER_NOTIFY_ONLY_ON_CHANGE:
+        return True
+    prev = load_json_dict(POSITION_BRIEF_STATE_FILE)
+    prev_sig = str(prev.get("signature", "") or "")
+    if prev_sig and prev_sig == signature:
+        return False
+    save_json_dict(
+        POSITION_BRIEF_STATE_FILE,
+        {
+            "updated_at": ts_now_str(),
+            "signature": signature,
+            "snapshot": snapshot,
+        },
+    )
+    return True
 
 
 def load_execution_mode_state() -> dict[str, Any]:
@@ -774,6 +1014,7 @@ def build_llm_prompt(
     persistent_memory: str,
     heartbeat_text: str,
     soul_text: str,
+    owner_style_text: str,
 ) -> str:
     slim_positions: list[dict[str, Any]] = []
     for c in contexts:
@@ -880,6 +1121,7 @@ def build_llm_prompt(
         f"[PERSISTENT_MEMORY]\n{persistent_memory}\n\n"
         f"[HEARTBEAT]\n{heartbeat_text}\n\n"
         f"[SOUL]\n{soul_text}\n\n"
+        f"[OWNER_STYLE]\n{owner_style_text}\n\n"
         f"[REVIEW_ID]\n{review_id}\n\n"
         f"[MARKET_REGIME]\n{json.dumps(regime, ensure_ascii=False)}\n\n"
         f"[POLICY]\n{json.dumps(policy, ensure_ascii=False)}\n\n"
@@ -1077,6 +1319,14 @@ def normalize_action_plans(
         thesis_update = normalize_text(src.get("thesis_update", ""), 240)
 
         block_codes: list[str] = []
+
+        if ticker in MANUAL_ONLY_TICKERS and action in {"ADD", "REDUCE", "EXIT", "TAKE_PROFIT_PARTIAL"}:
+            block_codes.append("MANUAL_ONLY_TICKER")
+            action = "NO_ACTION_REVIEW_LATER"
+            size = 0.0
+            if not thesis_update:
+                thesis_update = "manual_only_ticker"
+            next_trigger = next_trigger or "manual_review"
 
         if conf < POSITION_MANAGER_MIN_CONF and action in {"ADD", "REDUCE", "EXIT", "TAKE_PROFIT_PARTIAL"}:
             block_codes.append("LOW_CONFIDENCE")
@@ -1417,6 +1667,57 @@ def send_telegram(text: str) -> None:
         return
 
 
+def _brief_market_mode_line(execution_mode: str, allow_add: bool) -> str:
+    mode_name = str(execution_mode or "normal").strip().lower()
+    mode_map = {
+        "shock": "충격장 방어 모드",
+        "recovery": "회복장 신중 모드",
+        "close_only": "청산 우선 모드",
+        "normal": "일반 모드",
+    }
+    extras = []
+    extras.append("자동 추가매수 허용" if allow_add else "자동 추가매수 금지")
+    if OWNER_MANUAL_ACCUMULATION_STYLE:
+        extras.append("수동은 급락장 소액 분할 접근 가능")
+    return f"{mode_map.get(mode_name, mode_name)} | {' | '.join(extras)}"
+
+
+def _format_action_line(row: dict[str, Any]) -> list[str]:
+    ticker_name = normalize_text(row.get("ticker_name", ""), 48) or "해당 종목"
+    ticker = normalize_text(row.get("ticker", ""), 12)
+    action = str(row.get("action", "") or "").upper().strip()
+    action_txt = action_label(action)
+    qty = to_int(row.get("order_qty", 0), 0)
+    conf = to_float(row.get("confidence", 0), 0.0)
+    reason = format_reason_snippet(row.get("reasoning", ""), max_len=180)
+    block_codes = [block_label(x) for x in (row.get("block_codes", []) if isinstance(row.get("block_codes"), list) else []) if str(x or "").strip()]
+    risk_flags = [risk_flag_label(x) for x in (row.get("risk_flags", []) if isinstance(row.get("risk_flags"), list) else []) if str(x or "").strip()]
+    refs = row.get("evidence_refs", []) if isinstance(row.get("evidence_refs"), list) else []
+    ref_items = []
+    for ref in refs:
+        human = humanize_evidence_ref(ref)
+        if human and human not in ref_items:
+            ref_items.append(human)
+        if len(ref_items) >= 2:
+            break
+    ref_text = " / ".join(ref_items)
+    lines = [
+        f"- {ticker_name}: {action_txt}"
+        + (f" {qty}주" if qty > 0 and action in {"REDUCE", "EXIT", "ADD", "TAKE_PROFIT_PARTIAL"} else "")
+        + f" | 신뢰도 {conf:.2f}"
+    ]
+    lines.append(f"  이유: {reason}")
+    if risk_flags:
+        lines.append(f"  리스크: {', '.join(risk_flags[:3])}")
+    if block_codes:
+        lines.append(f"  제한: {', '.join(block_codes[:3])}")
+    if ref_text:
+        lines.append(f"  근거: {ref_text}")
+    if ticker in OWNER_LONG_TERM_TICKERS:
+        lines.append("  메모: 장기보유 관점 종목이라 단기 흔들림보다 추세/뉴스 훼손 여부를 더 우선 확인")
+    return lines
+
+
 def build_brief(
     review_id: str,
     regime_line: str,
@@ -1424,28 +1725,49 @@ def build_brief(
     action_rows: list[dict[str, Any]],
     exec_result: dict[str, Any] | None,
     dry_run: bool,
+    execution_mode: str,
+    allow_add: bool,
 ) -> str:
     lines: list[str] = []
     lines.append("[포지션매니저 브리핑]")
     lines.append(f"- review_id: {review_id}")
-    lines.append(f"- llm_status: {llm_status}")
-    lines.append(f"- dry_run: {str(dry_run).lower()}")
-    lines.append(f"- market: {normalize_text(regime_line, 180)}")
+    lines.append(f"- 시장: {normalize_text(regime_line, 200)}")
+    lines.append(f"- 자동매매 원칙: {_brief_market_mode_line(execution_mode=execution_mode, allow_add=allow_add)}")
+    lines.append(f"- LLM 상태: {llm_status} | dry_run={str(dry_run).lower()}")
 
-    actionable = [r for r in action_rows if str(r.get("action", "")) in {"ADD", "REDUCE", "EXIT", "TAKE_PROFIT_PARTIAL"}]
-    lines.append(f"- actionables: {len(actionable)}")
-    for i, r in enumerate(sorted(actionable, key=lambda x: to_float(x.get("confidence", 0), 0.0), reverse=True)[:5], 1):
-        lines.append(
-            f"  {i}) {r.get('ticker_name','')}({r.get('ticker','')}) {r.get('action','')} "
-            f"conf={to_float(r.get('confidence',0),0.0):.2f} qty={to_int(r.get('order_qty',0),0)}"
-        )
+    actionable = [r for r in action_rows if str(r.get("action", "")).upper() in {"ADD", "REDUCE", "EXIT", "TAKE_PROFIT_PARTIAL"}]
+    deferred = [r for r in action_rows if str(r.get("action", "")).upper() in {"NO_ACTION_REVIEW_LATER", "TIGHTEN_STOP"}]
+    top_actionable = sorted(actionable, key=lambda x: to_float(x.get("confidence", 0), 0.0), reverse=True)[:3]
+    top_deferred = sorted(deferred, key=lambda x: to_float(x.get("confidence", 0), 0.0), reverse=True)[:2]
+
+    if top_actionable:
+        lines.append("")
+        lines.append("지금 해야 할 행동")
+        for row in top_actionable:
+            lines.extend(_format_action_line(row))
+            lines.append("")
+    else:
+        lines.append("")
+        lines.append("지금 바로 줄이거나 정리할 행동은 없습니다.")
+
+    if top_deferred:
+        lines.append("지금은 보류하고 다시 볼 종목")
+        for row in top_deferred:
+            lines.extend(_format_action_line(row))
+            lines.append("")
+
+    style_note = format_owner_style_note()
+    if style_note:
+        lines.append(f"수동매매 메모: {style_note}")
 
     if isinstance(exec_result, dict):
         lines.append(
-            f"- execution: attempted={len(exec_result.get('attempted', []))} "
-            f"executed={len(exec_result.get('executed', []))} skipped={len(exec_result.get('skipped', []))}"
+            "실행 결과: "
+            f"시도 {len(exec_result.get('attempted', []))}건 / "
+            f"체결 {len(exec_result.get('executed', []))}건 / "
+            f"스킵 {len(exec_result.get('skipped', []))}건"
         )
-    return "\n".join(lines)
+    return "\n".join([line.rstrip() for line in lines]).strip()
 
 
 def persist_review_files(review_id: str, payload: dict[str, Any], review_meta: dict[str, Any]) -> None:
@@ -1687,6 +2009,7 @@ def main() -> int:
             persistent_memory=persistent_memory,
             heartbeat_text=heartbeat_text,
             soul_text=soul_text,
+            owner_style_text=build_owner_style_prompt(),
         )
         prompt_for_llm = prompt
         if dump_prompt_path:
@@ -1777,8 +2100,20 @@ def main() -> int:
         action_rows=action_rows,
         exec_result=exec_result,
         dry_run=dry_run,
+        execution_mode=mode_name,
+        allow_add=allow_add,
     )
-    send_telegram(brief)
+    brief_signature, brief_snapshot = build_position_digest_signature(
+        contexts=contexts,
+        action_rows=action_rows,
+        execution_mode=mode_name,
+    )
+    should_notify = should_send_position_brief_content(
+        action_rows=action_rows,
+        exec_result=exec_result,
+    )
+    if should_notify and should_send_position_brief(brief_signature, brief_snapshot):
+        send_telegram(brief)
 
     result = {
         "status": "ok",

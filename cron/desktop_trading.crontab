@@ -31,6 +31,9 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # data-watchlist-retention-daily
 20 6 * * * source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/prune_interest_watchlist.py --retention-days "${WATCHLIST_RETENTION_DAYS:-21}" --run-retention-days "${WATCHLIST_RUN_RETENTION_DAYS:-45}" >> $HOME/.openclaw/logs/watchlist-retention.log 2>&1
 
+# data-news-preopen-light
+0 6 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && MAX_QUERIES="${PREOPEN_LIGHT_NEWS_MAX_QUERIES:-8}" NEWS_PER_QUERY="${PREOPEN_LIGHT_NEWS_PER_QUERY:-12}" MAX_NEWS_TOTAL="${PREOPEN_LIGHT_NEWS_MAX_TOTAL:-120}" BATCH_SIZE="${PREOPEN_LIGHT_NEWS_BATCH_SIZE:-8}" REQUEST_DELAY="${PREOPEN_LIGHT_NEWS_REQUEST_DELAY:-2}" NEWS_CODEX_TIMEOUT="${PREOPEN_LIGHT_NEWS_CODEX_TIMEOUT:-45}" NEWS_CODEX_MAX_RETRIES="${PREOPEN_LIGHT_NEWS_CODEX_MAX_RETRIES:-3}" /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1
+
 # data-news-morning
 0 7 * * 1-5 source "$HOME/.openclaw/cron/codex_env.sh" && /usr/bin/python3 $HOME/.openclaw/scripts/trading/collect_news.py morning >> $HOME/.openclaw/logs/news-collector.log 2>&1
 
